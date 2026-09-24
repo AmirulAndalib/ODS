@@ -66,6 +66,14 @@ def test_key_sign_in_sets_a_private_host_only_session(test_client):
     assert ds.session_is_valid(_set_cookies(resp)[COOKIE].value)
 
 
+def test_https_terminator_sets_secure_session_cookie(test_client):
+    response = test_client.post("/api/auth/dashboard-session/login",
+                                json={"key": security.DASHBOARD_API_KEY},
+                                headers={"X-Forwarded-Proto": "https"})
+    assert response.status_code == 200
+    assert _set_cookies(response)[COOKIE]["secure"] is True
+
+
 @pytest.mark.parametrize("payload", [
     {"key": "not-the-dashboard-key"},
     {"token": "not-a-real-link"},

@@ -4,7 +4,7 @@
   position:fixed;
   inset:0;
   z-index:80;
-  overflow:hidden;
+  overflow:auto;
   --navigation-width:248px;
   color:rgb(var(--theme-text));
   font-family:Inter,ui-sans-serif,system-ui,sans-serif;
@@ -101,7 +101,7 @@
 .ods-signin-field input {
   flex:1;
   min-width:0;
-  height:34px;
+  height:44px;
   padding:0;
   border:0;
   outline:0;
@@ -120,8 +120,8 @@
 .ods-signin-submit {
   display:grid;
   place-items:center;
-  width:34px;
-  height:34px;
+  width:44px;
+  height:44px;
   flex-shrink:0;
   padding:0;
   border:0;
@@ -136,7 +136,10 @@
 .ods-signin-submit:focus-visible { outline:2px solid #999fa9; outline-offset:3px; }
 
 .ods-signin-message { margin:12px 2px 0; color:rgb(var(--theme-text-secondary)); line-height:1.5; }
-.ods-signin-hint { margin:18px 0 0; color:rgb(var(--theme-text-muted)); font-size:11.5px; line-height:1.6; }
+.ods-signin-help { margin-top:18px; color:rgb(var(--theme-text-secondary)); font-size:12px; }
+.ods-signin-help summary { cursor:pointer; }
+.ods-signin-help summary:focus-visible { outline:2px solid currentColor; outline-offset:4px; border-radius:4px; }
+.ods-signin-hint { margin:10px 0 0; color:rgb(var(--theme-text-secondary)); font-size:11.5px; line-height:1.6; }
 .ods-signin-hint code {
   padding:1px 5px;
   border-radius:5px;
@@ -166,3 +169,6 @@
   .ods-signin-veil { background:rgb(var(--theme-bg) / .88); }
   .ods-signin-card { background:rgb(var(--theme-card) / .96); }
 }
+
+.ods-signout-error { position:fixed; z-index:100; top:16px; left:50%; transform:translateX(-50%); max-width:calc(100% - 32px); padding:12px 18px; border-radius:14px; color:rgb(var(--theme-text)); background:rgb(var(--theme-card) / .94); border:1px solid rgb(var(--theme-text) / .15); }
+@media (max-height:480px) { .ods-signin-veil { position:relative; min-height:100%; } }

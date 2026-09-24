@@ -741,9 +741,9 @@ def test_public_chat_redirect_override_wins_over_service_public_url(
 ):
     monkeypatch.setenv("ODS_PUBLIC_URL", "https://ods.example.test")
     monkeypatch.setenv("ODS_CHAT_PUBLIC_URL", "https://chat-override.example.test")
-    magic_link_module.SERVICES["open-webui"] = {
+    monkeypatch.setitem(magic_link_module.SERVICES, "open-webui", {
         "public_url": "https://chat-service.example.test",
-    }
+    })
 
     gen = magic_link_client.post(
         "/api/auth/magic-link/generate",
@@ -765,9 +765,9 @@ def test_public_hermes_redirect_override_wins_over_service_public_url(
 ):
     monkeypatch.setenv("ODS_PUBLIC_URL", "https://ods.example.test")
     monkeypatch.setenv("ODS_HERMES_PUBLIC_URL", "https://hermes-override.example.test")
-    magic_link_module.SERVICES["hermes-proxy"] = {
+    monkeypatch.setitem(magic_link_module.SERVICES, "hermes-proxy", {
         "public_url": "https://hermes-service.example.test",
-    }
+    })
 
     gen = magic_link_client.post(
         "/api/auth/magic-link/generate",

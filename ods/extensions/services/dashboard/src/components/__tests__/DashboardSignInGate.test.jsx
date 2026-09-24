@@ -115,6 +115,18 @@ describe('DashboardSignInGate', () => {
     expect(fetchMock).toHaveBeenLastCalledWith('/api/auth/dashboard-session/logout', { method: 'POST', credentials: 'same-origin' })
   })
 
+  it.each(['network', 'server'])('does not claim sign-out succeeded after a %s failure', async failure => {
+    fetchMock.mockResolvedValueOnce(json({ signedIn: true, session: true }))
+    if (failure === 'network') fetchMock.mockRejectedValueOnce(new Error('offline'))
+    else fetchMock.mockResolvedValueOnce(json({}, 503))
+    renderGate()
+    fireEvent.click(await screen.findByRole('button', { name: 'Sign out' }))
+    expect(await screen.findByRole('alert')).toHaveTextContent('Could not sign out')
+    expect(screen.getByText('Dashboard content')).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Sign out' })).toBeInTheDocument()
+    expect(screen.queryByText('You signed out of this browser.')).not.toBeInTheDocument()
+  })
+
   it('never gates ODS Talk, which has its own session', async () => {
     window.history.replaceState(null, '', '/talk')
     renderGate()

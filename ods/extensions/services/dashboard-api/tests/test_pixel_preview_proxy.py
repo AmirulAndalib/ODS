@@ -47,12 +47,20 @@ def test_preview_keeps_only_edge_csp_and_portal_policy_stays_strict(tmp_path):
     with socket.socket() as sock:
         sock.bind(("127.0.0.1", 0))
         port = sock.getsockname()[1]
+    with socket.socket() as sock:
+        sock.bind(("127.0.0.1", 0))
+        network_port = sock.getsockname()[1]
     class Gate(http.server.BaseHTTPRequestHandler):
-        # Stand-in for dashboard-api's session check: nobody has a session.
+        # Session cryptography is covered separately; this fixture exercises
+        # nginx's real location selection and auth subrequest enforcement.
         def do_GET(self):
             observed.append((self.path, self.headers.get("Host"), self.headers.get("Authorization")))
-            self.send_response(401)
+            verifying = self.path == "/api/auth/dashboard-session/verify"
+            authenticated = self.headers.get("Cookie") == "ods-dashboard-session=fixture-valid"
+            self.send_response((204 if authenticated else 401) if verifying else 200)
             self.end_headers()
+
+        do_POST = do_GET
 
         def log_message(self, *args):
             pass
@@ -63,7 +71,7 @@ def test_preview_keeps_only_edge_csp_and_portal_policy_stays_strict(tmp_path):
     template = (services / "dashboard/nginx.conf").read_text()
     template = template.replace("listen 3001;", f"listen 127.0.0.1:{port};")
     template = template.replace("listen [::]:3001;", "# no IPv6 listener in fixture")
-    template = template.replace("listen 3011;", "# no network listener in fixture")
+    template = template.replace("listen 3011;", f"listen 127.0.0.1:{network_port};")
     template = template.replace("listen [::]:3011;", "# no IPv6 network listener in fixture")
     # The fixture listener plays the loopback-published port 3001.
     template = template.replace("__ODS_LOCAL_LISTENER__", str(port))
@@ -81,10 +89,13 @@ def test_preview_keeps_only_edge_csp_and_portal_policy_stays_strict(tmp_path):
     process = subprocess.Popen([nginx, "-p", str(tmp_path), "-c", str(config),
                                 "-g", "daemon off;"], stdout=log, stderr=log)
 
-    def request(path, host=None):
-        connection = http.client.HTTPConnection("127.0.0.1", port, timeout=3)
+    def request(path, host=None, headers=None, destination=None, method="GET"):
+        connection = http.client.HTTPConnection("127.0.0.1", destination or port, timeout=3)
         try:
-            connection.request("GET", path, headers={"Host": host} if host else {})
+            request_headers = dict(headers or {})
+            if host:
+                request_headers["Host"] = host
+            connection.request(method, path, headers=request_headers)
             response = connection.getresponse()
             return response.status, response.getheaders(), response.read()
         finally:
@@ -123,6 +134,32 @@ def test_preview_keeps_only_edge_csp_and_portal_policy_stays_strict(tmp_path):
         assert ("x-ods-sign-in", "required") in [(k.lower(), v) for k, v in headers]
         assert [call for call in observed if call[0].startswith("/preview/")] == edge_calls
         assert ("/api/auth/dashboard-session/verify", "dashboard.ods.local", None) in observed
+
+        # Every credential-adding location refuses remote requests, including
+        # exact and regex locations that could override the generic API gate.
+        paths = ["/api/status", "/api/templates/example/apply", "/api/models/example/load",
+                 "/api/pixel/chat/stream", "/api/pixel/access-mode", "/api/models/recovery",
+                 "/api/extensions/example/update", "/api/extensions/example/rollback",
+                 "/api/auth/admin-session", "/api/auth/dashboard-session/link"]
+        for path in paths:
+            before = len(observed)
+            assert request(path, host="dashboard.ods.local", method="POST")[0] == 401, path
+            assert all(call[0] == "/api/auth/dashboard-session/verify" and call[2] is None
+                       for call in observed[before:]), path
+            assert request(path, host="localhost", destination=network_port)[0] == 401, path
+            assert request(path, host="dashboard.ods.local", destination=network_port,
+                           headers={"Cookie": "ods-dashboard-session=fixture-valid"})[0] == 200, path
+            assert (path, "dashboard.ods.local", "Bearer fixture-only-key") in observed
+
+        for header in ("X-Forwarded-For", "X-Forwarded-Host", "X-Forwarded-Proto",
+                       "Forwarded", "X-Real-IP", "Via"):
+            assert request("/api/status", host="localhost", headers={header: "spoof"})[0] == 401
+        assert request("/api/status", host="localhost.evil.test")[0] == 401
+        assert request("/_ods_dashboard_gate")[0] == 404
+        # Public login and Talk never receive the server credential.
+        for path in ("/api/auth/dashboard-session/login", "/api/auth/dashboard-session/logout", "/api/talk/health"):
+            assert request(path, host="dashboard.ods.local", destination=network_port)[0] == 200
+            assert (path, "dashboard.ods.local", None) in observed
     finally:
         process.terminate()
         process.wait(timeout=5)

@@ -156,14 +156,16 @@ def dashboard_login(request: Request, payload: Any = Body(default=None)) -> JSON
         raise HTTPException(status_code=401, detail=detail)
 
     logger.info("dashboard sign-in accepted method=%s client=%s", kind, client)
-    response = JSONResponse({"signedIn": True})
+    response = JSONResponse({"signedIn": True}, headers={"Cache-Control": "no-store"})
     response.set_cookie(
         key=SESSION_COOKIE_NAME,
         value=issue_session(now),
         max_age=SESSION_TTL_SECONDS,
         httponly=True,
         samesite="strict",
-        secure=request.url.scheme == "https",
+        # nginx overwrites this header with the effective transport scheme.
+        # A direct caller claiming HTTPS can only request a stricter cookie.
+        secure=request.url.scheme == "https" or request.headers.get("x-forwarded-proto", "").lower() == "https",
         path="/",
     )
     return response
@@ -171,15 +173,16 @@ def dashboard_login(request: Request, payload: Any = Body(default=None)) -> JSON
 
 @router.post("/api/auth/dashboard-session/logout")
 def dashboard_logout() -> JSONResponse:
-    response = JSONResponse({"signedIn": False})
+    response = JSONResponse({"signedIn": False}, headers={"Cache-Control": "no-store"})
     response.delete_cookie(SESSION_COOKIE_NAME, path="/", httponly=True, samesite="strict")
     return response
 
 
 @router.post("/api/auth/dashboard-session/link", dependencies=[Depends(verify_api_key)])
-def dashboard_login_link() -> dict:
+def dashboard_login_link(response: Response) -> dict:
     """One-time sign-in token for ``ods dashboard-login``. It travels in the
     URL fragment (``#ods-login=``), so it never reaches server or proxy logs."""
+    response.headers["Cache-Control"] = "no-store"
     token = secrets.token_urlsafe(32)
     now = time.time()
     with _LOCK:

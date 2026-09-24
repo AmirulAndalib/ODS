@@ -121,7 +121,13 @@ export default function DashboardSignInGate({ children }) {
   }, [bypass, state])
 
   const signOut = useCallback(async () => {
-    await fetch('/api/auth/dashboard-session/logout', { method: 'POST', credentials: 'same-origin' }).catch(() => {})
+    try {
+      const response = await fetch('/api/auth/dashboard-session/logout', { method: 'POST', credentials: 'same-origin' })
+      if (!response.ok) throw new Error('Sign-out rejected')
+    } catch {
+      setMessage('Could not sign out. Check the connection and try again.')
+      return
+    }
     setSession(false)
     setMessage('You signed out of this browser.')
     setState('sign-in')
@@ -131,6 +137,7 @@ export default function DashboardSignInGate({ children }) {
   if (state === 'sign-in') return <SignInScreen message={message} onSubmit={key => signIn({ key })} />
   return (
     <DashboardSessionContext.Provider value={{ session, signOut }}>
+      {message && <p role="alert" className="ods-signout-error">{message}</p>}
       {children}
     </DashboardSessionContext.Provider>
   )
@@ -168,7 +175,7 @@ function SignInScreen({ message, onSubmit }) {
         <form className="ods-signin-card" onSubmit={submit} aria-labelledby="ods-signin-title">
           <ODSLogo />
           <h1 id="ods-signin-title">Sign in to ODS</h1>
-          <p className="ods-signin-lede">This browser isn&apos;t on the ODS machine. Enter your dashboard key to continue.</p>
+          <p className="ods-signin-lede">Enter your dashboard key to continue.</p>
           <div className="ods-signin-field">
             <input
               type="password"
@@ -186,10 +193,13 @@ function SignInScreen({ message, onSubmit }) {
             </button>
           </div>
           {message && <p role="alert" className="ods-signin-message">{message}</p>}
-          <p className="ods-signin-hint">
+          <details className="ods-signin-help">
+            <summary>Need help signing in?</summary>
+            <p className="ods-signin-hint">
             For a one-click link, run <code>ods dashboard-login</code> on the ODS machine.
             The key is <code>DASHBOARD_API_KEY</code> in its <code>.env</code>.
-          </p>
+            </p>
+          </details>
         </form>
       </div>
     </div>

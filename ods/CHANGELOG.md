@@ -16,6 +16,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - Chat-only guest invites no longer set the `ods-session` cookie, so they
   cannot open ODS Talk or pass the optional Hermes gate. Owner cards and
   Hermes invites are unchanged.
+- Previously issued ODS session cookies are invalidated at upgrade, including
+  unexpired chat-only guest cookies. Owners renew through the existing owner
+  card or authenticated dashboard flow; default direct Hermes access is unchanged.
 
 ## [3.0.0] - 2026-09-24
 
