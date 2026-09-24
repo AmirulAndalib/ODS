@@ -65,7 +65,7 @@ The installer's first-boot flow handles both. If you're not using the installer,
 
 - `dashboard-api`: API key (`DASHBOARD_API_KEY`)
 - Open WebUI: its own auth (`WEBUI_AUTH=true` is selected when the installer enables this LAN proxy)
-- Dashboard: the proxy uses the dashboard's network listener (container port 3011), where the admin API always requires dashboard sign-in. Sign in once per browser (30 days) with the dashboard key or a one-time link from `ods dashboard-login`.
+- Dashboard: the proxy uses the dashboard's network listener (container port 3011), where the admin API always requires dashboard sign-in. Sign in once per browser (30 days) with your chosen password. Run `ods dashboard-login` on the ODS machine to set up or recover it with a one-time link.
 - ODS Talk: signed `ods-session` cookie from owner-card redemption; no dashboard admin API control
 - `hermes-proxy`: Caddy `forward_auth` against `dashboard-api/api/auth/verify-session` (signed-cookie check)
 

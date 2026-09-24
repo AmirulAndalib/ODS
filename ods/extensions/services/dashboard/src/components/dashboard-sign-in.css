@@ -172,3 +172,8 @@
 
 .ods-signout-error { position:fixed; z-index:100; top:16px; left:50%; transform:translateX(-50%); max-width:calc(100% - 32px); padding:12px 18px; border-radius:14px; color:rgb(var(--theme-text)); background:rgb(var(--theme-card) / .94); border:1px solid rgb(var(--theme-text) / .15); }
 @media (max-height:480px) { .ods-signin-veil { position:relative; min-height:100%; } }
+
+.ods-signin-confirm { margin-top:10px; padding-right:16px; }
+
+.ods-signin-later { margin:12px 0 0; padding:8px; min-height:44px; border:0; background:transparent; color:rgb(var(--theme-text-secondary)); font:inherit; cursor:pointer; }
+.ods-signin-later:focus-visible { outline:2px solid currentColor; outline-offset:2px; border-radius:8px; }

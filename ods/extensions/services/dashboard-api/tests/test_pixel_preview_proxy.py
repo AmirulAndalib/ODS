@@ -140,7 +140,7 @@ def test_preview_keeps_only_edge_csp_and_portal_policy_stays_strict(tmp_path):
         paths = ["/api/status", "/api/templates/example/apply", "/api/models/example/load",
                  "/api/pixel/chat/stream", "/api/pixel/access-mode", "/api/models/recovery",
                  "/api/extensions/example/update", "/api/extensions/example/rollback",
-                 "/api/auth/admin-session", "/api/auth/dashboard-session/link"]
+                 "/api/auth/admin-session", "/api/auth/dashboard-session/password", "/api/auth/dashboard-session/link"]
         for path in paths:
             before = len(observed)
             assert request(path, host="dashboard.ods.local", method="POST")[0] == 401, path

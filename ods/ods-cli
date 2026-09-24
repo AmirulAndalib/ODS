@@ -6703,7 +6703,7 @@ ${CYAN}Model Commands:${NC}
   model swap <tier>   Switch to a different model tier
 
 ${CYAN}Dashboard Sign-in:${NC}
-  dashboard-login     Print a one-time link that signs another device in
+  dashboard-login     Set up or recover your dashboard password with a one-time link
                       (http://localhost on this machine never asks)
 
 ${CYAN}Remote Provider Commands:${NC}
@@ -6846,7 +6846,9 @@ cmd_dashboard_login() {
     device="$(_env_get_raw ODS_DEVICE_NAME)"
     [[ "$device" =~ ^[A-Za-z0-9-]+$ ]] || device="ods"
 
-    echo "One-time dashboard sign-in link (works once, expires in 10 minutes):"
+    echo "One-time dashboard recovery link (works once, expires in 10 minutes):"
+    echo "Open the link to choose your own password. No old password is required."
+    echo "  http://localhost:${port}/${fragment}"
     if _ods_cli_proxy_enabled; then
         echo "  http://dashboard.${device}.local/${fragment}"
     fi

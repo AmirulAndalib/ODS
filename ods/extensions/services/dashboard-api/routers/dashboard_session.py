@@ -8,10 +8,12 @@ forwarding headers. Every other request (LAN mode, ODS proxy, a reverse proxy
 or Tailscale Serve in front of localhost, a DNS-rebinding page) must first
 present the signed ``ods-dashboard-session`` cookie issued here.
 
-Sign-in accepts either the dashboard key itself or a one-time link minted by
+Sign-in accepts a user-chosen password or a one-time recovery link minted by
 ``ods dashboard-login`` (``POST /api/auth/dashboard-session/link``, which needs
 the key). Sessions are stateless and signed with a key derived from
-``DASHBOARD_API_KEY``: rotating that key signs every device out.
+``DASHBOARD_API_KEY`` and the password revision: replacing the password or
+rotating that key signs every device out. Direct API-key login remains for
+internal compatibility; the browser never asks users to copy the server key.
 
 This cookie is deliberately separate from ``ods-session`` (magic links, ODS
 Talk, the optional Hermes gate). It is host-only and ``SameSite=Strict``, so it
@@ -28,12 +30,12 @@ import logging
 import secrets
 import threading
 import time
-from typing import Any
+from typing import Annotated, Any
 
+import dashboard_password
+import security
 from fastapi import APIRouter, Body, Depends, HTTPException, Request, Response
 from fastapi.responses import JSONResponse
-
-import security
 from security import verify_api_key
 
 logger = logging.getLogger(__name__)
@@ -61,7 +63,8 @@ def _b64u(data: bytes) -> str:
 
 def _signing_key() -> bytes:
     return hmac.new(
-        security.DASHBOARD_API_KEY.encode("utf-8"), b"ods-dashboard-session/v1", hashlib.sha256
+        security.DASHBOARD_API_KEY.encode("utf-8"),
+        b"ods-dashboard-session/v1:" + dashboard_password.revision().encode("ascii"), hashlib.sha256
     ).digest()
 
 
@@ -110,10 +113,10 @@ def _consume_login_link(token: str, now: float) -> bool:
 
 def _credential(payload: Any) -> tuple[str, str]:
     if not isinstance(payload, dict) or len(payload) != 1:
-        raise HTTPException(status_code=422, detail="Send either the dashboard key or a sign-in link token.")
+        raise HTTPException(status_code=422, detail="Send a password or a sign-in link token.")
     kind, value = next(iter(payload.items()))
-    if kind not in ("key", "token") or not isinstance(value, str) or not 0 < len(value) <= _MAX_CREDENTIAL_LENGTH:
-        raise HTTPException(status_code=422, detail="Send either the dashboard key or a sign-in link token.")
+    if kind not in ("password", "key", "token") or not isinstance(value, str) or not 0 < len(value) <= _MAX_CREDENTIAL_LENGTH:
+        raise HTTPException(status_code=422, detail="Send a password or a sign-in link token.")
     return kind, value
 
 
@@ -132,31 +135,41 @@ def dashboard_session_status(request: Request) -> dict:
     return {
         "signedIn": True,
         "session": session_is_valid(request.cookies.get(SESSION_COOKIE_NAME, "")),
+        "passwordConfigured": dashboard_password.record() is not None,
     }
 
 
 @router.post("/api/auth/dashboard-session/login")
-def dashboard_login(request: Request, payload: Any = Body(default=None)) -> JSONResponse:
+def dashboard_login(request: Request, payload: Annotated[Any, Body()] = None) -> JSONResponse:
     kind, value = _credential(payload)
     client = _client_key(request)
     now = time.time()
     with _LOCK:
         if len(_recent_failures(client, now)) >= _FAILURE_LIMIT:
             raise HTTPException(status_code=429, detail="Too many sign-in attempts. Wait a few minutes and try again.")
-        if kind == "key":
+        if kind == "password":
+            ok = dashboard_password.verify(value)
+        elif kind == "key":
             ok = hmac.compare_digest(value.encode("utf-8"), security.DASHBOARD_API_KEY.encode("utf-8"))
         else:
             ok = _consume_login_link(value, now)
         if not ok:
             _FAILURES.setdefault(client, []).append(now)
-    if not ok:
-        logger.info("dashboard sign-in rejected method=%s client=%s", kind, client)
-        detail = ("That sign-in link has expired or was already used. Run `ods dashboard-login` for a new one."
-                  if kind == "token" else "That dashboard key is not correct.")
-        raise HTTPException(status_code=401, detail=detail)
+        if not ok:
+            logger.info("dashboard sign-in rejected method=%s client=%s", kind, client)
+            detail = ("That sign-in link has expired or was already used. Run `ods dashboard-login` for a new one."
+                      if kind == "token" else "That password is not correct.")
+            raise HTTPException(status_code=401, detail=detail)
 
-    logger.info("dashboard sign-in accepted method=%s client=%s", kind, client)
-    response = JSONResponse({"signedIn": True}, headers={"Cache-Control": "no-store"})
+        logger.info("dashboard sign-in accepted method=%s client=%s", kind, client)
+        response = JSONResponse({"signedIn": True,
+                                 "passwordSetup": kind == "token" or dashboard_password.record() is None},
+                                headers={"Cache-Control": "no-store"})
+        _set_session_cookie(response, request, now)
+        return response
+
+
+def _set_session_cookie(response: Response, request: Request, now: float) -> None:
     response.set_cookie(
         key=SESSION_COOKIE_NAME,
         value=issue_session(now),
@@ -168,6 +181,24 @@ def dashboard_login(request: Request, payload: Any = Body(default=None)) -> JSON
         secure=request.url.scheme == "https" or request.headers.get("x-forwarded-proto", "").lower() == "https",
         path="/",
     )
+
+
+@router.post("/api/auth/dashboard-session/password", dependencies=[Depends(verify_api_key)])
+def dashboard_set_password(request: Request, payload: Annotated[Any, Body()] = None) -> JSONResponse:
+    """Owner-only setup/recovery behind nginx's admin gate (or local CLI key).
+
+    A password change revokes all existing dashboard sessions and unused links.
+    The current browser receives a fresh session after the atomic write.
+    """
+    if not isinstance(payload, dict) or set(payload) != {"password"}:
+        raise HTTPException(422, "Send the new dashboard password.")
+    with _LOCK:
+        dashboard_password.save(payload["password"])
+        _LOGIN_LINKS.clear()
+        _FAILURES.clear()
+        response = JSONResponse({"signedIn": True, "passwordConfigured": True},
+                                headers={"Cache-Control": "no-store"})
+        _set_session_cookie(response, request, time.time())
     return response
 
 

@@ -15,7 +15,7 @@ import './dashboard-sign-in.css'
  * use is unchanged. ODS Talk has its own session and is never gated here.
  */
 
-const DashboardSessionContext = createContext({ session: false, signOut: async () => {} })
+const DashboardSessionContext = createContext({ session: false, signOut: async () => {}, changePassword: () => {} })
 
 export const useDashboardSession = () => useContext(DashboardSessionContext)
 
@@ -39,6 +39,7 @@ export default function DashboardSignInGate({ children }) {
   const [state, setState] = useState(bypass ? 'ready' : 'checking')
   const [session, setSession] = useState(false)
   const [message, setMessage] = useState('')
+  const [setupOptional, setSetupOptional] = useState(false)
   // One link sign-in per page load, shared across StrictMode's re-run.
   const linkAttempt = useRef(null)
 
@@ -59,7 +60,8 @@ export default function DashboardSignInGate({ children }) {
     if (response.ok) {
       setSession(true)
       setMessage('')
-      setState('ready')
+      const body = await response.json().catch(() => ({}))
+      setState(body.passwordSetup ? 'password' : 'ready')
       return
     }
     setMessage(await detailOf(response, 'Sign-in failed. Try again.'))
@@ -89,7 +91,14 @@ export default function DashboardSignInGate({ children }) {
         }
         if (response.ok) {
           const body = await response.json().catch(() => ({}))
-          if (!cancelled) setSession(body.session === true)
+          if (!cancelled) {
+            setSession(body.session === true)
+            if (body.passwordConfigured === false) {
+              let dismissed = false
+              try { dismissed = localStorage.getItem('ods-password-setup-dismissed') === 'true' } catch { /* Optional preference. */ }
+              if (!dismissed) { setSetupOptional(body.session !== true); setState('password'); return }
+            }
+          }
         }
       } catch {
         // Unreachable API: let the dashboard show its usual service status.
@@ -133,10 +142,30 @@ export default function DashboardSignInGate({ children }) {
     setState('sign-in')
   }, [])
 
+  const savePassword = async password => {
+    try {
+      const response = await fetch('/api/auth/dashboard-session/password', {
+        method: 'POST', credentials: 'same-origin',
+        headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ password }),
+      })
+      if (signInRequired(response)) { setSession(false); setMessage('Sign in again to save your password.'); setState('sign-in'); return }
+      if (!response.ok) { setMessage(await detailOf(response, 'Could not save the password. Try again.')); return }
+      setSession(true)
+      setMessage('')
+      setState('ready')
+    } catch { setMessage('Could not reach ODS. Check the connection and try again.') }
+  }
+  const changePassword = () => { setMessage(''); setSetupOptional(true); setState('password') }
+  const skipSetup = () => {
+    try { localStorage.setItem('ods-password-setup-dismissed', 'true') } catch { /* Optional preference. */ }
+    setMessage(''); setState('ready')
+  }
+
   if (state === 'checking') return <div className="min-h-screen bg-theme-bg" aria-busy="true" />
-  if (state === 'sign-in') return <SignInScreen message={message} onSubmit={key => signIn({ key })} />
+  if (state === 'sign-in') return <SignInScreen message={message} onSubmit={password => signIn({ password })} />
+  if (state === 'password') return <SignInScreen key="password-setup" setup message={message} onSubmit={savePassword} onCancel={setupOptional ? skipSetup : null} />
   return (
-    <DashboardSessionContext.Provider value={{ session, signOut }}>
+    <DashboardSessionContext.Provider value={{ session, signOut, changePassword }}>
       {message && <p role="alert" className="ods-signout-error">{message}</p>}
       {children}
     </DashboardSessionContext.Provider>
@@ -157,14 +186,19 @@ function WorkspaceSilhouette() {
   )
 }
 
-function SignInScreen({ message, onSubmit }) {
-  const [key, setKey] = useState('')
+function SignInScreen({ message, onSubmit, setup = false, onCancel = null }) {
+  const [password, setPassword] = useState('')
+  const [confirmation, setConfirmation] = useState('')
+  const [validation, setValidation] = useState('')
   const [busy, setBusy] = useState(false)
   const submit = async (event) => {
     event.preventDefault()
-    if (busy || !key.trim()) return
+    if (busy || !password) return
+    if (setup && (password.length < 12 || password.length > 128)) { setValidation('Use 12 to 128 characters. A memorable passphrase works well.'); return }
+    if (setup && password !== confirmation) { setValidation('The passwords do not match.'); return }
+    setValidation('')
     setBusy(true)
-    await onSubmit(key.trim())
+    await onSubmit(password)
     setBusy(false)
   }
   return (
@@ -174,32 +208,46 @@ function SignInScreen({ message, onSubmit }) {
       <div className="ods-signin-veil">
         <form className="ods-signin-card" onSubmit={submit} aria-labelledby="ods-signin-title">
           <ODSLogo />
-          <h1 id="ods-signin-title">Sign in to ODS</h1>
-          <p className="ods-signin-lede">Enter your dashboard key to continue.</p>
+          <h1 id="ods-signin-title">{setup ? 'Choose your password' : 'Sign in to ODS'}</h1>
+          <p className="ods-signin-lede">{setup ? 'Use a memorable passphrase to sign in on your devices.' : 'Welcome back. Enter your password to continue.'}</p>
           <div className="ods-signin-field">
             <input
               type="password"
-              aria-label="Dashboard key"
-              placeholder="Dashboard key"
-              autoComplete="current-password"
+              aria-label={setup ? 'New password' : 'Password'}
+              placeholder={setup ? 'New password' : 'Password'}
+              autoComplete={setup ? 'new-password' : 'current-password'}
               spellCheck={false}
-              maxLength={512}
+              maxLength={128}
               autoFocus
-              value={key}
-              onChange={event => setKey(event.target.value)}
+              value={password}
+              onChange={event => setPassword(event.target.value)}
             />
-            <button type="submit" className="ods-signin-submit" aria-label="Sign in" aria-busy={busy} disabled={busy || !key.trim()}>
+            {!setup && (
+            <button type="submit" className="ods-signin-submit" aria-label={setup ? 'Save password' : 'Sign in'} aria-busy={busy} disabled={busy || !password || (setup && !confirmation)}>
               <ArrowRight size={16} strokeWidth={2.2} aria-hidden="true" />
             </button>
+            )}
           </div>
-          {message && <p role="alert" className="ods-signin-message">{message}</p>}
+          {setup && <div className="ods-signin-field ods-signin-confirm">
+            <input type="password" aria-label="Confirm password" placeholder="Confirm password"
+              autoComplete="new-password" maxLength={128} value={confirmation}
+              onChange={event => setConfirmation(event.target.value)} />
+            <button type="submit" className="ods-signin-submit" aria-label={setup ? 'Save password' : 'Sign in'} aria-busy={busy} disabled={busy || !password || (setup && !confirmation)}>
+              <ArrowRight size={16} strokeWidth={2.2} aria-hidden="true" />
+            </button>
+          </div>}
+          {(validation || message) && <p role="alert" className="ods-signin-message">{validation || message}</p>}
           <details className="ods-signin-help">
-            <summary>Need help signing in?</summary>
+            <summary>{setup ? 'About your password' : 'Forgot password?'}</summary>
             <p className="ods-signin-hint">
-            For a one-click link, run <code>ods dashboard-login</code> on the ODS machine.
-            The key is <code>DASHBOARD_API_KEY</code> in its <code>.env</code>.
+              {setup ? 'Your password stays on this ODS machine. Saving a new password signs out your other devices.' : <>
+                On the ODS computer, open Your profile, then choose Change dashboard password.
+                If you cannot sign in there, run <code>ods dashboard-login</code> on that computer
+                and open the one-time link. No old password is needed.
+              </>}
             </p>
           </details>
+          {onCancel && <button type="button" className="ods-signin-later" onClick={onCancel}>Not now</button>}
         </form>
       </div>
     </div>

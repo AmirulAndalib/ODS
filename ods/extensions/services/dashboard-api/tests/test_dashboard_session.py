@@ -2,8 +2,8 @@
 
 from http.cookies import SimpleCookie
 
+import dashboard_password
 import pytest
-
 import security
 import session_signer
 from routers import dashboard_session as ds
@@ -12,7 +12,8 @@ COOKIE = ds.SESSION_COOKIE_NAME
 
 
 @pytest.fixture(autouse=True)
-def _clean_state():
+def _clean_state(tmp_path, monkeypatch):
+    monkeypatch.setattr(dashboard_password, "PASSWORD_FILE", tmp_path / "dashboard-password.json")
     ds._FAILURES.clear()
     ds._LOGIN_LINKS.clear()
     yield
@@ -84,7 +85,7 @@ def test_wrong_credentials_are_rejected_without_a_session(test_client, payload):
     assert COOKIE not in _set_cookies(resp)
 
 
-@pytest.mark.parametrize("body", [None, {}, [], {"key": ""}, {"key": 5}, {"password": "x"},
+@pytest.mark.parametrize("body", [None, {}, [], {"key": ""}, {"key": 5}, {"unknown": "x"},
                                   {"key": "a", "token": "b"}, {"key": "x" * 600}])
 def test_malformed_sign_in_bodies_are_rejected(test_client, body):
     test_client.cookies.clear()
@@ -124,10 +125,10 @@ def test_status_reports_whether_a_session_cookie_is_in_use(test_client):
     test_client.cookies.clear()
     assert test_client.get("/api/auth/dashboard-session").status_code == 401
     assert test_client.get("/api/auth/dashboard-session", headers=test_client.auth_headers).json() == {
-        "signedIn": True, "session": False}
+        "signedIn": True, "session": False, "passwordConfigured": False}
     test_client.cookies.set(COOKIE, ds.issue_session())
     assert test_client.get("/api/auth/dashboard-session", headers=test_client.auth_headers).json() == {
-        "signedIn": True, "session": True}
+        "signedIn": True, "session": True, "passwordConfigured": False}
 
 
 def test_logout_clears_the_session_cookie(test_client):
@@ -136,3 +137,88 @@ def test_logout_clears_the_session_cookie(test_client):
     assert resp.status_code == 200
     raw = b" ".join(v for k, v in resp.headers.raw if k.lower() == b"set-cookie").lower()
     assert f"{COOKIE}=".encode() in raw and b"max-age=0" in raw
+
+
+def test_password_setup_requires_owner_authority_and_hashes_at_rest(test_client):
+    password = "my chosen long passphrase"
+    assert test_client.post("/api/auth/dashboard-session/password", json={"password": password}).status_code == 401
+    result = test_client.post("/api/auth/dashboard-session/password", headers=test_client.auth_headers,
+                              json={"password": password})
+    assert result.status_code == 200
+    stored = dashboard_password.PASSWORD_FILE.read_text()
+    assert password not in stored
+    assert dashboard_password.verify(password)
+    assert not dashboard_password.verify("wrong password")
+    assert _login(test_client, password=password).status_code == 200
+    assert _login(test_client, password="wrong password").status_code == 401
+
+
+def test_password_recovery_revokes_old_sessions_and_outstanding_links(test_client):
+    dashboard_password.save("the original passphrase")
+    old = ds.issue_session()
+    link = test_client.post("/api/auth/dashboard-session/link", headers=test_client.auth_headers).json()
+    recovery = test_client.post("/api/auth/dashboard-session/link", headers=test_client.auth_headers).json()
+    signed_in = _login(test_client, token=recovery["token"])
+    assert signed_in.status_code == 200 and signed_in.json()["passwordSetup"] is True
+    result = test_client.post("/api/auth/dashboard-session/password", headers=test_client.auth_headers,
+                              json={"password": "my replacement passphrase"})
+    assert result.status_code == 200
+    assert not ds.session_is_valid(old)
+    assert ds.session_is_valid(_set_cookies(result)[COOKIE].value)
+    assert _login(test_client, token=link["token"]).status_code == 401
+    assert _login(test_client, password="the original passphrase").status_code == 401
+    assert _login(test_client, password="my replacement passphrase").status_code == 200
+
+
+@pytest.mark.parametrize("password", [None, 123, "short", "x" * 129])
+def test_password_policy_preserves_existing_credential(test_client, password):
+    dashboard_password.save("existing long passphrase")
+    before = dashboard_password.PASSWORD_FILE.read_bytes()
+    result = test_client.post("/api/auth/dashboard-session/password", headers=test_client.auth_headers,
+                              json={"password": password})
+    assert result.status_code == 422
+    assert dashboard_password.PASSWORD_FILE.read_bytes() == before
+
+
+def test_damaged_password_storage_fails_closed(test_client):
+    dashboard_password.PASSWORD_FILE.write_text("not json")
+    assert _login(test_client, password="any password").status_code == 503
+    assert test_client.get("/api/auth/dashboard-session", headers=test_client.auth_headers).status_code == 503
+
+
+def test_password_persists_across_module_reload():
+    import importlib
+    path = dashboard_password.PASSWORD_FILE
+    dashboard_password.save("retained after restart")
+    revision = dashboard_password.revision()
+    try:
+        importlib.reload(dashboard_password)
+        dashboard_password.PASSWORD_FILE = path
+        assert dashboard_password.verify("retained after restart")
+        assert dashboard_password.revision() == revision
+    finally:
+        dashboard_password.PASSWORD_FILE = path
+
+
+def test_failed_password_write_preserves_access(test_client, monkeypatch):
+    dashboard_password.save("existing long passphrase")
+    before = dashboard_password.PASSWORD_FILE.read_bytes()
+    previous_session = ds.issue_session()
+    def failed_replace(*args):
+        raise OSError("fixture: storage full")
+    monkeypatch.setattr(dashboard_password.os, "replace", failed_replace)
+    result = test_client.post("/api/auth/dashboard-session/password", headers=test_client.auth_headers,
+                              json={"password": "my replacement passphrase"})
+    assert result.status_code == 503
+    assert dashboard_password.PASSWORD_FILE.read_bytes() == before
+    assert dashboard_password.verify("existing long passphrase")
+    assert ds.session_is_valid(previous_session)
+    assert list(dashboard_password.PASSWORD_FILE.parent.glob(".dashboard-password-*")) == []
+
+
+def test_password_file_is_private_on_posix():
+    import os
+    import stat
+    dashboard_password.save("my chosen long passphrase")
+    if os.name == "posix":
+        assert stat.S_IMODE(dashboard_password.PASSWORD_FILE.stat().st_mode) == 0o600

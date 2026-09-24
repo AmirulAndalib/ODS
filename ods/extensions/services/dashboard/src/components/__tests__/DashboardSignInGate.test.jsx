@@ -51,26 +51,26 @@ describe('DashboardSignInGate', () => {
     expect(fetchMock).toHaveBeenCalledWith('/api/auth/dashboard-session', { credentials: 'same-origin' })
   })
 
-  it('asks for the dashboard key only when nginx requires sign-in', async () => {
+  it('asks for the password only when nginx requires sign-in', async () => {
     fetchMock
       .mockResolvedValueOnce(signInRequired())
-      .mockResolvedValueOnce(json({ detail: 'That dashboard key is not correct.' }, 401))
+      .mockResolvedValueOnce(json({ detail: 'That password is not correct.' }, 401))
       .mockResolvedValueOnce(json({ signedIn: true }))
     renderGate()
 
-    const input = await screen.findByLabelText('Dashboard key')
+    const input = await screen.findByLabelText('Password')
     expect(screen.queryByText('Dashboard content')).not.toBeInTheDocument()
     fireEvent.change(input, { target: { value: 'wrong' } })
     fireEvent.click(screen.getByRole('button', { name: 'Sign in' }))
-    expect(await screen.findByRole('alert')).toHaveTextContent('That dashboard key is not correct.')
+    expect(await screen.findByRole('alert')).toHaveTextContent('That password is not correct.')
 
-    fireEvent.change(input, { target: { value: 'the-real-key' } })
+    fireEvent.change(input, { target: { value: 'my chosen passphrase' } })
     fireEvent.click(screen.getByRole('button', { name: 'Sign in' }))
     expect(await screen.findByText('Dashboard content')).toBeInTheDocument()
     expect(screen.getByRole('button', { name: 'Sign out' })).toBeInTheDocument()
     const [url, options] = fetchMock.mock.calls[2]
     expect(url).toBe('/api/auth/dashboard-session/login')
-    expect(JSON.parse(options.body)).toEqual({ key: 'the-real-key' })
+    expect(JSON.parse(options.body)).toEqual({ password: 'my chosen passphrase' })
   })
 
   it('signs in with a one-time link and removes the token from the address bar', async () => {
@@ -101,7 +101,7 @@ describe('DashboardSignInGate', () => {
     expect(await screen.findByText('Dashboard content')).toBeInTheDocument()
 
     await window.fetch('/api/status')
-    expect(await screen.findByLabelText('Dashboard key')).toBeInTheDocument()
+    expect(await screen.findByLabelText('Password')).toBeInTheDocument()
     expect(screen.getByRole('alert')).toHaveTextContent('session ended')
   })
 
@@ -111,7 +111,7 @@ describe('DashboardSignInGate', () => {
       .mockResolvedValueOnce(json({ signedIn: false }))
     renderGate()
     fireEvent.click(await screen.findByRole('button', { name: 'Sign out' }))
-    expect(await screen.findByLabelText('Dashboard key')).toBeInTheDocument()
+    expect(await screen.findByLabelText('Password')).toBeInTheDocument()
     expect(fetchMock).toHaveBeenLastCalledWith('/api/auth/dashboard-session/logout', { method: 'POST', credentials: 'same-origin' })
   })
 
@@ -132,5 +132,68 @@ describe('DashboardSignInGate', () => {
     renderGate()
     expect(screen.getByText('Dashboard content')).toBeInTheDocument()
     await waitFor(() => expect(fetchMock).not.toHaveBeenCalled())
+  })
+})
+
+
+describe('password setup and recovery', () => {
+  afterEach(() => { vi.restoreAllMocks(); window.history.replaceState(null, '', '/') })
+
+  it('lets the local owner choose and confirm a password before continuing', async () => {
+    const fetchMock = vi.fn().mockResolvedValueOnce(json({ signedIn: true, session: false, passwordConfigured: false }))
+      .mockResolvedValueOnce(json({ signedIn: true, passwordConfigured: true }))
+    window.fetch = fetchMock
+    renderGate()
+    expect(await screen.findByRole('heading', { name: 'Choose your password' })).toBeInTheDocument()
+    fireEvent.change(screen.getByLabelText('New password'), { target: { value: '  my chosen passphrase  ' } })
+    fireEvent.change(screen.getByLabelText('Confirm password'), { target: { value: 'different passphrase' } })
+    fireEvent.click(screen.getByRole('button', { name: 'Save password' }))
+    expect(await screen.findByRole('alert')).toHaveTextContent('do not match')
+    expect(fetchMock).toHaveBeenCalledTimes(1)
+    fireEvent.change(screen.getByLabelText('Confirm password'), { target: { value: '  my chosen passphrase  ' } })
+    fireEvent.click(screen.getByRole('button', { name: 'Save password' }))
+    expect(await screen.findByText('Dashboard content')).toBeInTheDocument()
+    expect(JSON.parse(fetchMock.mock.calls[1][1].body)).toEqual({ password: '  my chosen passphrase  ' })
+    expect(fetchMock.mock.calls[1][0]).toBe('/api/auth/dashboard-session/password')
+  })
+
+  it('opens password recovery from a one-time link without requesting the old password', async () => {
+    window.history.replaceState(null, '', `/#ods-login=${'r'.repeat(43)}`)
+    window.fetch = vi.fn().mockResolvedValue(json({ signedIn: true, passwordSetup: true }))
+    renderGate()
+    expect(await screen.findByLabelText('New password')).toBeInTheDocument()
+    expect(screen.getByLabelText('Confirm password')).toBeInTheDocument()
+    expect(screen.queryByLabelText('Password')).not.toBeInTheDocument()
+    expect(window.location.hash).toBe('')
+  })
+})
+
+
+describe('local access without lockouts', () => {
+  afterEach(() => { vi.restoreAllMocks(); localStorage.removeItem('ods-password-setup-dismissed') })
+
+  it('can defer local password setup without opening remote access', async () => {
+    const fetchMock = vi.fn().mockResolvedValue(json({signedIn:true, session:false, passwordConfigured:false}))
+    window.fetch = fetchMock
+    const page = renderGate()
+    fireEvent.click(await screen.findByRole('button', {name:'Not now'}))
+    expect(await screen.findByText('Dashboard content')).toBeInTheDocument()
+    expect(fetchMock).toHaveBeenCalledTimes(1)
+    page.unmount()
+    window.fetch = vi.fn().mockResolvedValue(signInRequired())
+    renderGate()
+    expect(await screen.findByLabelText('Password')).toBeInTheDocument()
+    expect(screen.queryByText('Dashboard content')).not.toBeInTheDocument()
+  })
+
+  it('returns to sign-in if authorization expires while saving a password', async () => {
+    window.fetch = vi.fn().mockResolvedValueOnce(json({signedIn:true, session:false, passwordConfigured:false}))
+      .mockResolvedValueOnce(signInRequired())
+    renderGate()
+    fireEvent.change(await screen.findByLabelText('New password'), {target:{value:'my chosen passphrase'}})
+    fireEvent.change(screen.getByLabelText('Confirm password'), {target:{value:'my chosen passphrase'}})
+    fireEvent.click(screen.getByRole('button', {name:'Save password'}))
+    expect(await screen.findByLabelText('Password')).toBeInTheDocument()
+    expect(screen.getByRole('alert')).toHaveTextContent('Sign in again')
   })
 })

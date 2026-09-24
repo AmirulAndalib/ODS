@@ -12,7 +12,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   Serve. Previously its proxy added the admin API key to every request, so
   anyone who could reach it had full control. Browsers on the ODS machine
   itself (`http://localhost`) are unchanged. Sign in once per browser (30 days)
-  with the dashboard key or a one-time link from the new `ods dashboard-login`.
+  with a user-chosen password. The frosted sign-in, setup and recovery screens
+  match the dashboard. Local owners can defer password setup; remote access
+  stays protected. `ods dashboard-login` prints a short-lived, single-use
+  recovery link. Password replacement revokes other dashboard sessions and
+  unused links; only a salted password hash is stored.
 - Chat-only guest invites no longer set the `ods-session` cookie, so they
   cannot open ODS Talk or pass the optional Hermes gate. Owner cards and
   Hermes invites are unchanged.

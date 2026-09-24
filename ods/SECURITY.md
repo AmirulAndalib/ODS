@@ -88,9 +88,17 @@ route needs a one-time sign-in per browser, remembered for 30 days:
 - ODS proxy (`dashboard.<device>.local`), a reverse proxy, or Tailscale Serve
   in front of `localhost`.
 
-Sign in with the dashboard key (`DASHBOARD_API_KEY` in `.env`), or run
-`ods dashboard-login` on the ODS machine for a one-time link. Rotating
-`DASHBOARD_API_KEY` signs every browser out. Magic-link guest invites for chat
+Choose a memorable dashboard password on the ODS computer. Local-only users
+can choose **Not now** and continue; network access remains protected. The
+password is stored as a salted PBKDF2 hash, never plaintext, in the persistent
+ODS data directory.
+
+Forgotten password: open **Your profile** and choose **Change dashboard password**
+on the ODS computer, or run `ods dashboard-login` there and open its one-time
+link. The link expires after 10 minutes and opens password setup without the
+old password. Saving a replacement revokes other dashboard sessions and unused
+links. No email service or separately saved recovery key is required. Rotating
+`DASHBOARD_API_KEY` also signs every browser out. Magic-link guest invites for chat
 never grant dashboard, ODS Talk or Hermes access.
 
 ### Host Agent Network Binding

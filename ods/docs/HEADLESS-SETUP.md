@@ -92,7 +92,8 @@ Use this checklist for each target hardware profile:
   target. Hermes invites set the signed cookie; chat-only invites do not
   (Open WebUI has its own sign-in).
 - `dashboard.<device>.local` asks for dashboard sign-in once per browser; the
-  link from `ods dashboard-login` or the dashboard key completes it.
+  user-chosen password completes it. Run `ods dashboard-login` on the ODS
+  machine to set up or recover that password through a one-time link.
 - Hermes is reachable through `hermes.<device>.local` when enabled.
 - Mobile voice is validated from HTTPS/Tailscale HTTPS when the packaged Hermes
   surface exposes microphone controls; plain HTTP is expected to show fallback
