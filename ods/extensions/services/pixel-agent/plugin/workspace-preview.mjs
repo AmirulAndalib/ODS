@@ -273,6 +273,8 @@ export function createWorkspacePreviewTool({ request, transport = "unix" } = {})
             text:
               `ODS independently published and read back ${response.files} workspace static files ` +
               `(${response.bytes} bytes). Verified browser URL: ${response.url}. ` +
+              `Inspection snapshot: ${JSON.stringify({siteId:response.siteId,sha256:response.sha256})}. ` +
+              'Use pixel_ods_workspace_preview_inspect for this owned preview, not public web_fetch or shell HTTP. Copy both identifiers exactly; sha256 is the full snapshot digest, not entrySha256 or the shortened site suffix. ' +
               publishedPathFeedback(response) +
               "This receipt proves publication and HTTP readback only, not successful startup, interactions or durable browser storage. Verify requested behavior in the actual preview before claiming it works. " +
               "If the owner requested derived source files or process logs, publication does not verify their correspondence to executed files or output. If that comparison is missing or fails, repair from the final executed bytes and republish before claiming completion.",

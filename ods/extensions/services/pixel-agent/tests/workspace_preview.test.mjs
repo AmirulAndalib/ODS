@@ -87,6 +87,10 @@ test("publishes only the exact existing workspace directory", async () => {
   const result = await tool.execute("call-1", { relativeDirectory: "demo-site" });
   assert.equal(result.isError, undefined);
   assert.equal(result.details.readbackVerified, true);
+  const snapshot=JSON.parse(result.content[0].text.match(/Inspection snapshot: (\{[^}]+\})\./)[1]);
+  assert.deepEqual(snapshot,{siteId:result.details.siteId,sha256:result.details.sha256});
+  assert.notEqual(snapshot.sha256,result.details.entrySha256);
+  assert.match(result.content[0].text,/pixel_ods_workspace_preview_inspect/);
   assert.match(result.content[0].text, /independently published and read back/);
   assert.match(result.content[0].text, /publication and HTTP readback only, not successful startup, interactions or durable browser storage/);
   assert.deepEqual(calls, [{

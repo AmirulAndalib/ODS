@@ -44,3 +44,15 @@ test('untrusted malformed broker receipts cannot become argument errors or succe
   assert.equal(result.isError,true);
   assert.equal(result.details.errorCode,'unavailable');
 });
+
+test('observed digest guessing gets actionable feedback without contacting the broker',async()=>{
+  let calls=0;
+  const tool=createWorkspacePreviewInspectTool({request:async()=>{calls++;throw Error('offline');}});
+  const shortened=valid();shortened.sha256='a'.repeat(24);
+  assert.match((await tool.execute('short',shortened)).content[0].text,/full 64-character lowercase snapshot digest/);
+  const fileDigest=valid();fileDigest.sha256='b'.repeat(64);
+  assert.match((await tool.execute('file',fileDigest)).content[0].text,/same latest publication receipt; do not use entrySha256/);
+  assert.equal(calls,0);
+  assert.equal((await tool.execute('corrected',valid())).details.errorCode,'unavailable');
+  assert.equal(calls,1);
+});

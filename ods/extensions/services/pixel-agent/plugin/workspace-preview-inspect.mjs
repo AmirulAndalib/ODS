@@ -13,8 +13,23 @@ const exact = (v,keys) => v && typeof v==='object' && !Array.isArray(v) && Objec
 const printable = (v,max) => typeof v==='string' && Array.from(v).length>0 && Array.from(v).length<=max && Buffer.byteLength(v)<=max*4 && !/[\p{C}\u2028\u2029]/u.test(v);
 const canonical = v => JSON.stringify(v && typeof v==='object' ? Array.isArray(v) ? v.map(x=>JSON.parse(canonical(x))) : Object.fromEntries(Object.keys(v).sort().map(k=>[k,JSON.parse(canonical(v[k]))])) : v);
 export const inspectionPlanHash = value => createHash('sha256').update(canonical(value)).digest('hex');
+const INPUT_HINTS = new Map([
+  ['invalid preview inspection fields','Provide only siteId, sha256, viewport and steps.'],
+  ['invalid preview inspection digest','sha256 must be the full 64-character lowercase snapshot digest from the publication receipt; never the shortened site suffix or a file digest.'],
+  ['invalid preview inspection snapshot binding','siteId does not match the snapshot sha256. Copy both from the same latest publication receipt; do not use entrySha256 or invent a digest.'],
+  ['invalid preview inspection viewport','viewport must contain integer width and height from 240 to 1920.'],
+  ['invalid preview inspection steps','Provide 1 to 12 supported steps per inspection.'],
+  ['invalid inspection step','Each step needs only a supported action and locator.'],
+  ['invalid CSS locator','Use one bounded CSS selector, without Playwright engine prefixes or chaining.'],
+  ['invalid semantic locator','Use a supported role, exact accessible name and exact:true, or a CSS selector.'],
+  ['inspection request too large','Split the plan into smaller inspections.'],
+]);
 export function normalizeWorkspacePreviewInspectionParams(params) {
-  if(!exact(params,['siteId','sha256','viewport','steps']) || !/^[a-f0-9]{64}$/.test(params.sha256) || params.siteId!==`site-${params.sha256.slice(0,24)}` || !exact(params.viewport,['width','height']) || Object.values(params.viewport).some(v=>!Number.isSafeInteger(v)||v<240||v>1920) || !Array.isArray(params.steps)||params.steps.length<1||params.steps.length>12) throw Error('invalid preview inspection request');
+  if(!exact(params,['siteId','sha256','viewport','steps'])) throw Error('invalid preview inspection fields');
+  if(typeof params.sha256!=='string'||!/^[a-f0-9]{64}$/.test(params.sha256)) throw Error('invalid preview inspection digest');
+  if(params.siteId!==`site-${params.sha256.slice(0,24)}`) throw Error('invalid preview inspection snapshot binding');
+  if(!exact(params.viewport,['width','height']) || Object.values(params.viewport).some(v=>!Number.isSafeInteger(v)||v<240||v>1920)) throw Error('invalid preview inspection viewport');
+  if(!Array.isArray(params.steps)||params.steps.length<1||params.steps.length>12) throw Error('invalid preview inspection steps');
   for(const step of params.steps) {
     if(!exact(step,['action','locator']) || !['assert-visible','assert-hidden','click'].includes(step.action)) throw Error('invalid inspection step');
     const l=step.locator;
@@ -72,7 +87,7 @@ export function createWorkspacePreviewInspectTool({request,transport='unix'}={})
   request??=transport==='unix'?unixRequest:nativeRequest;
   return {name:'pixel_ods_workspace_preview_inspect',
     description:'Inspect an already published owned snapshot using bounded CSS or exact accessible role/name locators. Pass its exact siteId and sha256 from publication. Immediately after publication, check each requested interaction with an initial state assertion, the relevant click, then an explicit postcondition assertion matching the requested behavior. Do not wait until finalization. Each locator must match exactly one element, even for hidden assertions. This tests CSS layout visibility, not pixel paint, occlusion or clipping. A click alone proves no behavioral result. Rendered hidden attributes are diagnostic; intentional CSS overrides are not automatically errors. Unavailable inspection is unverified, never success. No URLs or JavaScript accepted.',
-    parameters:{type:'object',additionalProperties:false,required:['siteId','sha256','viewport','steps'],properties:{siteId:{type:'string'},sha256:{type:'string'},viewport:{type:'object',additionalProperties:false,required:['width','height'],properties:{width:{type:'integer',minimum:240,maximum:1920},height:{type:'integer',minimum:240,maximum:1920}}},steps:{type:'array',minItems:1,maxItems:12,items:{type:'object',additionalProperties:false,required:['action','locator'],properties:{action:{type:'string',enum:['assert-visible','assert-hidden','click']},locator:{oneOf:[{type:'object',additionalProperties:false,required:['selector'],properties:{selector:{type:'string',maxLength:256}}},{type:'object',additionalProperties:false,required:['role','name','exact'],properties:{role:{type:'string',enum:[...roles]},name:{type:'string',maxLength:120},exact:{const:true}}}]}}}}}},
+    parameters:{type:'object',additionalProperties:false,required:['siteId','sha256','viewport','steps'],properties:{siteId:{type:'string',pattern:'^site-[a-f0-9]{24}$'},sha256:{type:'string',pattern:'^[a-f0-9]{64}$',description:'Full snapshot sha256 from the same publication receipt; not entrySha256 or a site suffix.'},viewport:{type:'object',additionalProperties:false,required:['width','height'],properties:{width:{type:'integer',minimum:240,maximum:1920},height:{type:'integer',minimum:240,maximum:1920}}},steps:{type:'array',minItems:1,maxItems:12,items:{type:'object',additionalProperties:false,required:['action','locator'],properties:{action:{type:'string',enum:['assert-visible','assert-hidden','click']},locator:{oneOf:[{type:'object',additionalProperties:false,required:['selector'],properties:{selector:{type:'string',maxLength:256}}},{type:'object',additionalProperties:false,required:['role','name','exact'],properties:{role:{type:'string',enum:[...roles]},name:{type:'string',maxLength:120},exact:{const:true}}}]}}}}}},
     execute:async(_id,params,signal)=>{
       let normalized;
       // Bad model arguments are not evidence that the installed broker is down.
@@ -80,8 +95,8 @@ export function createWorkspacePreviewInspectTool({request,transport='unix'}={})
       // path remains available, without invoking the broker on invalid input.
       if (!signal?.aborted) {
         try { normalized=normalizeWorkspacePreviewInspectionParams(params); }
-        catch { return {
-          content:[{type:'text',text:'Preview inspection request rejected before execution: invalid arguments. The inspector was not contacted; this does not establish service unavailability. Call tool_describe with id "pixel_ods_workspace_preview_inspect", then retry through tool_call with the exact published siteId and full sha256, viewport {width,height}, and valid steps. Use a CSS selector for elements whose role is not supported. Do not guess snapshot identifiers. Requested behavior remains unverified.'}],
+        catch (error) { return {
+          content:[{type:'text',text:'Preview inspection request rejected before execution: invalid arguments. ' + (INPUT_HINTS.get(error?.message) ?? 'Check the tool schema.') + ' The inspector was not contacted; this does not establish service unavailability. Call tool_describe with id "pixel_ods_workspace_preview_inspect", then retry through tool_call with the exact published siteId and full sha256, viewport {width,height}, and valid steps. Use a CSS selector for elements whose role is not supported. Do not guess snapshot identifiers. Requested behavior remains unverified.'}],
           details:{schemaVersion:1,kind:INSPECTION_KIND,status:'failed',errorCode:'invalid_request',scope:INSPECTION_SCOPE},isError:true,
         }; }
       }
