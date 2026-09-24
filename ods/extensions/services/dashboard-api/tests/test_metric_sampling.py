@@ -294,6 +294,43 @@ def test_catalogue_does_not_treat_held_or_other_model_rate_as_new_measurement(st
     assert _newly_measured_tps({"tokens_per_second": 20, "throughput_state": state, "throughput_model": owner}, "model-a") == expected
 
 
+@pytest.mark.asyncio
+async def test_cancelled_sampler_owner_clears_gap_and_releases_lock(sampler):
+    client, clock = sampler
+    client.get.return_value = sample(100, 5)
+    await helpers.get_llama_metrics("model-a")
+    clock[0] += 2
+    client.get.return_value = sample(140, 7)
+    await helpers.get_llama_metrics("model-a")
+    clock[0] += 2
+    entered = asyncio.Event()
+    async def blocked(*args, **kwargs):
+        entered.set()
+        await asyncio.Event().wait()
+    client.get.side_effect = blocked
+    owner = asyncio.create_task(helpers.get_llama_metrics("model-a"))
+    await entered.wait()
+    waiter = asyncio.create_task(helpers.get_llama_metrics("model-a"))
+    await asyncio.sleep(0)
+    waiter.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await waiter
+    assert helpers._prev_tokens["count"] == 140  # waiting consumer has no ownership
+    owner.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await owner
+    assert helpers._prev_tokens == {}
+    assert not helpers._llama_metrics_lock.locked()
+    assert helpers.get_cached_llama_metrics()["tokens_per_second"] == 20
+    assert helpers.get_cached_llama_metrics()["throughput_state"] == "unavailable"
+    client.get.side_effect = None
+    client.get.return_value = sample(300, 8)
+    recovered = await helpers.get_llama_metrics("model-a")
+    assert recovered["tokens_per_second"] == 20  # hold, not a rate spanning the gap
+    assert recovered["throughput_state"] == "retained"
+    assert recovered["throughput_sampled_at"] == 102
+
+
 def live_runtime(client, *, count=100, task=11, active=True, total=100, seconds=5,
                  shape="array", slots_failure=None, additional_slots=None):
     """Actual b9014 slots shape; completion counters need not move mid-run."""
