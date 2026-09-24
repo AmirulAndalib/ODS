@@ -473,12 +473,11 @@ def test_agents_metrics_authenticated(test_client):
 
     # Reset singletons to avoid cross-test contamination
     throughput.data_points = []
+    throughput.observation = {}
     agent_metrics.session_count = 0
-    agent_metrics.tokens_per_second = 0.0
 
     # Seed non-default values to test actual aggregation
     agent_metrics.session_count = 5
-    agent_metrics.tokens_per_second = 123.45
     throughput.add_sample(100.0)
     throughput.add_sample(150.0)
 
@@ -491,7 +490,8 @@ def test_agents_metrics_authenticated(test_client):
 
     # Verify seeded values are reflected in response
     assert data["agent"]["session_count"] == 5
-    assert data["agent"]["tokens_per_second"] == 123.45
+    assert data["agent"]["tokens_per_second"] == 150.0
+    assert data["agent"]["throughput_scope"] == "runtime"
     assert data["throughput"]["current"] == 150.0
     assert data["throughput"]["peak"] == 150.0
 
@@ -550,6 +550,7 @@ def test_agents_metrics_html_xss_escaping(test_client):
 
     # Reset singletons to avoid cross-test contamination
     throughput.data_points = []
+    throughput.observation = {}
     agent_metrics.session_count = 0
 
     # Inject XSS payload into agent metrics
@@ -585,6 +586,7 @@ def test_agents_throughput_authenticated(test_client):
 
     # Reset singleton to avoid cross-test contamination
     throughput.data_points = []
+    throughput.observation = {}
 
     # Seed throughput data to test actual behavior
     throughput.add_sample(42.0)

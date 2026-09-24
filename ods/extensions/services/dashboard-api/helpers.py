@@ -504,7 +504,17 @@ async def get_llama_metrics(model_hint: Optional[str] = None) -> dict:
         elif now - _llama_metrics_sample["time"] < _METRICS_SAMPLE_SECONDS:
             return dict(_llama_metrics_sample["result"])
         counter_id = hashlib.sha256(json.dumps(identity).encode()).hexdigest()
-        result = await _fetch_llama_metrics(model_hint=model_name, counter_id=counter_id)
+        try:
+            result = await _fetch_llama_metrics(model_hint=model_name, counter_id=counter_id)
+        except asyncio.CancelledError:
+            # A bounded background observer may time out while owning the
+            # sampler. Release the lock without measuring across that gap;
+            # cancellation while waiting for the lock never touches its owner.
+            _prev_tokens.clear()
+            if "result" in _llama_metrics_sample:
+                _llama_metrics_sample["result"].update(
+                    throughput_state="unavailable", inference_active=None)
+            raise
         available = result.pop("_available", False)
         reset = result.pop("_counter_reset", False)
         counters = result.pop("_counters", None)
