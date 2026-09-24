@@ -6,6 +6,11 @@ Operators who want the additional owner-card gate can set `HERMES_REQUIRE_OWNER_
 
 ODS Talk still requires its signed session. Dashboard API authentication, owner-card issuance, and invite revocation are unchanged.
 
+The dashboard sign-in security update invalidates previously issued ODS session
+cookies, including unexpired chat-only guest cookies. Owners renew through their
+existing owner card or authenticated dashboard; the reusable owner-card links
+remain valid. Default Hermes access still does not require an owner card.
+
 When owner-card gating is explicitly enabled:
 
 - Hermes itself binds **internal-only** (no host port).
@@ -27,6 +32,7 @@ This extension does NOT try to give you real multi-user. It gives you:
 | Magic-link-authed gateway | ✅ |
 | Anyone with a valid owner card can reach ODS Talk | ✅ |
 | Anyone with a valid advanced Hermes invite can reach Hermes | ✅ |
+| A chat-only guest invite reaches Talk or the Hermes gate | ❌ — it sets no `ods-session`; Open WebUI has its own sign-in |
 | Anyone without a valid invite gets bounced | ✅ |
 | Mom's memories / skills / sessions isolated from Dad's | ❌ — shared |
 | The proxy knows WHO is logged in | ❌ — only that *someone* has a valid invite |
@@ -61,7 +67,7 @@ ods restart hermes-proxy
 #    -> Hermes serves the advanced SPA
 ```
 
-If the recipient has not yet redeemed an owner card or guest invite, step 5 lands them on the "you need an owner card" page with instructions.
+If the recipient has not yet redeemed an owner card or Hermes invite, step 5 lands them on the "you need an owner card" page with instructions. Chat-only guest invites never pass this gate: they land in Open WebUI and set no `ods-session`.
 
 ## ODS Talk owner-card flow
 

@@ -2,6 +2,7 @@ import React from 'react'
 import ReactDOM from 'react-dom/client'
 import { BrowserRouter } from 'react-router-dom'
 import App from './App'
+import DashboardSignInGate from './components/DashboardSignInGate'
 import { ThemeProvider } from './contexts/ThemeContext'
 import {
   clearStaleAssetRecovery,
@@ -74,7 +75,9 @@ ReactDOM.createRoot(document.getElementById('root')).render(
     <ErrorBoundary>
       <ThemeProvider>
         <BrowserRouter>
-          <App />
+          <DashboardSignInGate>
+            <App />
+          </DashboardSignInGate>
         </BrowserRouter>
       </ThemeProvider>
     </ErrorBoundary>

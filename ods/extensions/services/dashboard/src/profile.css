@@ -30,3 +30,7 @@
 .profile-settings p[role=alert] { color:#eda7a1; }
 .profile-settings p[role=status] { color:#becbc5; }
 @media(max-width:639px) { .sidebar-profile-link > svg { display:none; } .pixel-sidebar-footer { padding-inline:0; } }
+
+.profile-dashboard-access { margin-top:24px; padding-top:20px; border-top:1px solid rgb(var(--theme-text) / .12); }
+.profile-dashboard-access h3 { margin:0 0 12px; font-size:13px; font-weight:500; }
+.profile-dashboard-access .profile-settings-actions { flex-wrap:wrap; gap:10px; }

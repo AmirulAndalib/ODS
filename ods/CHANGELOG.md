@@ -6,6 +6,24 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Security
+- The dashboard asks for sign-in when it is reached from another device: LAN
+  mode, ODS proxy (`dashboard.<device>.local`), a reverse proxy or Tailscale
+  Serve. Previously its proxy added the admin API key to every request, so
+  anyone who could reach it had full control. Browsers on the ODS machine
+  itself (`http://localhost`) are unchanged. Sign in once per browser (30 days)
+  with a user-chosen password. The frosted sign-in, setup and recovery screens
+  match the dashboard. Local owners can defer password setup; remote access
+  stays protected. `ods dashboard-login` prints a short-lived, single-use
+  recovery link. Password replacement revokes other dashboard sessions and
+  unused links; only a salted password hash is stored.
+- Chat-only guest invites no longer set the `ods-session` cookie, so they
+  cannot open ODS Talk or pass the optional Hermes gate. Owner cards and
+  Hermes invites are unchanged.
+- Previously issued ODS session cookies are invalidated at upgrade, including
+  unexpired chat-only guest cookies. Owners renew through the existing owner
+  card or authenticated dashboard flow; default direct Hermes access is unchanged.
+
 ## [3.0.0] - 2026-09-24
 
 ODS V3 was published as `v3.0.0` on September 24, 2026. Full fleet

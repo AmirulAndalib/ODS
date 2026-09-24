@@ -10,7 +10,7 @@ Where:
   * expiry-epoch is the integer Unix timestamp the cookie should stop
     being honored (server-side expiry; the browser may keep the cookie
     longer but we reject it)
-  * signature is `HMAC-SHA256(ODS_SESSION_SECRET, "<random-id>.<expiry>")`
+  * signature is `HMAC-SHA256(ODS_SESSION_SECRET, "ods-privileged-session/v2\\0<random-id>.<expiry>")`
     base64-url-encoded (no padding)
 
 Why this shape:
@@ -96,7 +96,11 @@ def _b64u_decode(text: str) -> bytes:
 
 def _sign(payload: str) -> str:
     """HMAC-SHA256 of ``payload`` with ``_SECRET``. Returns base64-url."""
-    mac = hmac.new(_SECRET, payload.encode("utf-8"), hashlib.sha256).digest()
+    # Before dashboard sign-in hardening, chat-only guests received this same
+    # privileged cookie. A new signing domain rejects all legacy signatures
+    # immediately, including guest cookies that have not expired. Preserve the
+    # wire shape for existing consumers; owners renew through their normal flow.
+    mac = hmac.new(_SECRET, b"ods-privileged-session/v2\x00" + payload.encode("utf-8"), hashlib.sha256).digest()
     return _b64u(mac)
 
 

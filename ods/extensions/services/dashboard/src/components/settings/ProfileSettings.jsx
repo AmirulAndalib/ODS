@@ -1,3 +1,4 @@
+import {useDashboardSession} from '../DashboardSignInGate'
 import {useEffect, useRef, useState} from 'react'
 import {Upload, Trash2} from 'lucide-react'
 import {prepareProfilePhoto, saveProfile, useLocalProfile} from '../../lib/localProfile'
@@ -6,6 +7,7 @@ import MetalMetricIcon from '../MetalMetricIcon'
 import {usePortalIdentity} from '../../contexts/PortalIdentityContext'
 
 export default function ProfileSettings() {
+  const {session, changePassword, signOut} = useDashboardSession()
   const {displayName} = usePortalIdentity()
   const saved = useLocalProfile()
   const [draft,setDraft] = useState(saved)
@@ -55,5 +57,12 @@ export default function ProfileSettings() {
     <p className="profile-privacy">Saved only in this browser. Your photo is resized locally and is not sent to the AI model. This does not change your login or permissions.</p>
     {error && <p role="alert">{error}</p>}{notice && <p role="status">{notice}</p>}
     <div className="profile-settings-actions"><button type="submit" disabled={busy}>Save profile</button></div>
+    <section className="profile-dashboard-access" aria-label="Dashboard access">
+      <h3>Dashboard access</h3>
+      <div className="profile-settings-actions">
+        <button type="button" onClick={changePassword}>Change dashboard password</button>
+        {session && <button type="button" onClick={signOut}>Sign out of this browser</button>}
+      </div>
+    </section>
   </form>
 }
