@@ -195,7 +195,7 @@ export default function PixelProviderSettings({ showHeading = true }) {
     <p className="text-xs text-theme-text-muted">Save stores your configuration. Apply it separately from Runtime.</p>
     {error && <p role="alert" className="text-sm text-red-400">{error}</p>}
     {notice && <p role="status" className="text-sm text-emerald-400">{notice}</p>}
-    {stale && <p className="text-sm text-amber-400">Reload the stored configuration before another save.</p>}
+    {stale && <p className="text-sm text-theme-text-secondary">Reload the stored configuration before another save.</p>}
     {loading && <p role="status">Loading provider settings…</p>}
     <div hidden={!showHeading && view !== 'runtime'}><PixelProviderRuntime compact={!showHeading} savedRevision={snapshot?.revision ?? null} saving={loading || saving || connectionBusy} blocked={dirty || stale || connectionBusy}
       routingEnabled={snapshot?.enabled === true} allowCloud={snapshot?.policy.allowCloud === true} onBusyChange={runtimeBusyChanged} /></div>

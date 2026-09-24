@@ -688,7 +688,7 @@ describe('Dashboard system overview', () => {
     fireEvent.click(screen.getByRole('menuitem', { name: /Restart service/i }))
 
     const restartingPill = await within(row).findByText('Restarting')
-    expect(restartingPill.className).toContain('text-amber-300')
+    expect(restartingPill.className).toContain('text-theme-text-secondary')
     expect(within(row).queryByText('Online')).not.toBeInTheDocument()
 
     restartDeferred.resolve()

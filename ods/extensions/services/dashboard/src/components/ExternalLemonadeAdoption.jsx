@@ -98,14 +98,14 @@ export default function ExternalLemonadeAdoption({ enabled, minimumContext, onSe
   const context = Number(observation?.contextLength || 0)
   const tooSmall = context > 0 && context < minimumContext
   return (
-    <section aria-label="External Lemonade model" className={`rounded-xl border border-amber-400/25 bg-amber-500/10 text-amber-100 ${compact ? 'mb-3 p-2.5 text-xs' : 'mb-5 p-4 text-sm'}`}>
+    <section aria-label="External Lemonade model" className={`rounded-xl border border-theme-border bg-theme-text-secondary/10 text-theme-text-secondary ${compact ? 'mb-3 p-2.5 text-xs' : 'mb-5 p-4 text-sm'}`}>
       <div className={`flex flex-wrap items-start justify-between ${compact ? 'gap-2' : 'gap-3'}`}>
         <div className={`flex min-w-0 items-start ${compact ? 'gap-2' : 'gap-3'}`}>
           <AlertCircle size={18} className="mt-0.5 shrink-0" aria-hidden="true" />
           <div>
             <p className="font-semibold">Model managed in Lemonade</p>
             {observation && <p className="mt-1 break-all">Loaded: <strong>{observation.modelId}</strong> · {context.toLocaleString()} context tokens</p>}
-            <p className="mt-1 text-amber-100/75">{compact
+            <p className="mt-1 text-theme-text-secondary/75">{compact
               ? 'After switching in Lemonade, adopt here for Portal and ODS. ODS leaves the native model loaded.'
               : 'After switching models in Lemonade, adopt the loaded model so Portal and ODS apps use the same route. ODS will not load or restore the native model.'}</p>
             {tooSmall && <p className="mt-1">Portal needs at least {minimumContext.toLocaleString()} context tokens; this model cannot be adopted.</p>}
@@ -114,10 +114,10 @@ export default function ExternalLemonadeAdoption({ enabled, minimumContext, onSe
           </div>
         </div>
         <div className={`flex shrink-0 flex-wrap ${compact ? 'gap-1' : 'gap-2'}`}>
-          <button type="button" onClick={recheck} disabled={checking || adopting} className={`inline-flex items-center gap-1 rounded-lg border border-amber-300/30 font-medium disabled:opacity-50 ${compact ? 'min-h-8 px-2' : 'min-h-9 px-3'}`}>
+          <button type="button" onClick={recheck} disabled={checking || adopting} className={`inline-flex items-center gap-1 rounded-lg border border-theme-border font-medium disabled:opacity-50 ${compact ? 'min-h-8 px-2' : 'min-h-9 px-3'}`}>
             <RefreshCw size={14} aria-hidden="true" /> Recheck
           </button>
-          <button type="button" onClick={adopt} disabled={!observation || checking || adopting || tooSmall} className={`rounded-lg border border-amber-300/50 font-semibold disabled:opacity-50 ${compact ? 'min-h-8 px-2' : 'min-h-9 px-3'}`}>
+          <button type="button" onClick={adopt} disabled={!observation || checking || adopting || tooSmall} className={`rounded-lg border border-theme-border font-semibold disabled:opacity-50 ${compact ? 'min-h-8 px-2' : 'min-h-9 px-3'}`}>
             {adopting ? 'Adopting…' : 'Adopt loaded model in ODS'}
           </button>
         </div>

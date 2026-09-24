@@ -91,14 +91,14 @@ export default function PixelAccessCard({ showHeading = true }) {
       <button type="button" disabled={disabled} onClick={() => { void change('sandboxed') }} className="rounded-lg border border-white/20 px-3 py-2 disabled:opacity-40">
         {status?.configured_mode === 'sandboxed' && !status?.pending ? 'Verify Sandbox' : 'Restore Sandbox'}
       </button>
-      <button type="button" disabled={disabled || status?.pending} onClick={() => { setConfirming(true); setConfirmed(false) }} className="rounded-lg border border-amber-500/50 px-3 py-2 disabled:opacity-40">Enable Full Access</button>
+      <button type="button" disabled={disabled || status?.pending} onClick={() => { setConfirming(true); setConfirmed(false) }} className="rounded-lg border border-theme-border px-3 py-2 disabled:opacity-40">Enable Full Access</button>
     </div>
-    {confirming ? <div role="dialog" aria-labelledby="pixel-access-confirm-title" className="rounded-lg border border-amber-500/50 p-4 space-y-3">
+    {confirming ? <div role="dialog" aria-labelledby="pixel-access-confirm-title" className="rounded-lg border border-theme-border p-4 space-y-3">
       <h3 id="pixel-access-confirm-title" className="font-semibold">Confirm Full Access</h3>
       <p>Portal can modify or delete files the owner account can access on the agent runtime, including files outside its workspace. Existing operating system restrictions remain. The gateway restarts to verify access; new requests may need to be retried during the change.</p>
       <label className="flex items-start gap-2"><input type="checkbox" checked={confirmed} onChange={event => setConfirmed(event.target.checked)} />I understand and authorize Full Access.</label>
       <div className="flex gap-3">
-        <button type="button" disabled={disabled || !confirmed} onClick={() => { void change('full-access') }} className="rounded-lg bg-amber-600 px-3 py-2 disabled:opacity-40">Confirm and enable</button>
+        <button type="button" disabled={disabled || !confirmed} onClick={() => { void change('full-access') }} className="rounded-lg border border-theme-border bg-theme-surface-hover text-theme-text px-3 py-2 disabled:opacity-40">Confirm and enable</button>
         <button type="button" disabled={changing} onClick={() => setConfirming(false)}>Cancel</button>
       </div>
     </div> : null}

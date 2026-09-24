@@ -448,7 +448,7 @@ function CreateOwnerModal({ ownerCardStatus, onClose, onCreated }) {
           </span>
         </label>
         {ownerCardUnavailable && (
-          <div className="mb-4 rounded-lg border border-amber-500/30 bg-amber-500/10 p-3 text-sm text-amber-100 flex items-start gap-2">
+          <div className="mb-4 rounded-lg border border-theme-border bg-theme-text-secondary/10 p-3 text-sm text-theme-text-secondary flex items-start gap-2">
             <AlertCircle size={16} className="mt-0.5 flex-shrink-0" />
             <span>{ownerCardStatus.reason || 'Enable ODS proxy before generating owner cards.'}</span>
           </div>

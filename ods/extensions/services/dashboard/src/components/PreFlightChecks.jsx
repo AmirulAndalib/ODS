@@ -187,13 +187,13 @@ export function PreFlightChecks({ onComplete, onIssuesFound }) {
     if (check.status === 'error') {
       return <XCircle className="w-5 h-5 text-red-400" />
     }
-    return <AlertCircle className="w-5 h-5 text-amber-400" />
+    return <AlertCircle className="w-5 h-5 text-theme-text-secondary" />
   }
 
   const getStatusClass = (status) => {
     if (status === 'success') return 'border-emerald-500/30 bg-emerald-500/5'
     if (status === 'error') return 'border-red-500/30 bg-red-500/5'
-    if (status === 'warning') return 'border-amber-500/30 bg-amber-500/5'
+    if (status === 'warning') return 'border-theme-border bg-theme-text-secondary/5'
     return 'border-theme-border bg-theme-card/50'
   }
 
@@ -220,7 +220,7 @@ export function PreFlightChecks({ onComplete, onIssuesFound }) {
               </div>
               <p className={`text-sm mt-1 ${
                 check.status === 'error' ? 'text-red-300' :
-                check.status === 'warning' ? 'text-amber-300' :
+                check.status === 'warning' ? 'text-theme-text-secondary' :
                 check.status === 'success' ? 'text-emerald-300' :
                 'text-theme-text-secondary'
               }`}>

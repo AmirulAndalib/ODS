@@ -36,7 +36,7 @@ const INITIAL_FORM = {
 const STATUS_META = {
   ready: { label: 'Ready', dot: 'bg-emerald-400', text: 'text-emerald-300' },
   disabled: { label: 'Disabled', dot: 'bg-zinc-500', text: 'text-zinc-400' },
-  degraded: { label: 'Degraded', dot: 'bg-amber-400', text: 'text-amber-300' },
+  degraded: { label: 'Degraded', dot: 'bg-theme-text-secondary', text: 'text-theme-text-secondary' },
   invalid: { label: 'Invalid', dot: 'bg-red-400', text: 'text-red-300' },
   unknown: { label: 'Unknown', dot: 'bg-zinc-500', text: 'text-zinc-400' },
 }
@@ -284,7 +284,7 @@ function LifecycleSummary({ result }) {
         <Field
           label="Consumer activation"
           value={result.activation.proven ? `${result.activation.publicModel || 'ods/current'} proven` : titleize(result.activation.reason)}
-          tone={result.activation.proven ? 'text-emerald-300' : 'text-amber-300'}
+          tone={result.activation.proven ? 'text-emerald-300' : 'text-theme-text-secondary'}
         />
       )}
       {result.rollback?.attempted && (
@@ -593,7 +593,7 @@ export default function RemoteProvider({ compact = false }) {
         <div className={`mb-4 flex items-center gap-2 rounded-lg border px-4 py-3 text-sm ${
           proofRecorded
             ? 'border-emerald-500/30 bg-emerald-500/10 text-emerald-100'
-            : 'border-amber-500/30 bg-amber-500/10 text-amber-100'
+            : 'border-theme-border bg-theme-text-secondary/10 text-theme-text-secondary'
         }`}>
           {proofRecorded ? <CheckCircle2 size={16} /> : <AlertCircle size={16} />}
           {proofSummary}
@@ -606,7 +606,7 @@ export default function RemoteProvider({ compact = false }) {
         </div>
       )}
       {consumerDrift && (
-        <div className="mb-4 flex items-start gap-2 rounded-lg border border-amber-500/30 bg-amber-500/10 px-4 py-3 text-sm text-amber-100" role="status">
+        <div className="mb-4 flex items-start gap-2 rounded-lg border border-theme-border bg-theme-text-secondary/10 px-4 py-3 text-sm text-theme-text-secondary" role="status">
           <AlertCircle className="mt-0.5 shrink-0" size={16} />
           <span>
             The provider route is reachable, but ODS and Portal are not using its exact model contract.
@@ -624,8 +624,8 @@ export default function RemoteProvider({ compact = false }) {
           <Field label="Context" value={provider.contextLength} />
           <Field label="Max output" value={provider.maxTokens} />
           <Field label="Reasoning" value={boolLabel(provider.reasoning)} />
-          <Field label="Proof" value={titleize(routeStatus.reason)} tone={routeStatus.proven ? 'text-emerald-300' : 'text-amber-300'} />
-          <Field label="Consumer route" value={titleize(activation.reason)} tone={activation.proven ? 'text-emerald-300' : 'text-amber-300'} />
+          <Field label="Proof" value={titleize(routeStatus.reason)} tone={routeStatus.proven ? 'text-emerald-300' : 'text-theme-text-secondary'} />
+          <Field label="Consumer route" value={titleize(activation.reason)} tone={activation.proven ? 'text-emerald-300' : 'text-theme-text-secondary'} />
           <Field label="Portal route" value={titleize(activation.pixel)} />
           <ProbeReceipt receipt={proofReceipt} />
           {Array.isArray(routeState.errors) && routeState.errors.length > 0 && (
@@ -636,16 +636,16 @@ export default function RemoteProvider({ compact = false }) {
         </Panel>
 
         <Panel hidden={compact && view !== 'diagnostics'} icon={Cloud} title="Egress">
-          <Field label="Status" value={titleize(egress.status)} tone={egress.ready ? 'text-emerald-300' : 'text-amber-300'} />
+          <Field label="Status" value={titleize(egress.status)} tone={egress.ready ? 'text-emerald-300' : 'text-theme-text-secondary'} />
           <Field label="Ready" value={boolLabel(egress.ready)} />
           <Field label="Reachable" value={boolLabel(egress.reachable)} />
-          <Field label="Secret" value={egress.secret?.configured ? 'Configured' : 'Missing'} tone={egress.secret?.configured ? 'text-emerald-300' : 'text-amber-300'} />
+          <Field label="Secret" value={egress.secret?.configured ? 'Configured' : 'Missing'} tone={egress.secret?.configured ? 'text-emerald-300' : 'text-theme-text-secondary'} />
           <Field label="Resolved addresses" value={egress.resolution?.addressCount ?? 'Unknown'} />
           <Field label="Reason" value={titleize(egress.reason)} />
         </Panel>
 
         <Panel hidden={compact && view !== 'diagnostics'} icon={Server} title="SSH Tunnel">
-          <Field label="Status" value={titleize(sshSupervisor.status)} tone={sshSupervisor.ready ? 'text-emerald-300' : 'text-amber-300'} />
+          <Field label="Status" value={titleize(sshSupervisor.status)} tone={sshSupervisor.ready ? 'text-emerald-300' : 'text-theme-text-secondary'} />
           <Field label="Ready" value={boolLabel(sshSupervisor.ready)} />
           <Field label="Ready to start" value={boolLabel(sshSupervisor.readyToStart)} />
           <Field label="Reachable" value={boolLabel(sshSupervisor.reachable)} />
@@ -676,14 +676,14 @@ export default function RemoteProvider({ compact = false }) {
           )}
         >
           <div className="grid gap-2 md:grid-cols-4">
-            <Field label="Peer ready" value={boolLabel(peerReady)} tone={peerReady ? 'text-emerald-300' : 'text-amber-300'} />
+            <Field label="Peer ready" value={boolLabel(peerReady)} tone={peerReady ? 'text-emerald-300' : 'text-theme-text-secondary'} />
             <Field label="Transport" value={peer.transport} />
-            <Field label="Token" value={peer.token?.configured ? 'Configured' : 'Missing'} tone={peer.token?.configured ? 'text-emerald-300' : 'text-amber-300'} />
+            <Field label="Token" value={peer.token?.configured ? 'Configured' : 'Missing'} tone={peer.token?.configured ? 'text-emerald-300' : 'text-theme-text-secondary'} />
             <Field label="Reason" value={titleize(peer.reason)} />
           </div>
 
           {!peerReady && (
-            <div className="rounded-lg border border-amber-500/30 bg-amber-500/10 p-3 text-sm text-amber-100" role="status">
+            <div className="rounded-lg border border-theme-border bg-theme-text-secondary/10 p-3 text-sm text-theme-text-secondary" role="status">
               Peer model management unavailable: {titleize(peer.reason)}
             </div>
           )}
@@ -700,7 +700,7 @@ export default function RemoteProvider({ compact = false }) {
               <div className="flex flex-wrap items-center justify-between gap-3 rounded-lg border border-theme-border/70 bg-black/10 px-3 py-2 text-sm">
                 <span className="text-theme-text-muted">Download status</span>
                 <div className="flex flex-wrap items-center gap-2">
-                  <span className={peerDownloadBusy ? 'font-semibold text-amber-300' : 'font-medium text-theme-text'}>
+                  <span className={peerDownloadBusy ? 'font-semibold text-theme-text-secondary' : 'font-medium text-theme-text'}>
                     {peerDownloadSummary(peerDownloadStatus)}
                   </span>
                   <ActionButton icon={Power} onClick={cancelPeerDownload} disabled={!peerDownloadBusy || peerBusy} danger>
