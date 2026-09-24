@@ -68,6 +68,7 @@ from routers import (
     gpu as gpu_router, resources, voice, models as models_router, model_state as model_state_router,
     model_routes as model_routes_router, remote_provider_status, templates,
     auth as auth_router,
+    dashboard_session,
     magic_link,
     oauth_passthrough,
     talk,
@@ -1205,6 +1206,7 @@ app.include_router(remote_provider_status.router)
 app.include_router(models_router.router)
 app.include_router(templates.router)
 app.include_router(auth_router.router)
+app.include_router(dashboard_session.router)
 app.include_router(magic_link.router)
 app.include_router(oauth_passthrough.router)
 app.include_router(talk.router)

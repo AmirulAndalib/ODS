@@ -481,6 +481,7 @@ if [[ -n "$LOCAL_IP" ]]; then
     [[ -z "$_bind" ]] && _bind="127.0.0.1"
     if [[ "$_bind" == "0.0.0.0" ]]; then
         echo -e "  ${AMB}On your network:${NC}  ${WHT}http://${LOCAL_IP}:${DASHBOARD_PORT}${NC}"
+        echo -e "  ${DIM}Each browser signs in once: run 'ods dashboard-login' for a link${NC}"
     else
         echo -e "  ${AMB}LAN access:${NC}      ${DIM}Reinstall with --lan or set BIND_ADDRESS=0.0.0.0 in .env${NC}"
     fi

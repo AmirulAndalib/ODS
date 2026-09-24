@@ -6702,6 +6702,10 @@ ${CYAN}Model Commands:${NC}
   model list          List available tiers
   model swap <tier>   Switch to a different model tier
 
+${CYAN}Dashboard Sign-in:${NC}
+  dashboard-login     Set up or recover your dashboard password with a one-time link
+                      (http://localhost on this machine never asks)
+
 ${CYAN}Remote Provider Commands:${NC}
   remote-provider status [--json]
                       Show remote GPU route and egress status
@@ -6781,6 +6785,7 @@ ${CYAN}Examples:${NC}
                                   # Apply a template (enables services)
   ods audit                     # Audit every extension contract
   ods audit --json whisper      # Audit one service as JSON
+  ods dashboard-login           # Sign in to the dashboard from another device
   ods agent status              # Check host agent health
   ods agent restart             # Restart host agent
   ods repair voice              # Start voice services and cache STT model
@@ -6797,6 +6802,75 @@ Without an override, ods-cli uses the install beside its resolved script or
 symlink target when compose metadata is present, then falls back to ~/ods.
 
 EOF
+}
+
+#=============================================================================
+# Dashboard sign-in
+#=============================================================================
+# A browser on this machine (http://localhost) uses the dashboard without
+# signing in. Any other route - LAN mode, ODS proxy, a reverse proxy or
+# Tailscale Serve - needs a dashboard session. This prints a one-time link
+# that signs a browser in; the token is only valid for 10 minutes and once.
+_dashboard_lan_ip() {
+    if [[ "$(uname -s)" == "Darwin" ]]; then
+        ipconfig getifaddr en0 || ipconfig getifaddr en1
+    else
+        hostname -I | awk '{print $1}'
+    fi
+}
+
+cmd_dashboard_login() {
+    [[ $# -eq 0 ]] || error "Usage: ods dashboard-login"
+    local response_file http_code token port bind device fragment lan_ip
+    response_file=$(mktemp "${TMPDIR:-/tmp}/ods-dashboard-login.XXXXXX") \
+        || error "Could not create a temporary response file"
+    chmod 600 "$response_file"
+    # _remote_provider_request is the CLI's generic authenticated Dashboard
+    # API call (API key from .env, never on the command line).
+    if ! http_code="$(_remote_provider_request POST /api/auth/dashboard-session/link "$response_file" "" 15)"; then
+        rm -f "$response_file"
+        error "The Dashboard API is not reachable. Check that ODS is running: ods status"
+    fi
+    if [[ "$http_code" != "200" ]]; then
+        rm -f "$response_file"
+        error "The Dashboard API refused the sign-in link request (HTTP $http_code)."
+    fi
+    token="$(jq -r '.token // empty' "$response_file")"
+    rm -f "$response_file"
+    [[ "$token" =~ ^[A-Za-z0-9_-]{16,128}$ ]] || error "The Dashboard API returned an unexpected sign-in token."
+    fragment="#ods-login=${token}"
+
+    port="$(_env_get_raw DASHBOARD_PORT)"
+    [[ "$port" =~ ^[0-9]+$ ]] || port="3001"
+    bind="$(_env_get_raw BIND_ADDRESS)"
+    device="$(_env_get_raw ODS_DEVICE_NAME)"
+    [[ "$device" =~ ^[A-Za-z0-9-]+$ ]] || device="ods"
+
+    echo "One-time dashboard recovery link (works once, expires in 10 minutes):"
+    echo "Open the link to choose your own password. No old password is required."
+    echo "  http://localhost:${port}/${fragment}"
+    if _ods_cli_proxy_enabled; then
+        echo "  http://dashboard.${device}.local/${fragment}"
+    fi
+    case "$bind" in
+        ""|127.*|localhost|::1) ;;
+        0.0.0.0|::)
+            if ! lan_ip="$(_dashboard_lan_ip)"; then
+                warn "Could not detect this machine's LAN address; use its IP address below."
+                lan_ip=""
+            fi
+            echo "  http://${lan_ip:-<this-machine-ip>}:${port}/${fragment}"
+            ;;
+        *) echo "  http://${bind}:${port}/${fragment}" ;;
+    esac
+    echo "  Any other address for this ODS: add ${fragment} to the end of the URL."
+    echo ""
+    case "$bind" in
+        ""|127.*|localhost|::1)
+            echo "On this machine, http://localhost:${port} never asks you to sign in." ;;
+        *)
+            echo "BIND_ADDRESS exposes the dashboard to your network, so every browser signs in once (30 days)." ;;
+    esac
 }
 
 #=============================================================================
@@ -6832,6 +6906,7 @@ case "${1:-help}" in
     audit)        shift; cmd_audit "$@" ;;
     template|tmpl) shift; cmd_template "$@" ;;
     agent)        shift; cmd_agent "$@" ;;
+    dashboard-login) shift; cmd_dashboard_login "$@" ;;
     help|h|--help|-h) cmd_help ;;
     version|v|--version|-v) echo "ods-cli v${VERSION}" ;;
     *)           error "Unknown command: $1. Run 'ods help' for usage." ;;

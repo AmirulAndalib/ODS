@@ -1,10 +1,22 @@
 """Tests for session_signer — HMAC-signed ods-session cookies."""
 
+import base64
+import hashlib
+import hmac
 import time
 
 import pytest
 
 import session_signer
+
+
+def test_upgrade_rejects_pre_fix_guest_cookie_even_before_expiry():
+    payload = f"legacy-guest.{int(time.time()) + 3600}"
+    signature = base64.urlsafe_b64encode(hmac.new(
+        b"test-secret-do-not-use-in-prod", payload.encode(), hashlib.sha256,
+    ).digest()).rstrip(b"=").decode()
+    assert session_signer.verify(f"{payload}.{signature}") == (False, "bad-signature")
+    assert session_signer.verify(session_signer.issue()) == (True, "ok")
 
 
 @pytest.fixture(autouse=True)
