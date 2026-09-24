@@ -130,19 +130,13 @@ else
 
     # ── OpenCode (local agentic coding platform) ──
     OPENCODE_BIN="$(_find_opencode_bin || true)"
-    if [[ -z "$OPENCODE_BIN" ]]; then
-        ai "Installing OpenCode..."
-        tmpfile=$(mktemp /tmp/opencode-install.XXXXXX.sh)
-        if curl -fsSL --max-time 300 https://opencode.ai/install -o "$tmpfile" 2>/dev/null && bash "$tmpfile" >> "$LOG_FILE" 2>&1; then
-            OPENCODE_BIN="$(_find_opencode_bin || true)"
-            ai_ok "OpenCode installer completed"
-        else
-            ai_warn "OpenCode install failed — install later with: curl -fsSL https://opencode.ai/install | bash"
-        fi
-        rm -f "$tmpfile"
-        [[ -n "$OPENCODE_BIN" ]] && ai_ok "OpenCode installed ($OPENCODE_BIN)" || ai_warn "OpenCode installer completed but opencode was not found"
+    # shellcheck source=../lib/opencode-runtime.sh
+    . "$SCRIPT_DIR/installers/lib/opencode-runtime.sh"
+    if OPENCODE_BIN="$(ods_install_opencode "$OPENCODE_BIN")"; then
+        ai_ok "Reviewed OpenCode release installed ($OPENCODE_BIN)"
     else
-        ai_ok "OpenCode already installed ($OPENCODE_BIN)"
+        OPENCODE_BIN=""
+        ai_warn "OpenCode upgrade failed; existing binary/configuration preserved. Re-run after resolving the download or binary error."
     fi
 
     # Configure OpenCode to use local llama-server
@@ -322,14 +316,15 @@ OPENCODE_EOF
                 _sed_i "s|__HOME__|${_home_esc}|g" "$svc_tmp"
                 _sed_i "s|__OPENCODE_BIN__|${_opencode_bin_esc}|g" "$svc_tmp"
                 _sed_i "s|__OPENCODE_BIN_DIR__|${_opencode_bin_dir_esc}|g" "$svc_tmp"
-                cp "$svc_tmp" "$SYSTEMD_USER_DIR/opencode-web.service"
+                if cp "$svc_tmp" "$SYSTEMD_USER_DIR/opencode-web.service"; then
+                    ods_restart_opencode_service >> "$LOG_FILE" 2>&1 && \
+                        ai_ok "OpenCode Web UI service restarted with the updated binary/configuration (port 3003)" || \
+                        ai_warn "OpenCode Web UI service failed to restart"
+                else
+                    ai_warn "OpenCode unit update failed; previous service left unchanged"
+                fi
                 rm -f "$svc_tmp"
             fi
-
-            ods_systemctl_user daemon-reload 2>/dev/null || true
-            ods_systemctl_user enable --now opencode-web.service >> "$LOG_FILE" 2>&1 && \
-                ai_ok "OpenCode Web UI service installed (user-level, port 3003)" || \
-                ai_warn "OpenCode Web UI service failed to start"
 
             # Enable lingering so service survives logout
             loginctl enable-linger "$(whoami)" 2>/dev/null || \
