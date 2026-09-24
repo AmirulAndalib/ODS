@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback, useRef } from 'react'
-import { CheckCircle, Circle, ChevronRight, ChevronLeft, Mic, User, Settings, Play, Shield, Layers } from 'lucide-react'
+import { AlertTriangle, CheckCircle, Circle, ChevronRight, ChevronLeft, Mic, User, Settings, Play, Shield, Layers } from 'lucide-react'
 import { PreFlightChecks } from './PreFlightChecks'
 import { TemplatePicker } from './TemplatePicker'
 import { getTemplateStatus } from '../lib/templates'
@@ -340,7 +340,7 @@ export default function SetupWizard({ onComplete }) {
                 <div className={`mt-4 p-4 rounded-lg ${testStatus.success ? 'bg-green-500/20 text-green-400' : 'bg-theme-text-secondary/20 text-theme-text-secondary'}`}>
                   {testStatus.success
                     ? '✓ All systems operational'
-                    : '⚠ Some tests failed — review the log above. You can re-run, or continue anyway and revisit from the Diagnostics tab later.'}
+                    : <><AlertTriangle size={16} className="mr-1 inline" aria-hidden="true" />Some tests failed — review the log above. You can re-run, or continue anyway and revisit from the Diagnostics tab later.</>}
                 </div>
               )}
 
