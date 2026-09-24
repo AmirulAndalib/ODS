@@ -89,6 +89,7 @@ describe('Pixel', () => {
   afterEach(() => {
     vi.useRealTimers()
     vi.restoreAllMocks()
+    vi.unstubAllGlobals()
   })
 
   it('formats short and long owner-agent turn durations', () => {
@@ -211,6 +212,12 @@ describe('Pixel', () => {
   })
 
   it('restores the verified preview after reload and preserves an explicit close', async () => {
+    // Persistence and navigation do not depend on reveal animation timing.
+    // PortalStreamingText.test.jsx exercises the animated response lifecycle.
+    const matchMedia = globalThis.matchMedia
+    vi.stubGlobal('matchMedia', query => query === '(prefers-reduced-motion: reduce)'
+      ? { matches: true, addEventListener: vi.fn(), removeEventListener: vi.fn() }
+      : matchMedia(query))
     const sha256 = 'a'.repeat(64)
     const siteId = `site-${sha256.slice(0, 24)}`
     const preview = {
