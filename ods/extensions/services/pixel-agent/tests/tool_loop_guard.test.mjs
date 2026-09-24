@@ -16282,3 +16282,32 @@ for(const wrapped of [false,true]) for(const name of ['edit','apply_patch']) for
   assert.equal(probes,1);
   assert.equal(guard.verificationForRun(context.runId).status,matched?'passed':'failed');
 });
+// The Mac fleet generated literal backslash-n between Python statements and
+// then rewrote unrelated files instead of fixing the reported parse failure.
+for (const wrap of [false, true]) {
+  test(`escaped-newline syntax failure receives targeted repair guidance (wrapped=${wrap})`, () => {
+    const traceback = 'Traceback (most recent call last):\n' +
+      '  File "/usr/lib/python3.12/unittest/loader.py", line 162, in loadTestsFromName\n'.repeat(9) +
+      '  File "/workspace/project/test_totals.py", line 105\n' +
+      "    with open(filepath, 'w', encoding='utf-8') as f:\\n            f.write(content)\\n        return filepath\n" +
+      '                                                     ^\n' +
+      'SyntaxError: unexpected character after line continuation character\n\n(Command exited with code 1)';
+    const result={isError:true,content:[{type:'text',text:traceback}],
+      details:{status:'completed',exitCode:1,aggregated:traceback,cwd:'/workspace/project'}};
+    const {guard}=nativeFailureRun({wrap,resultOverride:result});
+    const projected=persistToolResult(guard,'exec','native-failure',result).message;
+    assert.match(projected.content[0].text,/line 105/);
+    assert.match(projected.content[0].text,/SyntaxError: unexpected character/);
+    assert.match(projected.content[0].text,/one targeted edit/);
+    assert.match(projected.content[0].text,/Preserve valid escapes inside strings; do not globally replace them/);
+    assert.match(projected.content[0].text,/Rerun the same unittest command before rewriting other files/);
+    assert.equal(projected.isError,true);
+    assert.equal(projected.details.exitCode,1);
+    assert.equal(guard.verificationForRun('run-1').status,'failed');
+  });
+}
+test('ordinary Python failures do not receive an escaped-newline diagnosis',()=>{
+  const {guard,result}=nativeFailureRun();
+  const text=persistToolResult(guard,'exec','native-failure',result).message.content[0].text;
+  assert.doesNotMatch(text,/ODS Pixel repair/);
+});

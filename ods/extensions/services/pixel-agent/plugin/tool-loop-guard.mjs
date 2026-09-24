@@ -3122,7 +3122,12 @@ function compactFailedUnittestText(result) {
   if (summary.length > 1400) {
     summary = `${summaryLines[0]}\n${summary.slice(-1320)}`;
   }
-  return `[Earlier unittest framework frames compacted.]\n${summary}`;
+  const escapedNewlineHint =
+    /SyntaxError: unexpected character after line continuation character/.test(summary) &&
+    summary.includes("\\n")
+      ? "\n[ODS Pixel repair] Python could not parse the reported file. Read the reported line and nearby lines, then make one targeted edit: literal backslash-n outside a Python string must be a real line break. Preserve valid escapes inside strings; do not globally replace them. Rerun the same unittest command before rewriting other files. Keep the requested assertions intact; parsing failure does not verify behavior."
+      : "";
+  return `[Earlier unittest framework frames compacted.]\n${summary}${escapedNewlineHint}`;
 }
 
 function compactWorkspaceCoreResult(message, pending, state) {
