@@ -27,6 +27,7 @@ This extension does NOT try to give you real multi-user. It gives you:
 | Magic-link-authed gateway | ✅ |
 | Anyone with a valid owner card can reach ODS Talk | ✅ |
 | Anyone with a valid advanced Hermes invite can reach Hermes | ✅ |
+| A chat-only guest invite reaches Talk or the Hermes gate | ❌ — it sets no `ods-session`; Open WebUI has its own sign-in |
 | Anyone without a valid invite gets bounced | ✅ |
 | Mom's memories / skills / sessions isolated from Dad's | ❌ — shared |
 | The proxy knows WHO is logged in | ❌ — only that *someone* has a valid invite |
@@ -61,7 +62,7 @@ ods restart hermes-proxy
 #    -> Hermes serves the advanced SPA
 ```
 
-If the recipient has not yet redeemed an owner card or guest invite, step 5 lands them on the "you need an owner card" page with instructions.
+If the recipient has not yet redeemed an owner card or Hermes invite, step 5 lands them on the "you need an owner card" page with instructions. Chat-only guest invites never pass this gate: they land in Open WebUI and set no `ods-session`.
 
 ## ODS Talk owner-card flow
 

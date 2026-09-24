@@ -1,6 +1,6 @@
 import { NavLink, useLocation, useNavigate } from 'react-router-dom'
 import { useEffect, useState } from 'react'
-import { ArrowLeft, ChevronLeft, ChevronRight, Grid2X2, Search, Sparkles, Settings } from 'lucide-react'
+import { ArrowLeft, ChevronLeft, ChevronRight, Grid2X2, LogOut, Search, Sparkles, Settings } from 'lucide-react'
 import { getSidebarExternalLinks, getSidebarNavItems } from '../plugins/registry'
 import { usePortalIdentity } from '../contexts/PortalIdentityContext'
 import { fallbackServiceUrl } from '../lib/serviceUrls'
@@ -11,6 +11,7 @@ import MetalMetricIcon from './MetalMetricIcon'
 import PixelConversationNavigation from './PixelConversationNavigation'
 import {useLocalProfile} from '../lib/localProfile'
 import UserAvatar from './UserAvatar'
+import { useDashboardSession } from './DashboardSignInGate'
 
 function withServiceToken(rawUrl, token) {
   const url = new URL(rawUrl, window.location.origin)
@@ -19,6 +20,7 @@ function withServiceToken(rawUrl, token) {
 }
 
 export default function Sidebar({ status, collapsed, onToggle }) {
+  const dashboardSession = useDashboardSession()
   const profile = useLocalProfile()
   const { pathname } = useLocation()
   const navigate = useNavigate()
@@ -88,6 +90,6 @@ export default function Sidebar({ status, collapsed, onToggle }) {
         <PixelHandoffApproval label="Approvals" />
       </div>}
     </nav>
-    <footer className="pixel-sidebar-footer"><NavLink to="/settings?section=profile" className="sidebar-profile-link" aria-label="Edit your profile" title="Edit your profile"><UserAvatar profile={profile}/><div className="sidebar-profile-copy"><strong>{profile.name || 'Your profile'}</strong><small>{status?.version ? `ODS ${status.version}` : 'Local workspace'}</small></div><MetalMetricIcon icon={Settings} size={14}/></NavLink></footer>
+    <footer className="pixel-sidebar-footer"><NavLink to="/settings?section=profile" className="sidebar-profile-link" aria-label="Edit your profile" title="Edit your profile"><UserAvatar profile={profile}/><div className="sidebar-profile-copy"><strong>{profile.name || 'Your profile'}</strong><small>{status?.version ? `ODS ${status.version}` : 'Local workspace'}</small></div><MetalMetricIcon icon={Settings} size={14}/></NavLink>{dashboardSession.session && <button type="button" className="pixel-metal-control" onClick={dashboardSession.signOut} aria-label="Sign out of this browser" title="Sign out of this browser"><MetalMetricIcon icon={LogOut} size={14}/></button>}</footer>
   </aside>
 }

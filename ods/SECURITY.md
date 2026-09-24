@@ -77,6 +77,22 @@ sudo ufw allow from 192.168.0.0/24 to any port 3001  # Dashboard
 sudo ufw allow from 192.168.0.0/24 to any port 8080  # LLM API
 ```
 
+### Dashboard Sign-in
+
+The dashboard manages the whole install, so it only opens without a password
+for a browser on the ODS machine itself (`http://localhost:3001`). Any other
+route needs a one-time sign-in per browser, remembered for 30 days:
+
+- LAN mode (`--lan` or `BIND_ADDRESS=0.0.0.0`) — every browser, including the
+  machine's own, signs in because port 3001 is reachable from the network.
+- ODS proxy (`dashboard.<device>.local`), a reverse proxy, or Tailscale Serve
+  in front of `localhost`.
+
+Sign in with the dashboard key (`DASHBOARD_API_KEY` in `.env`), or run
+`ods dashboard-login` on the ODS machine for a one-time link. Rotating
+`DASHBOARD_API_KEY` signs every browser out. Magic-link guest invites for chat
+never grant dashboard, ODS Talk or Hermes access.
+
 ### Host Agent Network Binding
 
 The host agent (`bin/ods-host-agent.py`) has its own bind address, separate from the Docker services above. It is controlled by `ODS_AGENT_BIND` in `.env`:

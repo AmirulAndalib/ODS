@@ -182,7 +182,42 @@ def test_ods_proxy_routes_talk_portal() -> None:
     caddyfile = read(SERVICES / "ods-proxy" / "Caddyfile")
 
     assert_true("talk.{$ODS_DEVICE_NAME:ods}.local" in caddyfile, "ods-proxy must route talk.<device>.local")
-    assert_true("reverse_proxy dashboard:3001" in caddyfile, "ODS Talk should be served by the dashboard container")
+    for host in ("talk", "dashboard"):
+        body = caddy_block_body(caddyfile, "http://%s.{$ODS_DEVICE_NAME:ods}.local {" % host)
+        assert_true(
+            "reverse_proxy dashboard:3011" in body and "dashboard:3001" not in body,
+            f"ods-proxy must send {host}.<device>.local to the dashboard's sign-in-required network listener",
+        )
+
+
+def test_dashboard_admin_api_requires_sign_in_off_the_machine() -> None:
+    nginx_conf = read(SERVICES / "dashboard" / "nginx.conf")
+    entrypoint = read(SERVICES / "dashboard" / "entrypoint.sh")
+    compose = read(ROOT / "docker-compose.base.yml")
+
+    blocks = re.findall(r"(?ms)^    location [^\n]*\{\n.*?^    \}", nginx_conf)
+    keyed = [block for block in blocks if 'Authorization "Bearer ${DASHBOARD_API_KEY}"' in block]
+    assert_true(len(keyed) >= 8, "expected the dashboard's API-key locations")
+    for block in keyed:
+        assert_true(
+            "auth_request /_ods_dashboard_gate;" in block,
+            "every location that adds the dashboard API key must pass the sign-in gate: " + block.splitlines()[0],
+        )
+    talk = next(block for block in blocks if block.startswith("    location ^~ /api/talk/"))
+    assert_true("DASHBOARD_API_KEY" not in talk, "ODS Talk must not receive the dashboard admin key")
+    assert_true(
+        "listen 3011;" in nginx_conf and '"__ODS_LOCAL_LISTENER__:1:0" 1;' in nginx_conf,
+        "only the loopback-published listener may skip sign-in, and only for loopback hosts without forwarding",
+    )
+    assert_true(
+        "- ODS_DASHBOARD_BIND=${BIND_ADDRESS:-127.0.0.1}" in compose
+        and '"${BIND_ADDRESS:-127.0.0.1}:${DASHBOARD_PORT:-3001}:3001"' in compose,
+        "the dashboard must learn the address its port 3001 is published on",
+    )
+    assert_true(
+        "LOCAL_LISTENER=off" in entrypoint and 's|__ODS_LOCAL_LISTENER__|${LOCAL_LISTENER}|g' in entrypoint,
+        "network-exposed binds must disable the local no-sign-in listener",
+    )
 
 
 def test_dashboard_csp_allows_ods_talk_tts_blob_audio() -> None:
@@ -326,6 +361,7 @@ def main() -> int:
         test_hermes_whatsapp_bridge_avoids_open_webui_port,
         test_hermes_local_provider_has_generous_timeouts,
         test_ods_proxy_routes_talk_portal,
+        test_dashboard_admin_api_requires_sign_in_off_the_machine,
         test_dashboard_csp_allows_ods_talk_tts_blob_audio,
         test_dashboard_csp_allows_only_verified_pixel_preview_routes,
         test_ods_proxy_caps_request_body_sizes,
