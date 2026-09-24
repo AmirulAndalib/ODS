@@ -548,7 +548,7 @@ function ConfirmStep({
       )}
 
       {ownerCardUnavailable && (
-        <div className="mb-6 p-4 bg-amber-500/10 border border-amber-500/30 rounded-xl text-amber-100 text-sm flex items-start gap-2">
+        <div className="mb-6 p-4 bg-theme-text-secondary/10 border border-theme-border rounded-xl text-theme-text-secondary text-sm flex items-start gap-2">
           <AlertCircle size={18} className="flex-shrink-0 mt-0.5" />
           <span>
             {ownerCardStatus.reason || 'Enable ODS proxy before generating owner cards.'}

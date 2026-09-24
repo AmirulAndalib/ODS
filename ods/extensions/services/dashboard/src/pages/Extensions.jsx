@@ -72,10 +72,10 @@ const STATUS_STYLES = {
   enabled:       'bg-green-500/20 text-green-400',
   cli_installed: 'bg-green-500/20 text-green-400',
   stopped:       'bg-red-500/20 text-red-400',
-  unhealthy:     'bg-amber-500/20 text-amber-400',
+  unhealthy:     'bg-theme-text-secondary/20 text-theme-text-secondary',
   disabled:      'bg-theme-border text-theme-text-muted',
   not_installed: 'border border-theme-border text-theme-text-muted',
-  incompatible:  'bg-orange-500/20 text-orange-400',
+  incompatible:  'bg-theme-text-secondary/20 text-theme-text-secondary',
   installing:    'bg-blue-500/20 text-blue-400',
   setting_up:    'bg-blue-500/20 text-blue-400',
   error:         'bg-red-500/20 text-red-300',
@@ -476,8 +476,8 @@ export default function Extensions({ compact = false }) {
       {/* Agent offline banner */}
       </>}
       {catalog?.agent_available === false && (
-        <div className="mb-4 rounded-xl border border-amber-500/20 bg-amber-500/[0.06] px-4 py-3 text-[11px] text-amber-300/80 flex items-center gap-2.5">
-          <span className="shrink-0 text-amber-400">!</span>
+        <div className="mb-4 rounded-xl border border-theme-border bg-theme-text-secondary/[0.06] px-4 py-3 text-[11px] text-theme-text-secondary/80 flex items-center gap-2.5">
+          <span className="shrink-0 text-theme-text-secondary">!</span>
           <span>Host agent is offline — install, enable, and disable operations are unavailable. Container logs cannot be fetched.</span>
         </div>
       )}
@@ -486,7 +486,7 @@ export default function Extensions({ compact = false }) {
           Surfaces when dashboard-api restarts mid-install. Auto-clears on
           the next successful poll. */}
       {pollingLost && (
-        <div className="mb-4 rounded-xl border border-amber-500/15 bg-amber-500/[0.04] px-4 py-2 text-[10px] text-amber-400/80 flex items-center gap-2">
+        <div className="mb-4 rounded-xl border border-theme-border bg-theme-text-secondary/[0.04] px-4 py-2 text-[10px] text-theme-text-secondary/80 flex items-center gap-2">
           <Loader2 size={10} className="animate-spin shrink-0" />
           <span>Connection to dashboard lost — retrying. Refresh if this persists.</span>
         </div>
@@ -709,8 +709,8 @@ function ExtensionCard({ ext, gpuBackend, agentAvailable, onDetails, onConsole, 
                 onClick={() => onAction(ext, status === 'disabled' ? 'enable' : 'disable')}
                 className={`relative inline-flex h-[18px] w-[32px] shrink-0 rounded-full transition-colors disabled:opacity-50 ${
                   status === 'error' ? 'bg-red-500' :
-                  status === 'stopped' ? 'bg-amber-500' :
-                  status === 'unhealthy' ? 'bg-amber-500' :
+                  status === 'stopped' ? 'bg-theme-text-secondary' :
+                  status === 'unhealthy' ? 'bg-theme-text-secondary' :
                   (status === 'enabled' || isCliInstalled) ? 'bg-green-500' : 'bg-theme-border'
                 }`}
               >
@@ -812,7 +812,7 @@ function ExtensionCard({ ext, gpuBackend, agentAvailable, onDetails, onConsole, 
               onClick={onConsole}
               disabled={agentOffline}
               title={agentOffline ? 'Host agent is offline' : 'View container logs'}
-              className="flex items-center gap-1.5 px-3 py-1.5 text-[10px] font-semibold uppercase tracking-[0.08em] rounded-lg bg-amber-500/15 text-amber-400 hover:bg-amber-500/25 transition-colors disabled:opacity-50"
+              className="flex items-center gap-1.5 px-3 py-1.5 text-[10px] font-semibold uppercase tracking-[0.08em] rounded-lg bg-theme-text-secondary/15 text-theme-text-secondary hover:bg-theme-text-secondary/25 transition-colors disabled:opacity-50"
             >
               <Terminal size={12} /> Check Logs
             </button>
@@ -842,7 +842,7 @@ function ExtensionCard({ ext, gpuBackend, agentAvailable, onDetails, onConsole, 
               disabled={actionDisabled}
               title={disabledTitle || 'Permanently delete service data'}
               onClick={() => onAction(ext, 'purge')}
-              className="flex items-center gap-1.5 px-3 py-1.5 text-[10px] font-semibold uppercase tracking-[0.08em] rounded-lg bg-transparent text-amber-400/80 hover:bg-amber-500/15 hover:text-amber-300 transition-colors disabled:opacity-50"
+              className="flex items-center gap-1.5 px-3 py-1.5 text-[10px] font-semibold uppercase tracking-[0.08em] rounded-lg bg-transparent text-theme-text-secondary/80 hover:bg-theme-text-secondary/15 hover:text-theme-text-secondary transition-colors disabled:opacity-50"
             >
               {isMutating ? <Loader2 size={12} className="animate-spin" /> : <><Database size={12} /> Purge Data</>}
             </button>
@@ -887,7 +887,7 @@ function ExtensionCard({ ext, gpuBackend, agentAvailable, onDetails, onConsole, 
               className={`flex items-center gap-1.5 px-2 py-1.5 text-[10px] rounded-lg transition-colors ${
                 agentOffline ? 'text-theme-text-muted/40 cursor-not-allowed' :
                 isError ? 'text-red-400 hover:text-red-300 hover:bg-red-500/10' :
-                (status === 'installing' || isStopped || isUnhealthy) ? 'text-amber-400/80 hover:text-amber-300 hover:bg-amber-500/10' :
+                (status === 'installing' || isStopped || isUnhealthy) ? 'text-theme-text-secondary/80 hover:text-theme-text-secondary hover:bg-theme-text-secondary/10' :
                 'text-theme-text-secondary hover:text-theme-text hover:bg-theme-surface-hover/40'
               }`}
               title={agentOffline ? 'Agent offline' : 'View logs'}
@@ -970,7 +970,7 @@ function DetailModal({ ext, gpuBackend, onClose }) {
                 <span className="text-theme-text-muted text-xs block mb-1">Library</span>
                 <span className="text-theme-text capitalize">{(ext.update_status || 'unavailable').replace('_', ' ')}</span>
                 {ext.locally_modified && (
-                  <span className="text-amber-400 text-[10px] block mt-1">Local definition changed</span>
+                  <span className="text-theme-text-secondary text-[10px] block mt-1">Local definition changed</span>
                 )}
               </div>
             )}
@@ -978,7 +978,7 @@ function DetailModal({ ext, gpuBackend, onClose }) {
               <span className="text-theme-text-muted text-xs block mb-1">GPU</span>
               <span className="text-theme-text">{ext.gpu_backends?.join(', ') || 'none'}</span>
               {isIncompatible && gpuBackend && (
-                <span className="text-orange-400 text-[10px] block mt-1">Your system: {gpuBackend}</span>
+                <span className="text-theme-text-secondary text-[10px] block mt-1">Your system: {gpuBackend}</span>
               )}
             </div>
             <div className="bg-theme-card/50 rounded-lg p-3">

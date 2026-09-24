@@ -96,14 +96,14 @@ const EDGE_META = {
   'voice input': '#ec4899',
   'voice output': '#ec4899',
   API: '#6366f1',
-  intercept: '#f59e0b',
+  intercept: 'rgb(var(--theme-text-secondary))',
   observability: '#84cc16',
   privacy: '#f43f5e',
 }
 
 const STATUS = {
   healthy: { color: '#22c55e', text: 'text-green-400', dot: 'bg-green-400' },
-  degraded: { color: '#eab308', text: 'text-yellow-400', dot: 'bg-yellow-400' },
+  degraded: { color: 'rgb(var(--theme-text-secondary))', text: 'text-theme-text-secondary', dot: 'bg-theme-text-secondary' },
   unhealthy: { color: '#ef4444', text: 'text-red-400', dot: 'bg-red-400' },
   down: { color: '#ef4444', text: 'text-red-400', dot: 'bg-red-400' },
   not_deployed: { color: '#6b7280', text: 'text-zinc-500', dot: 'bg-zinc-500' },
@@ -404,7 +404,7 @@ export default function ServiceMap({ compact = false }) {
           {!compact && <h1 className="flex items-center gap-2 text-2xl font-bold text-theme-text"><GitBranch size={22} className="text-theme-accent" />Integrations</h1>}
           <p className="mt-1 text-sm text-theme-text-muted">
             {nodes.length} services · <span className="text-green-400">{counts.healthy} healthy</span>
-            {counts.degraded > 0 && <>, <span className="text-yellow-400">{counts.degraded} degraded</span></>}
+            {counts.degraded > 0 && <>, <span className="text-theme-text-secondary">{counts.degraded} degraded</span></>}
             {counts.down > 0 && <>, <span className="text-red-400">{counts.down} down</span></>}
             {counts.other > 0 && <>, <span className="text-zinc-500">{counts.other} other</span></>}
           </p>
@@ -414,7 +414,7 @@ export default function ServiceMap({ compact = false }) {
 
       <div className="mb-4 flex flex-wrap gap-4 text-xs text-theme-text-muted">
         <span className="flex items-center gap-1.5"><span className="h-2 w-2 rounded-full bg-green-400" />Healthy</span>
-        <span className="flex items-center gap-1.5"><span className="h-2 w-2 rounded-full bg-yellow-400" />Degraded</span>
+        <span className="flex items-center gap-1.5"><span className="h-2 w-2 rounded-full bg-theme-text-secondary" />Degraded</span>
         <span className="flex items-center gap-1.5"><span className="h-2 w-2 rounded-full bg-red-400" />Down</span>
         <span className="flex items-center gap-1.5"><span className="h-2 w-2 rounded-full bg-zinc-500" />Not deployed</span>
       </div>

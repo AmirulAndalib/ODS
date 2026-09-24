@@ -492,7 +492,8 @@ async def get_llama_metrics(model_hint: Optional[str] = None) -> dict:
                 "tokens_per_second": previous["rate"] if previous else None,
                 "lifetime_tokens": lifetime,
                 "token_count_mode": count_mode,
-                "throughput_mode": "latest_completion" if LLM_BACKEND == "lemonade" else "generation_interval",
+                "throughput_mode": (previous.get("mode") if previous else None) or (
+                    "latest_completion" if LLM_BACKEND == "lemonade" else "generation_interval"),
                 "throughput_state": "unavailable",
                 "throughput_sampled_at": previous["at"] if previous else None,
                 "throughput_model": previous_identity[4] if previous else None,
@@ -505,6 +506,7 @@ async def get_llama_metrics(model_hint: Optional[str] = None) -> dict:
             return dict(_llama_metrics_sample["result"])
         counter_id = hashlib.sha256(json.dumps(identity).encode()).hexdigest()
         result = await _fetch_llama_metrics(model_hint=model_name, counter_id=counter_id)
+        mode = result.pop("_throughput_mode", "latest_completion" if LLM_BACKEND == "lemonade" else "generation_interval")
         available = result.pop("_available", False)
         reset = result.pop("_counter_reset", False)
         counters = result.pop("_counters", None)
@@ -523,18 +525,59 @@ async def get_llama_metrics(model_hint: Optional[str] = None) -> dict:
                           and (completion_identity is None or previous is None
                                or completion_identity != previous.get("completion_identity")))
         if newly_measured:
-            previous = {"rate": rate, "at": _metrics_wall_clock(),
+            previous = {"rate": rate, "at": _metrics_wall_clock(), "mode": mode,
                         "completion_identity": completion_identity}
             _llama_metrics_sample["measurement"] = previous
         result["tokens_per_second"] = previous["rate"] if previous else None
         result["throughput_sampled_at"] = previous["at"] if previous else None
         result["throughput_state"] = ("unavailable" if not available or not previous
                                        else "measured" if newly_measured else "retained")
-        result["throughput_mode"] = "latest_completion" if LLM_BACKEND == "lemonade" else "generation_interval"
+        result["throughput_mode"] = previous.get("mode", mode) if previous else mode
         result.setdefault("inference_active", None)
         result["throughput_model"] = model_name or None
         _llama_metrics_sample.update(identity=identity, time=_metrics_clock(), result=dict(result))
         return result
+
+
+def _observe_live_output_slots(payload, sampled_at: float):
+    """Rate of accepted output tokens for an unchanged set of active tasks.
+
+    llama.cpp b9014 server-context.cpp exports n_decoded as predicted_n and
+    increments it by accepted tokens, including accepted speculative tokens.
+    This is distinct from Prometheus n_decode_total (decode invocations).
+    Read only numeric identifiers/counters; never retain prompt/params/text.
+    The caller owns the shared sampler lock and clears this baseline on failure.
+    """
+    if not isinstance(payload, list):
+        raise ValueError("slot metrics must be a list")
+    counts = {}
+    seen_slots = set()
+    for slot in payload:
+        if not isinstance(slot, dict) or not isinstance(slot.get("is_processing"), bool):
+            raise ValueError("invalid slot activity")
+        if not slot["is_processing"]:
+            continue
+        slot_id, task_id = slot.get("id"), slot.get("id_task")
+        next_token = slot.get("next_token")
+        # b9014 returns a one-element array; older servers return an object.
+        if isinstance(next_token, list) and len(next_token) == 1:
+            next_token = next_token[0]
+        if not isinstance(next_token, dict):
+            raise ValueError("slot output counter unavailable")
+        count = next_token.get("n_decoded")
+        if any(type(value) is not int or not 0 <= value < 2**63
+               for value in (slot_id, task_id, count)) or slot_id in seen_slots:
+            raise ValueError("invalid slot output counter or identity")
+        seen_slots.add(slot_id)
+        counts[(slot_id, task_id)] = count
+    previous = _prev_tokens.get("live_slots")
+    _prev_tokens["live_slots"] = {"at": sampled_at, "counts": counts}
+    if not counts or previous is None or previous["counts"].keys() != counts.keys():
+        return None
+    elapsed = sampled_at - previous["at"]
+    if elapsed <= 0 or any(count < previous["counts"][key] for key, count in counts.items()):
+        return None  # task/reset/clock discontinuity starts a new interval
+    return round(sum(count - previous["counts"][key] for key, count in counts.items()) / elapsed, 1)
 
 
 async def _fetch_llama_metrics(model_hint: Optional[str] = None, counter_id: Optional[str] = None) -> dict:
@@ -662,15 +705,33 @@ async def _fetch_llama_metrics(model_hint: Optional[str] = None, counter_id: Opt
         _prev_tokens.update(count=curr, gen_secs=gen_secs)
 
         lifetime = _update_lifetime_tokens(curr, counter_id=counter_id)
+        active = (metrics["requests_processing"] > 0
+                  if _measurement_number(metrics.get("requests_processing")) is not None else None)
+        available = gen_secs is not None
+        mode = "generation_interval"
+        if reset or active is not True:
+            _prev_tokens.pop("live_slots", None)
+        if active is True:
+            try:
+                slots = await client.get(f"http://{host}:{metrics_port}/slots", params=params, timeout=2.0)
+                slots.raise_for_status()
+                live_rate = _observe_live_output_slots(slots.json(), _metrics_clock())
+                if live_rate is not None and live_rate > 0:
+                    tps, available, mode = live_rate, True, "live_output_interval"
+            except (httpx.HTTPError, OSError, ValueError, KeyError):
+                _prev_tokens.pop("live_slots", None)
+                # A fresh completed interval remains valid if slots are disabled.
+                # Otherwise a held rate must expose the live telemetry outage.
+                available = bool(available and tps is not None and tps > 0)
         return {
             "tokens_per_second": tps,
             "lifetime_tokens": lifetime,
             "token_count_mode": "cumulative",
-            "_available": gen_secs is not None,
+            "_available": available,
+            "_throughput_mode": mode,
             "_counter_reset": reset,
             "_counters": (curr, gen_secs),
-            "inference_active": (metrics["requests_processing"] > 0
-                                 if _measurement_number(metrics.get("requests_processing")) is not None else None),
+            "inference_active": active,
         }
     except (AgentClientError, httpx.HTTPError, httpx.TimeoutException, OSError, ValueError, KeyError) as e:
         _prev_tokens.clear()  # never measure a rate across an unavailable gap
