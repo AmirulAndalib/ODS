@@ -300,7 +300,7 @@ export default function PixelRuntimeSettings() {
       <p className="text-sm text-theme-text-muted">Saving preferences does not apply them to {displayName}.</p>
       <p className="text-sm text-theme-text-muted">Inspect runtime support below, then apply your saved preferences when {displayName} is idle.</p>
       {stale && (
-        <div className="text-sm text-amber-600">Connection stale. Reload before saving.</div>
+        <div className="text-sm text-theme-text-secondary">Connection stale. Reload before saving.</div>
       )}
       {error && <div role="alert" className="text-sm text-red-600">{error}</div>}
       {notice && <div role="status" className="text-sm text-green-600">{notice}</div>}

@@ -129,7 +129,7 @@ describe('Extensions page — unhealthy + install derivations', () => {
     fireEvent.change(screen.getByLabelText('Search extensions'),{target:{value:'missing'}})
     expect(screen.queryByText('Demo extension')).toBeNull()
   })
-  it('renders amber unhealthy badge for unhealthy user ext', async () => {
+  it('renders theme-neutral unhealthy badge for unhealthy user ext', async () => {
     installFetchMock({
       extensions: [
         {
@@ -159,7 +159,7 @@ describe('Extensions page — unhealthy + install derivations', () => {
     const matches = screen.getAllByText('unhealthy')
     const badge = matches.find((el) => el.className.includes('cursor-help'))
     expect(badge).toBeTruthy()
-    expect(badge.className).toContain('text-amber-400')
+    expect(badge.className).toContain('text-theme-text-secondary')
   })
 
   it('renders toggle switch for unhealthy user ext (isToggleable=true)', async () => {

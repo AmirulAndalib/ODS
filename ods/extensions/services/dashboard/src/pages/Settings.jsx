@@ -128,7 +128,7 @@ const routeSeverityOrder = { down: 0, unhealthy: 1, degraded: 2, unknown: 3, hea
 const sortRoutesBySeverity = (items) => [...(items || [])].sort((a, b) => (routeSeverityOrder[a.status] ?? 9) - (routeSeverityOrder[b.status] ?? 9))
 const routeFilterDotClass = {
   online: 'bg-emerald-400',
-  degraded: 'bg-amber-400',
+  degraded: 'bg-theme-text-secondary',
   inactive: 'bg-red-400',
 }
 
@@ -568,7 +568,7 @@ function AccountUsageCard({ usageReport, className = '' }) {
       </div>
       <div className="mt-4 flex items-center justify-between gap-4 text-sm">
         <span className="flex min-w-0 items-center gap-2 text-theme-text-muted">
-          <span className={`h-2 w-2 shrink-0 rounded-full ${usageReport?.source?.status === 'ok' ? 'bg-emerald-400' : 'bg-amber-400'}`} />
+          <span className={`h-2 w-2 shrink-0 rounded-full ${usageReport?.source?.status === 'ok' ? 'bg-emerald-400' : 'bg-theme-text-secondary'}`} />
           <span className="truncate">{usageSource}</span>
         </span>
         <span className="flex shrink-0 items-center gap-2 font-medium text-theme-accent-light">
@@ -592,7 +592,7 @@ function RemoteSetupCard({ setupStatus, className = '' }) {
       <div className="mt-6 flex flex-1 flex-col justify-between border-t border-theme-border pt-5">
         <div>
           <p className="flex items-center gap-2 text-sm font-semibold text-theme-text">
-            <span className={`h-2 w-2 rounded-full ${setupComplete ? 'bg-emerald-400' : 'bg-amber-400'}`} />
+            <span className={`h-2 w-2 rounded-full ${setupComplete ? 'bg-emerald-400' : 'bg-theme-text-secondary'}`} />
             {setupLabel}
           </p>
           <p className="mt-3 text-sm leading-6 text-theme-text-muted">{personaLabel}. Owner and collaborator access is managed with invite links.</p>
@@ -842,7 +842,7 @@ function RouteStatusCard({ tone, label, count, description }) {
   return (
     <div className="settings-route-count" title={description}>
       <div className="flex items-center gap-2">
-        <span className={`h-2 w-2 rounded-full ${tone === 'online' ? 'bg-emerald-400' : tone === 'degraded' ? 'bg-amber-400' : 'bg-red-400'}`} />
+        <span className={`h-2 w-2 rounded-full ${tone === 'online' ? 'bg-emerald-400' : tone === 'degraded' ? 'bg-theme-text-secondary' : 'bg-red-400'}`} />
         <p className="text-sm font-semibold">{label}</p>
       </div>
       <p className="text-theme-text">{count}<span className="sr-only"> routes — {description}</span></p>
@@ -854,7 +854,7 @@ function RouteRow({ service }) {
   const href = serviceUrl(service)
   const healthy = service.status === 'healthy'
   const degraded = service.status === 'degraded'
-  const dot = healthy ? 'bg-emerald-400' : degraded ? 'bg-amber-400' : 'bg-red-400'
+  const dot = healthy ? 'bg-emerald-400' : degraded ? 'bg-theme-text-secondary' : 'bg-red-400'
   const description = getServiceDescription(service)
   const content = (
     <>
@@ -913,7 +913,7 @@ function formatStorageGb(value) {
 }
 
 function Banner({ tone = 'info', children, onClose }) {
-  const cls = tone === 'danger' ? 'border-red-500/20 bg-red-500/10 text-red-200' : tone === 'warn' ? 'border-yellow-500/20 bg-yellow-500/10 text-yellow-100' : 'border-theme-accent/20 bg-theme-accent/10 text-theme-text'
+  const cls = tone === 'danger' ? 'border-red-500/20 bg-red-500/10 text-red-200' : tone === 'warn' ? 'border-theme-border bg-theme-text-secondary/10 text-theme-text-secondary' : 'border-theme-accent/20 bg-theme-accent/10 text-theme-text'
   return (
     <div className={`mb-6 flex w-full items-center justify-between rounded-lg border p-4 text-sm ${cls}`}>
       <span>{children}</span>

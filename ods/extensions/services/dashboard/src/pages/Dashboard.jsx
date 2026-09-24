@@ -245,16 +245,16 @@ function getStatusTone(status) {
     case 'restarting':
       return {
         label: 'Restarting',
-        dot: 'bg-amber-400',
-        text: 'text-amber-300',
-        pill: 'border-amber-400/25 bg-amber-400/[0.08]',
+        dot: 'bg-theme-text-secondary',
+        text: 'text-theme-text-secondary',
+        pill: 'border-theme-border bg-theme-text-secondary/[0.08]',
       }
     case 'degraded':
       return {
         label: 'Degraded',
-        dot: 'bg-amber-400',
-        text: 'text-amber-300',
-        pill: 'border-amber-400/25 bg-amber-400/[0.08]',
+        dot: 'bg-theme-text-secondary',
+        text: 'text-theme-text-secondary',
+        pill: 'border-theme-border bg-theme-text-secondary/[0.08]',
       }
     default:
       return {
@@ -639,7 +639,7 @@ function metricScopeLabel(scope) {
 function TelemetryNotice({telemetry}) {
   if (!telemetry?.stale) return null
   const sampledAt = Number.isFinite(telemetry.sampledAt) ? new Date(telemetry.sampledAt) : null
-  return <p role="status" aria-label="Telemetry freshness" className="px-4 py-2 text-xs text-amber-300">
+  return <p role="status" aria-label="Telemetry freshness" className="px-4 py-2 text-xs text-theme-text-secondary">
     {sampledAt ? <>Telemetry update failed. Showing last known readings received at <time dateTime={sampledAt.toISOString()}>{sampledAt.toLocaleTimeString()}</time>.</> : 'Telemetry unavailable. Waiting for a successful status update.'}
   </p>
 }

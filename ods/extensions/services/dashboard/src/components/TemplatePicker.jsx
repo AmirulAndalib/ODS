@@ -272,7 +272,7 @@ export function TemplatePreview({ template, onClose, onApplied }) {
                 <h4 className="text-xs font-medium text-theme-text-muted uppercase tracking-wider mb-1.5">Incompatible</h4>
                 <div className="flex flex-wrap gap-1.5">
                   {changes.incompatible.map(svc => (
-                    <span key={svc} className="text-xs px-2 py-1 rounded bg-orange-500/10 text-orange-400 border border-orange-500/20">
+                    <span key={svc} className="text-xs px-2 py-1 rounded bg-theme-text-secondary/10 text-theme-text-secondary border border-theme-border">
                       <AlertTriangle size={10} className="inline mr-1" />{svc}
                     </span>
                   ))}
@@ -281,9 +281,9 @@ export function TemplatePreview({ template, onClose, onApplied }) {
             )}
 
             {previewData.warnings?.length > 0 && (
-              <div className="p-2.5 rounded-lg bg-orange-500/10 border border-orange-500/20">
+              <div className="p-2.5 rounded-lg bg-theme-text-secondary/10 border border-theme-border">
                 {previewData.warnings.map((w, i) => (
-                  <p key={i} className="text-xs text-orange-300">{w}</p>
+                  <p key={i} className="text-xs text-theme-text-secondary">{w}</p>
                 ))}
               </div>
             )}
@@ -302,7 +302,7 @@ export function TemplatePreview({ template, onClose, onApplied }) {
         {applied && (
           <div className="py-6 text-center">
             {applied === 'partial'
-              ? <AlertTriangle size={32} className="text-orange-400 mx-auto mb-2" />
+              ? <AlertTriangle size={32} className="text-theme-text-secondary mx-auto mb-2" />
               : <Check size={32} className="text-green-400 mx-auto mb-2" />}
             {applied === 'enabled' && (
               <p className="text-sm text-green-400">Template applied — check extension cards for installation progress</p>
@@ -313,28 +313,28 @@ export function TemplatePreview({ template, onClose, onApplied }) {
             {applied === 'restart_required' && (
               <>
                 <p className="text-sm text-green-400 mb-3">Template applied successfully</p>
-                <div className="p-3 rounded-lg bg-orange-500/10 border border-orange-500/20 text-left">
-                  <p className="text-sm text-orange-300 font-medium mb-1">Restart required</p>
-                  <p className="text-xs text-orange-200/80">Run <code className="px-1.5 py-0.5 rounded bg-theme-card text-orange-100">ods restart</code> in your terminal to start the newly enabled services.</p>
+                <div className="p-3 rounded-lg bg-theme-text-secondary/10 border border-theme-border text-left">
+                  <p className="text-sm text-theme-text-secondary font-medium mb-1">Restart required</p>
+                  <p className="text-xs text-theme-text-secondary/80">Run <code className="px-1.5 py-0.5 rounded bg-theme-card text-theme-text-secondary">ods restart</code> in your terminal to start the newly enabled services.</p>
                 </div>
               </>
             )}
             {applied === 'partial' && (
-              <div className="p-3 rounded-lg bg-orange-500/10 border border-orange-500/20 text-left">
-                <p className="text-sm text-orange-300 font-medium mb-1">Template applied with exceptions</p>
+              <div className="p-3 rounded-lg bg-theme-text-secondary/10 border border-theme-border text-left">
+                <p className="text-sm text-theme-text-secondary font-medium mb-1">Template applied with exceptions</p>
                 {applyResult?.failed_services?.length > 0 && (
-                  <p className="text-xs text-orange-200/80">
+                  <p className="text-xs text-theme-text-secondary/80">
                     Failed to start: {applyResult.failed_services.join(', ')}.
                     {applyResult.restart_required ? ' Run ods restart to retry.' : ''}
                   </p>
                 )}
                 {applyResult?.skipped_services?.length > 0 && (
-                  <p className="text-xs text-orange-200/80">
+                  <p className="text-xs text-theme-text-secondary/80">
                     Skipped: {applyResult.skipped_services.join(', ')}.
                   </p>
                 )}
                 {applyResult?.warnings?.map((warning, index) => (
-                  <p key={index} className="text-xs text-orange-200/80 mt-1">{warning}</p>
+                  <p key={index} className="text-xs text-theme-text-secondary/80 mt-1">{warning}</p>
                 ))}
               </div>
             )}
