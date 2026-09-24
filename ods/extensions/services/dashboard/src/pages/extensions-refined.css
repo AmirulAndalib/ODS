@@ -51,7 +51,7 @@
 .extension-body > p { margin:8px 0 12px 32px; color:#929ba3; font-size:11px; line-height:1.7; }
 .extension-actions { padding-left:32px; gap:8px; }
 .extension-actions button,.extension-actions a { font-size:10px; letter-spacing:0; text-transform:none; font-weight:500; box-shadow:none; padding:6px 8px; border-radius:5px; }
-.extension-actions button:not([class*='text-red']):not([class*='text-amber']) { background:transparent; color:#c0c6cc; }
+.extension-actions button:not([class*='text-red']) { background:transparent; color:#c0c6cc; }
 .extension-actions button[class*='bg-theme-accent'] { border:1px solid #353c40; padding:5px 10px; color:#e0e5e9; }
 .extension-actions button:not(:disabled):hover,.extension-actions a:hover { background:#252829; }
 .extension-entry [data-tooltip] > span,.extension-heading > div:last-child > span { background:transparent; border:0; border-radius:0; padding:0; text-transform:none; letter-spacing:0; font-size:10px; }

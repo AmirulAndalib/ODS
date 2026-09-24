@@ -119,7 +119,7 @@ export function FeatureProgress() {
       {/* GPU tier badge */}
       <div className="flex items-center justify-between">
         <div className="flex items-center gap-2">
-          <Zap size={14} className="text-amber-400" />
+          <Zap size={14} className="text-theme-text-secondary" />
           <span className="text-xs text-theme-text-muted">{gpu.name}</span>
         </div>
         <span className={`text-xs px-2 py-0.5 rounded-full ${
@@ -202,14 +202,14 @@ function FeatureCard({ feature, onClick }) {
   const statusColors = {
     enabled: 'border-green-500/30 bg-green-500/5',
     available: 'border-theme-accent/30 bg-theme-accent/5 hover:border-theme-accent/50',
-    services_needed: 'border-amber-500/30 bg-amber-500/5',
+    services_needed: 'border-theme-border bg-theme-text-secondary/5',
     insufficient_vram: 'border-theme-border bg-theme-card opacity-60'
   }
 
   const statusIcons = {
     enabled: <CheckCircle size={14} className="text-green-400" />,
     available: <Sparkles size={14} className="text-theme-accent" />,
-    services_needed: <AlertCircle size={14} className="text-amber-400" />,
+    services_needed: <AlertCircle size={14} className="text-theme-text-secondary" />,
     insufficient_vram: null
   }
 

@@ -127,7 +127,7 @@ export default function PixelConnectionImport({ providers, disabled, onBusyChang
     {metadata && <div className="space-y-3 text-sm">
       <p role="status">Model metadata matches the connection. Inference and tool execution have not been tested.</p>
       <p>Context: {metadata.contextLength} · Maximum output: {metadata.maxOutputTokens} · Declared tool calling: {metadata.capabilities.tools ? 'yes' : 'no'}</p>
-      {!metadata.capabilities.tools && <p className="text-amber-400">This host does not advertise tool support. Importing will not enable it.</p>}
+      {!metadata.capabilities.tools && <p className="text-theme-text-secondary">This host does not advertise tool support. Importing will not enable it.</p>}
       <label className="block">Imported provider ID<input className={input} value={id} maxLength={64} disabled={disabled} onChange={e => setId(e.target.value)} /></label>
       <label className="block">Imported provider label<input className={input} value={label} maxLength={256} disabled={disabled} onChange={e => setLabel(e.target.value)} /></label>
       <button className={button} disabled={disabled} onClick={add}>Add to provider draft</button>

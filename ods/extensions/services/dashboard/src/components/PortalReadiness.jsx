@@ -7,7 +7,7 @@ export default function PortalReadiness({ readiness }) {
   // actionable problem to repeat above every otherwise usable conversation.
   if (!view.attention) return null
   return <p role="alert" aria-label="Runtime readiness"
-    className="shrink-0 border-b border-theme-border px-4 py-2 text-xs text-amber-300 sm:px-6">
+    className="shrink-0 border-b border-theme-border px-4 py-2 text-xs text-theme-text-secondary sm:px-6">
     <strong>Runtime needs attention. </strong>
     {view.detail}{' '}
     <Link to="/settings?section=access" className="underline">Access settings</Link>

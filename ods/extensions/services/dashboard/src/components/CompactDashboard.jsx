@@ -4,7 +4,7 @@ import DashboardTokens from './DashboardTokens'
 import MetalMetricIcon from './MetalMetricIcon'
 
 function StatusDot({ tone }) {
-  const colors = {green:'bg-emerald-400',red:'bg-red-400',orange:'bg-amber-400',neutral:'bg-theme-text-muted/45'}
+  const colors = {green:'bg-emerald-400',red:'bg-red-400',orange:'bg-theme-text-secondary',neutral:'bg-theme-text-muted/45'}
   return <span aria-hidden="true" className={`inline-block h-1.5 w-1.5 shrink-0 rounded-full ${colors[tone]}`} />
 }
 

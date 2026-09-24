@@ -139,11 +139,11 @@ export default function EnvEditor({
         ) : null}
 
         {issues.length > 0 ? (
-          <div className="rounded-lg border border-yellow-500/25 bg-yellow-500/10 px-5 py-4">
-            <p className="text-[11px] font-semibold uppercase tracking-[0.18em] text-yellow-100">Validation notes</p>
+          <div className="rounded-lg border border-theme-border bg-theme-text-secondary/10 px-5 py-4">
+            <p className="text-[11px] font-semibold uppercase tracking-[0.18em] text-theme-text-secondary">Validation notes</p>
             <div className="mt-2 space-y-1">
               {issues.slice(0, 8).map((issue, index) => (
-                <p key={`${issue.key || 'line'}-${index}`} className="text-sm text-yellow-50/90">
+                <p key={`${issue.key || 'line'}-${index}`} className="text-sm text-theme-text-secondary/90">
                   {issue.key ? `${issue.key}: ` : ''}{issue.message}
                 </p>
               ))}
@@ -172,7 +172,7 @@ export default function EnvEditor({
                   </div>
                   <div className="flex flex-wrap items-center gap-4 text-xs">
                     <span className="text-theme-text-muted">{activeKeys.length} fields</span>
-                    <span className={`inline-flex items-center gap-1.5 ${activeKeys.some(key => issueMap[key]?.length) ? 'text-amber-300' : 'text-emerald-300'}`}>
+                    <span className={`inline-flex items-center gap-1.5 ${activeKeys.some(key => issueMap[key]?.length) ? 'text-theme-text-secondary' : 'text-emerald-300'}`}>
                       {activeKeys.some(key => issueMap[key]?.length) ? <AlertTriangle size={13} /> : <CheckCircle2 size={13} />}
                       {activeKeys.some(key => issueMap[key]?.length) ? 'Needs review' : 'Validated'}
                     </span>
@@ -236,7 +236,7 @@ function EnvironmentStatusStrip({ editor, fieldCount, issueCount, issueSectionCo
   return <div className="environment-status-line">
     <span>{fieldCount} fields</span>
     <span>{issueCount ? `${issueCount} issues in ${issueSectionCount} sections` : 'No validation issues'}</span>
-    {editor?.agentAvailable === false && <span className="text-amber-300">Host agent offline · applying unavailable</span>}
+    {editor?.agentAvailable === false && <span className="text-theme-text-secondary">Host agent offline · applying unavailable</span>}
   </div>
 }
 
@@ -355,7 +355,7 @@ function EnvironmentFieldCard({ field, value, issues, revealed, cleared, onToggl
       {field?.secret ? (
         <div className="mt-3 flex flex-wrap items-center justify-between gap-3">
           <p className="flex items-center gap-2 text-xs text-theme-text-muted">
-            <Lock size={13} className="text-yellow-300" />
+            <Lock size={13} className="text-theme-text-secondary" />
             {cleared
               ? 'The stored secret will be removed when you save.'
               : field?.hasValue
@@ -377,7 +377,7 @@ function EnvironmentFieldCard({ field, value, issues, revealed, cleared, onToggl
       ) : null}
 
       {issues.map((issue, index) => (
-        <p key={`${field?.key}-issue-${index}`} className="mt-2 flex items-center gap-2 text-xs text-yellow-100/90">
+        <p key={`${field?.key}-issue-${index}`} className="mt-2 flex items-center gap-2 text-xs text-theme-text-secondary/90">
           <AlertTriangle size={13} />
           {issue}
         </p>

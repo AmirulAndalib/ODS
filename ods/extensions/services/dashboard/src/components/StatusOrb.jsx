@@ -3,7 +3,7 @@ import { useId } from 'react'
 const palettes = {
   green: ['#a8f7c5', '#29cb77', '#08743d'],
   red: ['#ffb2ad', '#ef5954', '#942822'],
-  orange: ['#ffe1a0', '#efa735', '#9b5c13'],
+  orange: ['rgb(var(--theme-text))', 'rgb(var(--theme-text-secondary))', 'rgb(var(--theme-text-muted))'],
   neutral: ['#c8ccce', '#858b90', '#43484d'],
 }
 

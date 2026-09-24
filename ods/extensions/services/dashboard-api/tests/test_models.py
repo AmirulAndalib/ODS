@@ -2126,7 +2126,8 @@ def test_download_model_rejects_stale_active_bootstrap_upgrade_as_retry_pending(
     }
 
 
-def test_api_models_falls_back_to_loaded_model_probe(test_client, monkeypatch, tmp_path):
+@pytest.mark.parametrize("mode", ["generation_interval", "live_output_interval"])
+def test_api_models_falls_back_to_loaded_model_probe(test_client, monkeypatch, tmp_path, mode):
     models_router, install_dir, _data_dir = _patch_model_router_paths(monkeypatch, tmp_path)
     _write_model_library(install_dir, [{
         "id": "qwen3.5-9b-q4",
@@ -2143,7 +2144,7 @@ def test_api_models_falls_back_to_loaded_model_probe(test_client, monkeypatch, t
     monkeypatch.setattr(models_router, "get_gpu_info", lambda: _gpu())
     monkeypatch.setattr(models_router, "get_loaded_model", AsyncMock(return_value=None))
     monkeypatch.setattr(models_router, "_fetch_llama_loaded_model", AsyncMock(return_value="Qwen3.5-9B-Q4_K_M.gguf"))
-    monkeypatch.setattr(models_router, "get_llama_metrics", AsyncMock(return_value={"tokens_per_second": 33.0, "lifetime_tokens": 0, "throughput_state": "measured", "throughput_sampled_at": 1000, "throughput_model": "Qwen3.5-9B-Q4_K_M.gguf"}))
+    monkeypatch.setattr(models_router, "get_llama_metrics", AsyncMock(return_value={"tokens_per_second": 33.0, "lifetime_tokens": 0, "throughput_mode": mode, "throughput_state": "measured", "throughput_sampled_at": 1000, "throughput_model": "Qwen3.5-9B-Q4_K_M.gguf"}))
     monkeypatch.setattr(models_router, "get_llama_context_size", AsyncMock(return_value=32768))
     monkeypatch.setattr(models_router, "SERVICES", {"llama-server": {"host": "localhost", "port": 8080}})
 
@@ -2159,13 +2160,16 @@ def test_api_models_falls_back_to_loaded_model_probe(test_client, monkeypatch, t
     }))
     held = test_client.get("/api/models", headers=test_client.auth_headers)
     assert held.status_code == 200
-    assert len(recorded) == 1
+    assert len(recorded) == (0 if mode == "live_output_interval" else 1)
 
     assert resp.status_code == 200
     payload = resp.json()
     assert payload["currentModel"] == "qwen3.5-9b-q4"
     assert payload["loadedModel"] == "Qwen3.5-9B-Q4_K_M.gguf"
-    assert payload["models"][0]["performance"]["source"] == "measured_local"
+    if mode == "live_output_interval":
+        assert payload["models"][0]["performance"]["source"] != "measured_local"
+    else:
+        assert payload["models"][0]["performance"]["source"] == "measured_local"
 
 
 def test_lemonade_model_probe_uses_physical_backend_not_litellm_alias(monkeypatch, tmp_path):

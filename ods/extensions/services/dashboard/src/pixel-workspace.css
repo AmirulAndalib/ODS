@@ -402,9 +402,6 @@ select option, select optgroup { background-color:rgb(var(--theme-card)); color:
 .ods-talk .bg-emerald-50 { background:#182a24; }
 .ods-talk .text-emerald-700,.ods-talk .text-emerald-600 { color:#89c5aa; }
 .ods-talk .border-emerald-300 { border-color:#355647; }
-.ods-talk .bg-amber-50 { background:#2b2518; }
-.ods-talk .text-amber-900 { color:#e5c586; }
-.ods-talk .border-amber-200 { border-color:#62502d; }
 .ods-talk .bg-red-50 { background:#301e20; }
 .ods-talk .text-red-900 { color:#e5a1a8; }
 .ods-talk .border-red-200 { border-color:#674047; }

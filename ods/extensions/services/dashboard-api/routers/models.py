@@ -1338,7 +1338,11 @@ async def import_huggingface_model(
 def _newly_measured_tps(metrics: dict, loaded_model: str | None) -> float:
     # Sticky Dashboard values are historical evidence, not a fresh performance
     # sample for the model catalogue/current context on every polling request.
-    if metrics.get("throughput_state") != "measured" or metrics.get("throughput_model") != loaded_model:
+    if (metrics.get("throughput_state") != "measured"
+            or metrics.get("throughput_model") != loaded_model
+            # Runtime live intervals can aggregate concurrent slots; do not
+            # turn them into single-request model performance/benchmark data.
+            or metrics.get("throughput_mode") == "live_output_interval"):
         return 0.0
     return float(metrics.get("tokens_per_second") or 0)
 

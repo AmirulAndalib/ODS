@@ -719,7 +719,7 @@ export default function ODSTalk() {
               <div className="mt-1 flex items-center gap-1.5 text-xs text-zinc-500">
                 {status === 'ready' ? <CheckCircle2 size={13} className="text-emerald-600" /> : null}
                 {status === 'loading' ? <Loader2 size={13} className="animate-spin" /> : null}
-                {status === 'offline' || status === 'expired' ? <AlertCircle size={13} className="text-amber-600" /> : null}
+                {status === 'offline' || status === 'expired' ? <AlertCircle size={13} className="text-theme-text-secondary" /> : null}
                 <span>{statusText}</span>
               </div>
             </div>
@@ -762,7 +762,7 @@ export default function ODSTalk() {
         </main>
 
         {status === 'expired' && (
-          <div className="mx-4 mb-3 rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-sm text-amber-900">
+          <div className="mx-4 mb-3 rounded-lg border border-theme-border bg-theme-card/80 px-3 py-2 text-sm text-theme-text-secondary">
             This owner session ended. Scan the owner card again to continue.
           </div>
         )}
@@ -965,7 +965,7 @@ function MessageBubble({ message, onApproval }) {
           </div>
         )}
         {message.warning && (
-          <p className="mt-2 text-xs text-amber-600">{message.warning}</p>
+          <p className="mt-2 text-xs text-theme-text-secondary">{message.warning}</p>
         )}
       </div>
     </div>

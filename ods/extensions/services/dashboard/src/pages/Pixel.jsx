@@ -252,7 +252,7 @@ function ApprovalCommand({command}) {
   }
   return <>
     <button type="button" onClick={copy} disabled={state === 'pending'}
-      className="mt-3 inline-flex items-center gap-1.5 rounded-lg border border-amber-400/30 bg-amber-400/10 px-3 py-1.5 text-xs font-medium text-amber-200 transition hover:bg-amber-400/15">
+      className="mt-3 inline-flex items-center gap-1.5 rounded-lg border border-theme-border bg-theme-text-secondary/10 px-3 py-1.5 text-xs font-medium text-theme-text-secondary transition hover:bg-theme-text-secondary/15">
       {state === 'copied' ? <CheckCircle2 className="h-3.5 w-3.5" /> : <Copy className="h-3.5 w-3.5" />}
       {state === 'copied' ? 'Copied' : state === 'pending' ? 'Copying…' : 'Copy secure approval command'}
     </button>
@@ -345,13 +345,13 @@ export function OperationsApprovalCard({ content }) {
       succeeded
         ? 'border-emerald-500/30 bg-emerald-500/10'
         : awaiting
-          ? 'border-amber-500/30 bg-amber-500/10'
+          ? 'border-theme-border bg-theme-text-secondary/10'
           : 'border-theme-border bg-theme-bg/55'
     }`}>
       <div className="flex items-start gap-2.5">
         {succeeded
           ? <CheckCircle2 className="mt-0.5 h-4 w-4 shrink-0 text-emerald-400" />
-          : <ShieldCheck className="mt-0.5 h-4 w-4 shrink-0 text-amber-300" />}
+          : <ShieldCheck className="mt-0.5 h-4 w-4 shrink-0 text-theme-text-secondary" />}
         <div className="min-w-0 flex-1">
           <p className="font-medium text-theme-text">
             {succeeded ? 'Protected operation completed' : awaiting ? 'Owner approval required' : `Broker status: ${projection.status}`}
@@ -1465,9 +1465,7 @@ export default function Pixel({ systemStatus = null }) {
             className={`inline-flex items-center gap-1.5 text-[11px] font-medium ${
             sending
               ? 'text-theme-accent-light'
-              : statusLabel === 'Available'
-                ? 'text-theme-text-secondary'
-                : 'text-amber-300'
+              : 'text-theme-text-secondary'
           }`}
           >
             {sending || status === 'loading' || status === 'switching' ? (
@@ -1482,13 +1480,13 @@ export default function Pixel({ systemStatus = null }) {
       </header>
       {status === 'available' && <PortalReadiness readiness={runtimeReadiness} />}
       {status === 'available' && modelSupport && (
-        <p role="status" aria-label="Model capability" className="shrink-0 border-b border-theme-border px-4 py-2 text-xs text-amber-300 sm:px-6">
+        <p role="status" aria-label="Model capability" className="shrink-0 border-b border-theme-border px-4 py-2 text-xs text-theme-text-secondary sm:px-6">
           {modelSupport.detail}
         </p>
       )}
       <div role="region" aria-label="Conversation messages" tabIndex={-1} onScroll={chatScroll.onScroll} className="min-h-0 flex-1 space-y-4 overflow-y-auto px-4 py-5 sm:px-6">
         {interrupted && !sending && (
-          <div role="status" className="mx-auto w-full max-w-5xl rounded-xl border border-amber-500/25 bg-amber-500/10 px-4 py-3 text-sm text-amber-300">
+          <div role="status" className="mx-auto w-full max-w-5xl rounded-xl border border-theme-border bg-theme-text-secondary/10 px-4 py-3 text-sm text-theme-text-secondary">
             {restoredActivity === 'active'
               ? 'The previous request is still active in this chat. Your saved conversation and preview are preserved. You can stop that work below; its live response cannot be reattached.'
               : restoredActivity === 'terminal'
@@ -1604,7 +1602,7 @@ export default function Pixel({ systemStatus = null }) {
                 <span className="break-words whitespace-pre-wrap">{message.content}</span>
               )}
               {message.role === 'assistant' && message.questions && <PixelQuestions questions={message.questions} answers={message.questionDraft} answered={index<messages.length-1} disabled={message.goalMode ? message.goalState!=='waiting' : isDisabled || sending || restoredActive || restoredChecking} onChange={questionDraft=>setMessages(previous=>previous.map((item,i)=>i===index?{...item,questionDraft}:item))} onSubmit={answer=>message.goalMode ? teams.answer(message.teamId,'0',message.questionDraft) : sendMessage(message.task?.goal ? continueGoal(messages,index,answer) : answer)}/>}
-              {message.goalMode && message.goalNotice && <p role="status" className="mt-3 text-xs text-amber-300">{message.goalNotice}</p>}
+              {message.goalMode && message.goalNotice && <p role="status" className="mt-3 text-xs text-theme-text-secondary">{message.goalNotice}</p>}
               {message.teamId && !(message.goalMode && ACTIVE_TEAMS.has(message.goalState)) && <button type="button" onClick={()=>openAgents({teamId:message.teamId,agentId:'0'})} className={message.goalMode?"mt-3 border-0 bg-transparent px-0 py-2 text-xs hover:underline":"mt-3 rounded-lg border border-theme-border px-3 py-2 text-xs hover:bg-theme-border/30"}>{message.goalMode?'View goal history':'View agents and conversations'}</button>}
 
             </div>
@@ -1619,7 +1617,7 @@ export default function Pixel({ systemStatus = null }) {
         <div className={`portal-glass-composer mx-auto max-w-5xl ${messages.length===0 ? 'portal-neon-prompt' : ''}`}>
           {command && <div className="mb-2 flex flex-wrap items-center gap-2 rounded-xl bg-theme-card/70 px-3 py-2 text-xs text-theme-text-secondary" role="group" aria-label="Agent team mode"><span className="font-medium text-theme-text">Agent team</span><span>Describe your task. Portal will choose the team.</span><button type="button" disabled={isDisabled} onClick={()=>setInput(command.task)} className="ml-auto whitespace-nowrap rounded px-2 py-1 hover:bg-theme-border/30">Exit team mode</button></div>}
           {goalDraft && <div className="portal-goal-mode" role="group" aria-label="Goal mode"><span>Goal</span><small>Describe the outcome. Portal will plan, work and check its progress.</small><button type="button" disabled={isDisabled} onClick={()=>setInput(goalDraft.task)}>Exit goal mode</button></div>}
-          {teams.error && <p role="alert" className="text-xs text-amber-300">{teams.error}</p>}
+          {teams.error && <p role="alert" className="text-xs text-theme-text-secondary">{teams.error}</p>}
           <div className="pixel-composer-row">
           <textarea
             ref={inputRef}
@@ -1665,7 +1663,7 @@ export default function Pixel({ systemStatus = null }) {
           )}
           </div>
           </div>
-          {stopError && <p role="alert" className="mt-1.5 px-1 text-xs text-amber-300">{stopError}</p>}
+          {stopError && <p role="alert" className="mt-1.5 px-1 text-xs text-theme-text-secondary">{stopError}</p>}
           {contextControl.historyUnknown && <div className="portal-context-status" role="status">
             {contextControl.resolving && <Loader2 size={13} className="animate-spin" aria-hidden="true"/>}
             <span>{contextControl.recoveryNotice || 'The previous turn could not be confirmed. Resolve it before continuing; your conversation is preserved.'}</span>

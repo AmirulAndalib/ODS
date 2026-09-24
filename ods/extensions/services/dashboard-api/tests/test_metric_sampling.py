@@ -171,6 +171,8 @@ async def test_active_to_idle_hold_then_next_run_updates_value_and_measurement_t
     ]:
         response = sample(tokens, seconds)
         response.text += f"llamacpp:requests_processing {running}\n"
+        response.json.return_value = [{"id": 0, "id_task": 1, "is_processing": bool(running),
+                                       "next_token": [{"n_decoded": 0}]}]
         client.get.return_value = response
         result = await helpers.get_llama_metrics("model-a")
         assert result["tokens_per_second"] == expected
@@ -327,3 +329,151 @@ async def test_cancelled_sampler_owner_clears_gap_and_releases_lock(sampler):
     assert recovered["tokens_per_second"] == 20  # hold, not a rate spanning the gap
     assert recovered["throughput_state"] == "retained"
     assert recovered["throughput_sampled_at"] == 102
+
+
+def live_runtime(client, *, count=100, task=11, active=True, total=100, seconds=5,
+                 shape="array", slots_failure=None, additional_slots=None):
+    """Actual b9014 slots shape; completion counters need not move mid-run."""
+    metrics = sample(total, seconds)
+    metrics.text += f"llamacpp:requests_processing {int(active)}\nllamacpp:n_decode_total 9000000\n"
+    next_token = {"n_decoded": count}
+    slot = {"id": 0, "id_task": task, "is_processing": active,
+            "next_token": [next_token] if shape == "array" else next_token,
+            "params": {"never": "retain this"}, "prompt": "private", "generated": "private"}
+    rows = [slot] + (additional_slots or [])
+    response = MagicMock()
+    response.json.return_value = rows
+    async def fetch(url, **kwargs):
+        if url.endswith("/metrics"):
+            return metrics
+        assert url.endswith("/slots")
+        assert kwargs["timeout"] == 2.0
+        if slots_failure:
+            raise slots_failure
+        return response
+    client.get.side_effect = fetch
+    return rows
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("shape", ["array", "object"])
+async def test_live_output_updates_while_completed_counters_stay_fixed(sampler, shape):
+    client, clock = sampler
+    live_runtime(client, count=201, shape=shape)
+    first = await helpers.get_llama_metrics("model-a")
+    assert first["tokens_per_second"] is None
+    assert first["inference_active"] is True
+    clock[0] += 2
+    live_runtime(client, count=342, shape=shape)
+    results = await asyncio.gather(*(helpers.get_llama_metrics("model-a") for _ in range(3)))
+    assert all(r["tokens_per_second"] == 70.5 for r in results)
+    assert all(r["throughput_mode"] == "live_output_interval" for r in results)
+    assert all(r["throughput_state"] == "measured" for r in results)
+    assert client.get.await_count == 4  # two endpoints per observation, not per consumer
+    assert results[0]["lifetime_tokens"] == 100  # live counters never double-count completed usage
+    assert helpers._prev_tokens["live_slots"]["counts"] == {(0, 11): 342}
+    assert "private" not in repr(helpers._prev_tokens)
+    clock[0] += 2
+    live_runtime(client, active=False)
+    idle = await helpers.get_llama_metrics("model-a")
+    assert idle["tokens_per_second"] == 70.5
+    assert idle["throughput_sampled_at"] == 102
+    assert idle["throughput_state"] == "retained"
+    assert idle["throughput_mode"] == "live_output_interval"
+    assert idle["inference_active"] is False
+
+
+@pytest.mark.asyncio
+async def test_live_task_change_and_counter_reset_start_new_intervals(sampler):
+    client, clock = sampler
+    live_runtime(client, count=100)
+    await helpers.get_llama_metrics("model-a")
+    clock[0] += 2
+    live_runtime(client, count=200)
+    assert (await helpers.get_llama_metrics("model-a"))["tokens_per_second"] == 50
+    for task, count in [(22, 1000), (22, 0)]:
+        clock[0] += 2
+        live_runtime(client, count=count, task=task)
+        held = await helpers.get_llama_metrics("model-a")
+        assert held["tokens_per_second"] == 50
+        assert held["throughput_sampled_at"] == 102
+    clock[0] += 2
+    live_runtime(client, count=160, task=22)
+    assert (await helpers.get_llama_metrics("model-a"))["tokens_per_second"] == 80
+    clock[0] += 2
+    live_runtime(client, count=300, task=22)
+    assert (await helpers.get_llama_metrics("model-b"))["tokens_per_second"] is None
+    clock[0] += 2
+    live_runtime(client, count=400, task=22, total=0, seconds=0)
+    assert (await helpers.get_llama_metrics("model-b"))["tokens_per_second"] is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("failure", ["slots", "metrics", "bad_shape"])
+async def test_slot_failure_holds_unavailable_and_recovery_does_not_cross_gap(sampler, failure):
+    client, clock = sampler
+    live_runtime(client, count=100)
+    await helpers.get_llama_metrics("model-a")
+    clock[0] += 2
+    live_runtime(client, count=200)
+    await helpers.get_llama_metrics("model-a")
+    clock[0] += 2
+    if failure == "slots":
+        live_runtime(client, slots_failure=httpx.ReadTimeout("unavailable"))
+    elif failure == "metrics":
+        client.get.side_effect = httpx.ReadTimeout("unavailable")
+    else:
+        rows = live_runtime(client)
+        rows[0]["next_token"] = []
+    failed = await helpers.get_llama_metrics("model-a")
+    assert failed["tokens_per_second"] == 50
+    assert failed["throughput_state"] == "unavailable"
+    assert failed["throughput_mode"] == "live_output_interval"
+    assert "live_slots" not in helpers._prev_tokens
+    clock[0] += 2
+    live_runtime(client, count=999)
+    recovered = await helpers.get_llama_metrics("model-a")
+    assert recovered["tokens_per_second"] == 50
+    assert recovered["throughput_sampled_at"] == 102
+    clock[0] += 2
+    live_runtime(client, count=1109)
+    assert (await helpers.get_llama_metrics("model-a"))["tokens_per_second"] == 55
+
+
+@pytest.mark.asyncio
+async def test_completion_interval_fallback_when_slots_unsupported(sampler):
+    client, clock = sampler
+    failure = httpx.HTTPStatusError("404", request=httpx.Request("GET", "http://runtime/slots"),
+                                   response=httpx.Response(404))
+    live_runtime(client, slots_failure=failure)
+    assert (await helpers.get_llama_metrics("model-a"))["tokens_per_second"] is None
+    clock[0] += 2
+    live_runtime(client, total=140, seconds=7, slots_failure=failure)
+    result = await helpers.get_llama_metrics("model-a")
+    assert result["tokens_per_second"] == 20
+    assert result["throughput_mode"] == "generation_interval"
+    assert result["throughput_state"] == "measured"
+
+
+@pytest.mark.parametrize("payload", [None, {}, [None], [{}],
+    [{"id":0,"id_task":1,"is_processing":True,"next_token":[{"n_decoded":True}]}],
+    [{"id":0,"id_task":1,"is_processing":True,"next_token":[{"n_decoded":-1}]}],
+    [{"id":0,"id_task":1,"is_processing":True,"next_token":[{"n_decoded":float("nan")}]}],
+    [{"id":0,"id_task":1,"is_processing":True,"next_token":[]}],
+])
+def test_live_slot_shape_cannot_invent_measurements(sampler, payload):
+    with pytest.raises(ValueError):
+        helpers._observe_live_output_slots(payload, 100)
+
+
+def test_parallel_slots_sum_accepted_tokens_and_rebaseline_when_set_changes(sampler):
+    def rows(a, b):
+        return [{"id":i,"id_task":11+i,"is_processing":True,"next_token":[{"n_decoded":n}]}
+                for i,n in enumerate((a,b))]
+    assert helpers._observe_live_output_slots(rows(10,20),100) is None
+    # Speculation accepts multiple tokens per decode: count all accepted outputs,
+    # not one decode invocation. Two active slots contribute separate outputs.
+    assert helpers._observe_live_output_slots(rows(30,40),102) == 20
+    assert helpers._observe_live_output_slots(rows(50,60)[:1],104) is None
+    assert helpers._observe_live_output_slots(rows(70,80)[:1],106) == 10
+    assert helpers._observe_live_output_slots(rows(80,90)[:1],105) is None

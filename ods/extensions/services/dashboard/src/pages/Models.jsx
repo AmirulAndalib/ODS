@@ -317,18 +317,18 @@ export default function Models({ compact = false }) {
       )}
 
       {!canActivateModels && (
-        <section className={compact ? 'models-external-notice' : 'mb-5 flex flex-col gap-3 rounded-xl border border-amber-400/25 bg-amber-500/10 p-4 sm:flex-row sm:items-center sm:justify-between'}>
+        <section className={compact ? 'models-external-notice' : 'mb-5 flex flex-col gap-3 rounded-xl border border-theme-border bg-theme-text-secondary/10 p-4 sm:flex-row sm:items-center sm:justify-between'}>
           <div className="flex min-w-0 items-start gap-3">
-            <AlertCircle size={18} className="mt-0.5 shrink-0 text-amber-300" />
+            <AlertCircle size={18} className="mt-0.5 shrink-0 text-theme-text-secondary" />
             <div>
-              <p className="text-sm font-semibold text-amber-100">{llmBackend === 'external' ? 'Model changes managed externally' : 'Local model runtime unavailable'}</p>
-              <p className="mt-1 text-sm text-amber-100/75">{activationModeError}</p>
-              {!compact && <p className="mt-1 text-xs text-amber-100/60">Model downloads and deletion remain available.</p>}
+              <p className="text-sm font-semibold text-theme-text-secondary">{llmBackend === 'external' ? 'Model changes managed externally' : 'Local model runtime unavailable'}</p>
+              <p className="mt-1 text-sm text-theme-text-secondary/75">{activationModeError}</p>
+              {!compact && <p className="mt-1 text-xs text-theme-text-secondary/60">Model downloads and deletion remain available.</p>}
             </div>
           </div>
           <Link
             to="/settings"
-            className="inline-flex h-8 shrink-0 items-center justify-center rounded-md border border-amber-500/25 bg-theme-bg/45 px-3 text-xs font-semibold text-amber-500 transition-colors hover:border-amber-500/45"
+            className="inline-flex h-8 shrink-0 items-center justify-center rounded-md border border-theme-border bg-theme-bg/45 px-3 text-xs font-semibold text-theme-text-secondary transition-colors hover:border-theme-border"
           >
             Review runtime settings
           </Link>
@@ -360,14 +360,14 @@ export default function Models({ compact = false }) {
       />
 
       {!currentModel && !loadedModel && configuredModel && (
-        <section className="mb-4 rounded-xl border border-amber-400/25 bg-amber-500/10 p-4">
+        <section className="mb-4 rounded-xl border border-theme-border bg-theme-text-secondary/10 p-4">
           <div className="flex flex-col gap-1 sm:flex-row sm:items-center sm:justify-between">
-            <div className="text-sm text-amber-200">
+            <div className="text-sm text-theme-text-secondary">
               <AlertCircle size={14} className="mr-2 inline" />
               Selected during install: <strong>{configuredModel}</strong>. Run a benchmark after first launch for local tok/s.
             </div>
             {recommendationAlternatives.length > 0 && (
-              <div className="text-xs text-amber-100/70">
+              <div className="text-xs text-theme-text-secondary/70">
                 Top catalog fit: {recommendationAlternatives.slice(0, 3).map(item => item.name).join(' / ')}
               </div>
             )}
@@ -577,7 +577,7 @@ function ModelSourceTabs({ value, onChange, installedCount, recommendedCount, co
       boxShadow: 'none',
     },
     amber: {
-      borderColor: 'rgba(251, 191, 106, 0.72)',
+      borderColor: 'rgb(var(--theme-text-secondary) / 0.72)',
       background: '#1d1e1f',
       boxShadow: 'none',
     },
@@ -585,12 +585,12 @@ function ModelSourceTabs({ value, onChange, installedCount, recommendedCount, co
   const iconStyles = {
     emerald: 'border-emerald-300/20 bg-emerald-400/10 text-emerald-200',
     purple: 'border-theme-accent/25 bg-theme-accent/10 text-theme-accent-light',
-    amber: 'border-amber-300/20 bg-amber-300/10 text-amber-100',
+    amber: 'border-theme-border bg-theme-text-secondary/10 text-theme-text-secondary',
   }
   const indicatorStyles = {
     emerald: 'bg-emerald-300 shadow-[0_0_10px_rgba(110,231,183,0.75)]',
     purple: 'bg-theme-accent-light',
-    amber: 'bg-amber-200 shadow-[0_0_12px_rgba(253,230,138,0.9)]',
+    amber: 'bg-theme-text-secondary shadow-none',
   }
   return (
     <div
@@ -622,7 +622,7 @@ function ModelSourceTabs({ value, onChange, installedCount, recommendedCount, co
             </span>
             <span className="min-w-0 flex-1">
               <span className="block text-[13px] font-semibold leading-4 text-theme-text sm:text-[15px] sm:leading-5">{label}</span>
-              <span className={`mt-1 block truncate text-xs ${active && tone === 'amber' ? 'text-amber-200/80' : 'text-theme-text-muted/70'}`}>{detail}</span>
+              <span className={`mt-1 block truncate text-xs ${active && tone === 'amber' ? 'text-theme-text-secondary/80' : 'text-theme-text-muted/70'}`}>{detail}</span>
             </span>
             {count !== null && (
               <span className="flex h-10 min-w-10 shrink-0 items-center justify-end border-l border-theme-border pl-3 font-mono text-lg font-semibold text-theme-accent">
@@ -1159,7 +1159,7 @@ function ModelActivationDialog({
     : isAgentViabilityBlocked(agentViability)
       ? { label: 'Portal adaptive', tone: 'text-theme-accent-light' }
       : !pixelContextReady
-        ? { label: `Portal compact · ${formatContext(selectedContext)}`, tone: 'text-amber-300' }
+        ? { label: `Portal compact · ${formatContext(selectedContext)}`, tone: 'text-theme-text-secondary' }
         : isPixelAgentVerified(pixelAgent)
           ? { label: 'Portal verified', tone: 'text-emerald-400' }
           : { label: 'Portal adaptive', tone: 'text-theme-accent-light' }
@@ -1291,14 +1291,14 @@ function ModelActivationDialog({
           </div>
 
           {exceedsMemory && (
-            <div className="mt-4 flex items-start gap-2 rounded-lg border border-amber-400/25 bg-amber-500/10 px-3 py-2.5 text-xs text-theme-text-secondary">
-              <AlertCircle size={15} className="mt-0.5 shrink-0 text-amber-400" />
+            <div className="mt-4 flex items-start gap-2 rounded-lg border border-theme-border bg-theme-text-secondary/10 px-3 py-2.5 text-xs text-theme-text-secondary">
+              <AlertCircle size={15} className="mt-0.5 shrink-0 text-theme-text-secondary" />
               This context exceeds the reported GPU memory estimate. Activation may use system memory or roll back.
             </div>
           )}
           {contextValid && exceedsDeclaredLimit && (
-            <div className="mt-3 flex items-start gap-2 rounded-lg border border-orange-400/25 bg-orange-500/10 px-3 py-2.5 text-xs text-theme-text-secondary">
-              <AlertCircle size={15} className="mt-0.5 shrink-0 text-orange-400" />
+            <div className="mt-3 flex items-start gap-2 rounded-lg border border-theme-border bg-theme-text-secondary/10 px-3 py-2.5 text-xs text-theme-text-secondary">
+              <AlertCircle size={15} className="mt-0.5 shrink-0 text-theme-text-secondary" />
               This override exceeds the model&apos;s declared context. The runtime may reject it or roll back.
             </div>
           )}
@@ -1445,7 +1445,7 @@ function DownloadProgressBar({ progress, helpers, onRetry }) {
       )}
 
       {statusError && (
-        <p role="alert" className="mb-3 text-sm text-amber-300">
+        <p role="alert" className="mb-3 text-sm text-theme-text-secondary">
           {statusError}
         </p>
       )}
@@ -1577,7 +1577,7 @@ function Badge({ children, tone = 'neutral', subdued = false }) {
       ? 'border-theme-border bg-theme-bg/35 text-theme-text-muted'
       : 'border-theme-border bg-theme-surface-hover text-theme-text-secondary',
     green: 'border-emerald-400/20 bg-emerald-500/12 text-emerald-300',
-    amber: 'border-amber-400/25 bg-amber-500/12 text-amber-300',
+    amber: 'border-theme-border bg-theme-text-secondary/12 text-theme-text-secondary',
     red: 'border-red-400/25 bg-red-500/12 text-red-300',
     purple: 'border-theme-accent/25 bg-theme-accent/12 text-theme-accent-light',
   }
@@ -1961,8 +1961,8 @@ function getModelTags(model, hermesMinimumContext) {
 
 function getIconTone(model, compatibility) {
   if (model?.metadata?.source === 'runtime') return { border: 'border-purple-400/35', bg: 'bg-purple-500/10', text: 'text-purple-400' }
-  if (!model?.fitsVram) return { border: 'border-orange-400/35', bg: 'bg-orange-500/10', text: 'text-orange-400' }
-  if (compatibility.tone === 'amber') return { border: 'border-amber-400/35', bg: 'bg-amber-500/10', text: 'text-amber-300' }
+  if (!model?.fitsVram) return { border: 'border-theme-border', bg: 'bg-theme-text-secondary/10', text: 'text-theme-text-secondary' }
+  if (compatibility.tone === 'amber') return { border: 'border-theme-border', bg: 'bg-theme-text-secondary/10', text: 'text-theme-text-secondary' }
   if (compatibility.detail === 'Best') return { border: 'border-theme-accent/35', bg: 'bg-theme-accent/10', text: 'text-theme-accent' }
   return { border: 'border-emerald-400/30', bg: 'bg-emerald-500/10', text: 'text-emerald-400' }
 }
