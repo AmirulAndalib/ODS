@@ -206,7 +206,7 @@ describe('Dashboard system overview', () => {
     expect(screen.queryByRole('status',{name:'Telemetry freshness'})).toBeNull()
   })
 
-  it.each([['generation_interval','Generation interval'],['latest_completion','Latest completion']])('labels %s throughput by its actual measurement window', async (throughputMode,label) => {
+  it.each([['generation_interval','Generation interval'],['latest_completion','Latest completion'],['live_output_interval','Live output interval']])('labels %s throughput by its actual measurement window', async (throughputMode,label) => {
     await renderDashboard({...baseStatus,inference:{...baseStatus.inference,throughputMode}})
     expect(screen.getAllByText(label).length).toBeGreaterThan(0)
     expect(screen.queryByText('Live Throughput')).toBeNull()

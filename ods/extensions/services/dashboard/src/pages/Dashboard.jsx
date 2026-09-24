@@ -627,6 +627,7 @@ function throughputLabel(inference, stale = false) {
   if (!Number.isFinite(inference?.tokensPerSecond)) return 'Telemetry unavailable'
   if (stale || inference?.throughputState === 'unavailable') return 'Last known rate · telemetry unavailable'
   if (inference?.throughputState === 'retained') return 'Last run'
+  if (inference?.throughputMode === 'live_output_interval') return 'Live output interval'
   if (inference?.throughputMode === 'generation_interval') return 'Generation interval'
   if (inference?.throughputMode === 'latest_completion') return 'Latest completion'
   return 'Runtime reading'
