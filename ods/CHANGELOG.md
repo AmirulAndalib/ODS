@@ -40,9 +40,31 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   Qwen3.5-27B, a copy-heavy edit fell from 89.5 s to 13.3 s and a whole-file
   rewrite from 70.1 s to 15.6 s. Novel generation and prefill did not change.
   Set `LLAMA_SPEC_TYPE=none` in `.env` to turn it off. Lemonade, Intel/Arc,
-  Apple and native macOS/Windows runtimes are unchanged.
+  Apple Docker and native Windows runtimes are unchanged; native macOS is
+  covered below.
+- Native macOS installs llama.cpp b9014 (Metal, `llama-b9014-bin-macos-arm64.tar.gz`,
+  SHA-256 `565aecda…4f22d`) instead of b8210, the same release as the Linux
+  images. b8210 turns speculative decoding off for hybrid models such as
+  Qwen3.5. On the fleet Mac mini M4 with Qwen3.5-9B, a copy-heavy file edit
+  fell from 158.2 s to 41.1 s and a whole-file rewrite from 155.6 s to
+  49.0 s, with byte-identical output. Existing installs keep their binary
+  until a fresh install or `get-ods.sh --force`.
+- Native macOS llama-server now keeps 32 prompt checkpoints per slot
+  (`--ctx-checkpoints 32`) unless `LLAMA_ARG_CTX_CHECKPOINTS` is set. On a Mac
+  mini M4 with Qwen3.5-9B and b8210, editing a tool result 9 turns back fell
+  from 84.3 s to 33.4 s. It also uses `--spec-type ngram-mod` when the
+  installed llama-server supports it (b8955+), with the same
+  `LLAMA_SPEC_TYPE=none` opt-out as Docker. On runtimes with b9014's
+  `--reasoning` switch, `LLAMA_REASONING` (default `off`) is passed as
+  `--reasoning`, as Docker does. Without it, b9014 turned Qwen3.5 thinking on
+  and put `<think>` blocks in replies.
 
 ### Fixed
+- Native macOS launches no longer pass `--spec-draft-n-max` to a llama-server
+  that does not know it. Setting `LLAMA_ARG_SPEC_DRAFT_N_MAX` stopped the b8210
+  Metal server from starting (its flag is `--draft-max`). Draft flags are now
+  spelled for the installed binary, and an unsupported setting stops the
+  restart before the running model is stopped.
 - `LLAMA_ARG_CHECKPOINT_EVERY_N_TOKENS` is now `LLAMA_ARG_CHECKPOINT_EVERY_NT`,
   the name llama.cpp reads. Docker llama-server ignored the old name. Dashboard
   restarts of native macOS inference now read the same checkpoint keys as the

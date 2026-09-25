@@ -17427,8 +17427,39 @@ def _stop_macos_native_llama_server(pid_file: Path) -> None:
         pid_file.unlink(missing_ok=True)
 
 
-def _native_llama_tuning_arguments(env: dict, llama_bin: Path) -> list[str]:
-    """Qualify optional tuning before disrupting an existing listener."""
+# .env keys that the macOS native-checkpoint-args.py helper spells for the
+# selected runtime. llama.cpp b8210 only knows --draft-max and
+# --cache-type-{k,v}-draft; b9014 renamed them to --spec-draft-*.
+_MACOS_QUALIFIED_DRAFT_KEYS = (
+    ("LLAMA_ARG_SPEC_DRAFT_N_MAX", "--draft-n-max"),
+    ("LLAMA_ARG_SPEC_DRAFT_TYPE_K", "--draft-type-k"),
+    ("LLAMA_ARG_SPEC_DRAFT_TYPE_V", "--draft-type-v"),
+)
+
+
+def _native_llama_tuning_arguments(
+    env: dict,
+    llama_bin: Path,
+    *,
+    defaults: bool = True,
+    reasoning_format: str = "",
+) -> list[str]:
+    """Qualify optional tuning before disrupting an existing listener.
+
+    On macOS this also spells the speculative draft flags for the selected
+    runtime and, when ``defaults`` is true, adds the macOS defaults it
+    supports (``--ctx-checkpoints 32``; ``--spec-type ngram-mod`` unless
+    LLAMA_ARG_SPEC_TYPE is set or LLAMA_SPEC_TYPE=none). Registered model
+    profiles pass ``defaults=False`` and keep their own argument list.
+
+    With ``reasoning_format`` (the --reasoning-format mapped from
+    LLAMA_REASONING) the result also carries the reasoning flags, and the
+    caller must not pass --reasoning-format itself: ``--reasoning`` on
+    runtimes that have it (b9014, as Docker's LLAMA_ARG_REASONING), else that
+    ``--reasoning-format``.
+    """
+    if platform.system() != "Darwin":
+        return []
     tuning = INSTALL_DIR / "installers/macos/lib/native-checkpoint-args.py"
     # Same .env keys as installers/macos/lib/native-model.sh, which are also
     # llama.cpp's own env names for these flags.
@@ -17438,17 +17469,28 @@ def _native_llama_tuning_arguments(env: dict, llama_bin: Path) -> list[str]:
         ("LLAMA_ARG_CACHE_RAM", "--cache-mib"),
         ("LLAMA_ARG_SLEEP_IDLE_SECONDS", "--idle-seconds"),
         ("LLAMA_ARG_CHECKPOINT_MIN_SPACING_NT", "--min-spacing"),
-    )
-    if platform.system() == "Darwin" and any(env.get(key, "").strip() for key, _ in tuning_keys):
-        if not tuning.is_file():
+    ) + _MACOS_QUALIFIED_DRAFT_KEYS
+    explicit = any(env.get(key, "").strip() for key, _ in tuning_keys)
+    fallback = ["--reasoning-format", reasoning_format] if defaults and reasoning_format else []
+    if not explicit and not defaults:
+        return []
+    if not tuning.is_file():
+        if explicit:
             raise RuntimeError("Native runtime tuning validator is missing")
-        command = [sys.executable, str(tuning), "--binary", str(llama_bin)]
-        command.extend(option + "=" + env.get(key, "").strip() for key, option in tuning_keys)
-        result = subprocess.run(command, capture_output=True, timeout=20)
-        if result.returncode:
-            raise RuntimeError("Native runtime tuning was rejected")
-        return [part.decode("utf-8") for part in result.stdout.split(b"\0") if part]
-    return []
+        return fallback
+    command = [sys.executable, str(tuning), "--binary", str(llama_bin)]
+    command.extend(option + "=" + env.get(key, "").strip() for key, option in tuning_keys)
+    command.append("--explicit-spec-type=" + env.get("LLAMA_ARG_SPEC_TYPE", "").strip())
+    if defaults:
+        command.append("--spec-default=" + env.get("LLAMA_SPEC_TYPE", "").strip())
+        if reasoning_format:
+            command.append("--reasoning-mode=" + env.get("LLAMA_REASONING", "").strip())
+            command.append("--reasoning-format-fallback=" + reasoning_format)
+        command.append("--apply-defaults")
+    result = subprocess.run(command, capture_output=True, timeout=20)
+    if result.returncode:
+        raise RuntimeError("Native runtime tuning was rejected")
+    return [part.decode("utf-8") for part in result.stdout.split(b"\0") if part]
 
 
 def _restart_macos_native_llama_server(
@@ -17465,7 +17507,7 @@ def _restart_macos_native_llama_server(
     env = load_env(env_path)
     profile = _model_stores.lemonade_profile(INSTALL_DIR / "data", env.get("GGUF_FILE", ""))
     selected_binary = Path(profile["executable"]) if profile else llama_bin
-    _native_llama_tuning_arguments(env, selected_binary)
+    _native_llama_tuning_arguments(env, selected_binary, defaults=profile is None)
     _stop_macos_native_llama_server(pid_file)
     _configure_macos_llm_bridge(env_path)
     _launch_native_llama_server(env_path, llama_bin, llama_log, pid_file)
@@ -17504,9 +17546,14 @@ def _launch_native_llama_server(env_path: Path, llama_bin: Path, llama_log: Path
         "--ctx-size", ctx_size,
         "--n-gpu-layers", gpu_layers,
         "--parallel", env.get("LLAMA_PARALLEL", "1"),
-        "--reasoning-format", reasoning_fmt,
-        "--metrics",
     ]
+    # On macOS the default runtime gets its reasoning flags from the tuning
+    # helper below (--reasoning on b9014, where --reasoning-format none put an
+    # empty think block into every reply). Everything else passes the format.
+    helper_reasoning = platform.system() == "Darwin" and profile is None
+    if not helper_reasoning:
+        args.extend(["--reasoning-format", reasoning_fmt])
+    args.append("--metrics")
     optional_args = {
         "LLAMA_ARG_FLASH_ATTN": "--flash-attn",
         "LLAMA_ARG_CACHE_TYPE_K": "--cache-type-k",
@@ -17517,11 +17564,20 @@ def _launch_native_llama_server(env_path: Path, llama_bin: Path, llama_log: Path
         "LLAMA_ARG_SPEC_DRAFT_TYPE_K": "--spec-draft-type-k",
         "LLAMA_ARG_SPEC_DRAFT_TYPE_V": "--spec-draft-type-v",
     }
+    if platform.system() == "Darwin":
+        # The macOS helper spells these for the selected runtime instead.
+        for env_key, _ in _MACOS_QUALIFIED_DRAFT_KEYS:
+            optional_args.pop(env_key, None)
     for env_key, flag in optional_args.items():
         value = env.get(env_key, "").strip()
         if value:
             args.extend([flag, value])
-    args.extend(_native_llama_tuning_arguments(env, llama_bin))
+    args.extend(_native_llama_tuning_arguments(
+        env,
+        llama_bin,
+        defaults=profile is None,
+        reasoning_format=reasoning_fmt if helper_reasoning else "",
+    ))
     if _normalize_key(env.get("LLAMA_ARG_NO_CACHE_PROMPT")) not in {"", "0", "false", "off", "no"}:
         args.append("--no-cache-prompt")
     llama_log.parent.mkdir(parents=True, exist_ok=True)

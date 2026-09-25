@@ -15,6 +15,11 @@
 # The .env values (off/on/auto) are not llama.cpp's vocabulary, so each
 # launcher also has to map them; the check below requires both the flag and the
 # mapping input.
+#
+# Native macOS hands its mapped format to installers/macos/lib/
+# native-checkpoint-args.py, which passes --reasoning instead on runtimes that
+# have it (b9014, where --reasoning-format none leaked an empty think block into
+# every reply). tests/test_macos_runtime_llama_args.py checks the final argv.
 
 set -euo pipefail
 
