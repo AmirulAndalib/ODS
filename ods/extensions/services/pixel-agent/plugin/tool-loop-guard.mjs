@@ -11664,7 +11664,11 @@ export function createToolLoopGuard({
       return {status:'failed', text:'ODS did not observe a verified managed installation receipt for this GitHub extension request.'};
     }
     if (state?.ownerQuestions && !state.clientCancelled) return {status:'pending',text:questionsText(state.ownerQuestions),questions:state.ownerQuestions};
-    if (state?.completionAssurance.terminal && verification.status === 'none') {
+    // Completion assurance arms its terminal before a revision and is not
+    // consulted after a stop, so a tool-limit answer is always the newer one.
+    const stopAnswer = state?.progressBudget.exhausted && !state.clientCancelled
+      ? state.progressFinalization.answer : undefined;
+    if (state?.completionAssurance.terminal && verification.status === 'none' && !stopAnswer) {
       return {status:state.completionAssurance.terminalStatus, text:state.completionAssurance.terminal};
     }
     if (state?.progressBudget.exhausted) {
