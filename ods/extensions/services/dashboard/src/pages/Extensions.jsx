@@ -328,7 +328,11 @@ export default function Extensions({ compact = false }) {
       install: `Install ${ext.name}? This will download and start the service.`,
       enable: `Enable ${ext.name}? The service will be started.`,
       disable: `Disable ${ext.name}? The service will be stopped.`,
-      uninstall: `Remove ${ext.name}? You can reinstall it from the library.`,
+      // A failed extension still has an enabled definition; the API stops
+      // whatever the failed attempt left running before removing it.
+      uninstall: ext.status === 'error'
+        ? `Remove ${ext.name}? ODS will stop anything its failed setup left running, then remove it. Service data is kept, and you can reinstall it from the library.`
+        : `Remove ${ext.name}? You can reinstall it from the library.`,
       purge: `Permanently delete all data for ${ext.name}? This cannot be undone.`,
       update: ext.update_status === 'unknown'
         ? `ODS could not inspect the installed files for ${ext.name}. Refresh from the ODS library? This replaces the installed definition, including any local changes, and retains the current files as a rollback backup.`

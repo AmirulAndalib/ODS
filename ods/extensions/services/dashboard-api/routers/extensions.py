@@ -3680,6 +3680,33 @@ def enable_extension(
     }
 
 
+def _enabled_dependents(service_id: str) -> list[str]:
+    """Return currently-enabled extensions that declare a dependency on service_id.
+
+    Scans user and built-in extensions; user dirs shadow built-ins of the same
+    id, mirroring _resolve_extension_dir. Only enabled peers (compose.yaml
+    present) count: a disabled dependent is unaffected, while an enabled one is
+    left pointing at a service the merged compose project no longer defines.
+    """
+    dependents: list[str] = []
+    seen_peers: set[str] = set()
+    for base in (USER_EXTENSIONS_DIR, EXTENSIONS_DIR):
+        try:
+            peer_dirs = list(base.iterdir()) if base.is_dir() else []
+        except OSError:
+            continue
+        for peer_dir in peer_dirs:
+            if (not peer_dir.is_dir() or peer_dir.name == service_id
+                    or peer_dir.name in seen_peers):
+                continue
+            seen_peers.add(peer_dir.name)
+            if not (peer_dir / "compose.yaml").exists():
+                continue
+            if service_id in _read_direct_deps(peer_dir.name):
+                dependents.append(peer_dir.name)
+    return dependents
+
+
 @router.post("/api/extensions/{service_id}/disable")
 @_serialize_extension_operation
 def disable_extension(service_id: str, include_data_info: bool = Query(True), api_key: str = Depends(verify_api_key)):
@@ -3703,22 +3730,7 @@ def disable_extension(service_id: str, include_data_info: bool = Query(True), ap
     # present) are reported: a disabled dependent is unaffected, while an
     # enabled one is left pointing at a service the merged compose project
     # no longer defines, which fails compose config for the whole stack.
-    dependents_warning = []
-    seen_peers: set[str] = set()
-    for base in (USER_EXTENSIONS_DIR, EXTENSIONS_DIR):
-        try:
-            peer_dirs = list(base.iterdir()) if base.is_dir() else []
-        except OSError:
-            continue
-        for peer_dir in peer_dirs:
-            if (not peer_dir.is_dir() or peer_dir.name == service_id
-                    or peer_dir.name in seen_peers):
-                continue
-            seen_peers.add(peer_dir.name)
-            if not (peer_dir / "compose.yaml").exists():
-                continue
-            if service_id in _read_direct_deps(peer_dir.name):
-                dependents_warning.append(peer_dir.name)
+    dependents_warning = _enabled_dependents(service_id)
 
     # Call agent to stop BEFORE renaming (prevents zombie containers)
     agent_ok = _call_agent("stop", service_id)
@@ -3780,7 +3792,19 @@ def disable_extension(service_id: str, include_data_info: bool = Query(True), ap
 @router.delete("/api/extensions/{service_id}")
 @_serialize_extension_operation
 def uninstall_extension(service_id: str, include_data_info: bool = Query(True), api_key: str = Depends(verify_api_key)):
-    """Uninstall a disabled extension."""
+    """Uninstall an extension that is disabled or left in the error state.
+
+    Removal never tears down a live service as a side effect: an enabled
+    definition (running, stopped, starting, unhealthy) still requires an
+    explicit disable first. The one exception is a definition whose last
+    install/start attempt failed (progress status ``error``, shown as
+    ``error`` in the catalog). Nothing there is worth keeping running, so the
+    disable prerequisite is performed here, with the same safety as the
+    disable endpoint: the host agent must stop the service before its
+    definition is touched, and removal is refused while enabled extensions
+    still depend on it. Service data is never deleted here; purging stays a
+    separate, explicitly confirmed request.
+    """
     _validate_service_id(service_id)
     _assert_not_core(service_id)
 
@@ -3797,12 +3821,35 @@ def uninstall_extension(service_id: str, include_data_info: bool = Query(True), 
             status_code=404, detail=f"Extension not installed: {service_id}",
         )
 
-    # Must be disabled before uninstall
-    if (ext_dir / "compose.yaml").exists():
-        raise HTTPException(
-            status_code=400,
-            detail=f"Disable extension before uninstalling. Run 'ods disable {service_id}' first.",
-        )
+    enabled_compose = ext_dir / "compose.yaml"
+    stopped_before_removal = False
+    if enabled_compose.exists():
+        # Must be disabled before uninstall, unless the extension failed.
+        if not _has_error_progress(service_id):
+            raise HTTPException(
+                status_code=400,
+                detail=f"Disable extension before uninstalling. Run 'ods disable {service_id}' first.",
+            )
+        dependents = _enabled_dependents(service_id)
+        if dependents:
+            # Disable only warns about this, because the owner asked for the
+            # disable itself. A remove request must not silently leave enabled
+            # peers pointing at a service the compose project no longer defines.
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    f"Cannot remove {service_id}: enabled extensions depend on it "
+                    f"({', '.join(dependents)}). Disable them first, then remove {service_id}."
+                ),
+            )
+        # Stop BEFORE touching the definition (prevents zombie containers).
+        if not _call_agent("stop", service_id):
+            logger.error("Could not stop failed extension %s via agent; refusing to uninstall", service_id)
+            raise HTTPException(
+                status_code=502,
+                detail=f"Host agent failed to stop extension: {service_id}; extension was not removed",
+            )
+        stopped_before_removal = True
 
     with _extensions_lock():
         # Reject symlinks (checked under lock to prevent TOCTOU)
@@ -3812,9 +3859,25 @@ def uninstall_extension(service_id: str, include_data_info: bool = Query(True), 
                 status_code=400, detail="Extension directory is a symlink",
             )
 
+        if stopped_before_removal:
+            # Complete the disable step first, so a removal that fails part-way
+            # leaves a disabled definition that the ordinary path can remove.
+            try:
+                os.replace(enabled_compose, ext_dir / "compose.yaml.disabled")
+            except FileNotFoundError:
+                pass
+            except OSError as e:
+                logger.error("Failed to disable extension %s before removal: %s", service_id, e)
+                raise HTTPException(
+                    status_code=500,
+                    detail=f"Extension stopped, but its definition could not be disabled: {e}",
+                )
+
         try:
             shutil.rmtree(ext_dir)
         except OSError as e:
+            if stopped_before_removal:
+                _call_agent_invalidate_compose_cache()
             logger.error("Failed to remove extension %s: %s", service_id, e)
             raise HTTPException(status_code=500, detail=f"Failed to remove extension files: {e}")
         _call_agent_invalidate_compose_cache()
@@ -3831,12 +3894,16 @@ def uninstall_extension(service_id: str, include_data_info: bool = Query(True), 
         progress_file = Path(DATA_DIR) / "extension-progress" / f"{service_id}.json"
         progress_file.unlink(missing_ok=True)
 
-    logger.info("Uninstalled extension: %s", service_id)
+    logger.info("Uninstalled extension: %s (stopped first: %s)", service_id, stopped_before_removal)
+    message = "Extension uninstalled. Docker volumes may remain; run 'docker volume ls' to check."
+    if stopped_before_removal:
+        message = "Failed extension stopped and uninstalled. Docker volumes may remain; run 'docker volume ls' to check."
     return {
         "id": service_id,
         "action": "uninstalled",
+        "stopped_before_removal": stopped_before_removal,
         "data_info": _get_service_data_info(service_id) if include_data_info else None,
-        "message": "Extension uninstalled. Docker volumes may remain â€” run 'docker volume ls' to check.",
+        "message": message,
         "cleanup_hint": f"To remove orphaned volumes: docker volume ls --filter 'name={service_id}' -q | xargs docker volume rm",
     }
 
