@@ -7334,11 +7334,20 @@ def _build_install_sources(base, builds, services):
          *sorted(builds)], input=compiled.stdout, **options)
 
 
+BUILD_DIAGNOSTIC_LIMIT = 7600
+BUILD_ERROR_LINE_LIMIT = 300
+
+
 def _install_build_diagnostic(result, services: dict) -> str:
     """Bound untrusted build evidence and remove configured credential values.
 
     Redact before truncating so a tail cannot expose part of a credential.
     Never include the resolved Compose configuration or build plan.
+
+    BuildKit prints its step log first and the decisive error last, while the
+    dashboard card and other bounded readers show the beginning of a message.
+    Lead with the final error line (keeping its end, where Go error chains put
+    the root cause), then the tail of the log, both within one bound.
     """
     output = '\n'.join(str(getattr(result, stream, '') or '')
                        for stream in ('stdout', 'stderr'))
@@ -7370,8 +7379,23 @@ def _install_build_diagnostic(result, services: dict) -> str:
     output = re.sub(r'([a-zA-Z][a-zA-Z0-9+.-]*://)[^/\s@]+@', r'\1[REDACTED]@', output)
     output = re.sub(r'(?im)((?:[\w-]*(?:token|password|passwd|secret|api[_-]?key|credential)[\w-]*)[\x22\x27]?\s*[:=]\s*)(?:\x22[^\x22]*\x22|\x27[^\x27]*\x27|[^\s,;]+)',
                     r'\1[REDACTED]', output)
-    output = ''.join(c for c in output if c in '\n\t' or ord(c) >= 32).strip()
-    return output[-7600:] or 'No build diagnostic output was returned.'
+    output = ''.join(c for c in output if c in '\n\t' or ord(c) >= 32)
+    lines = [line.rstrip() for line in output.splitlines() if line.strip()]
+    if not lines:
+        return 'No build diagnostic output was returned.'
+    final = next((line.strip() for line in reversed(lines)
+                  if not re.fullmatch(r'\s*[-=]+', line)), lines[-1].strip())
+    if len(final) > BUILD_ERROR_LINE_LIMIT:
+        final = '…' + final[-(BUILD_ERROR_LINE_LIMIT - 1):]
+    header = f'Untrusted build error: {final}\nUntrusted build diagnostic (tail):\n'
+    budget = BUILD_DIAGNOSTIC_LIMIT - len(header)
+    tail = '\n'.join(lines)
+    if len(tail) > budget:
+        tail = tail[-budget:]
+        cut = tail.find('\n')
+        if 0 <= cut < len(tail) - 1:
+            tail = tail[cut + 1:]  # Do not start the tail mid-line.
+    return header + tail
 
 
 def _prepare_install_images(flags: list[str], service_id: str) -> tuple[bool, str]:
@@ -7429,8 +7453,7 @@ def _prepare_install_images(flags: list[str], service_id: str) -> tuple[bool, st
         _write_progress(service_id, "pulling", "Building images from source...")
         result = _build_install_sources(base, builds, services)
         if result.returncode:
-            return False, ("Source image build failed; containers were not started. "
-                           "Untrusted build diagnostic (tail):\n" +
+            return False, ("Source image build failed; containers were not started. " +
                            _install_build_diagnostic(result, services))
     return True, ""
 
