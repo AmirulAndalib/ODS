@@ -23,6 +23,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - Previously issued ODS session cookies are invalidated at upgrade, including
   unexpired chat-only guest cookies. Owners renew through the existing owner
   card or authenticated dashboard flow; default direct Hermes access is unchanged.
+- Every llama.cpp image is now pinned by tag and sha256 digest: NVIDIA
+  `server-cuda-b9014`, CPU `server-b9014`, Intel `server-intel-b8248` and Apple
+  Docker `server-b8248`, including the tier-map, installer, host-agent and
+  catalog copies. The versions are unchanged. The dependency pin check rejects
+  a llama.cpp image without a digest.
 
 ### Changed
 - Perplexica now runs upstream release v1.12.2, published under its new name
@@ -77,6 +82,30 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   LiteLLM's model map has it. The `fast` route stays on Claude Haiku 4.5
   (`claude-haiku-4-5-20251001`). A new test fails CI if any `anthropic/claude-*`
   ID in ODS is not on a verified allowlist.
+- NVIDIA multi-GPU installs no longer use `--split-mode row` for tensor or
+  hybrid GPU assignments; they use `layer`, the mode the fleet runs. llama.cpp
+  b9890 removed CUDA row split, so row would stop the model loading once the
+  pin moves; the pinned b9014 still accepts it. An existing `.env` keeps its
+  value until the GPU assignment is recomputed, for example by
+  `ods gpu reassign`. AMD is unchanged.
+- Native Windows llama-server passes `LLAMA_ARG_CHECKPOINT_EVERY_NT` only when
+  the installed binary's `--help` lists `--checkpoint-every-n-tokens`, the
+  check native macOS already makes. llama.cpp b9310 removed the flag, and
+  llama-server exits on a flag it does not know.
+- Docker llama-server now receives `LLAMA_ARG_CHECKPOINT_MIN_SPACING_NT`
+  (`--checkpoint-min-step`, llama.cpp b9310 and later; the pinned b9014 ignores
+  it) and the draft KV cache types `LLAMA_ARG_SPEC_DRAFT_CACHE_TYPE_K`/`_V`,
+  the names llama.cpp reads. The native-only `LLAMA_ARG_SPEC_DRAFT_TYPE_K`/`_V`
+  keys never reached Docker.
+- Activating Qwen 3.8 27B now stops with a clear message instead of failing
+  to load: the default llama.cpp runtimes cannot load Qwen3.8 GGUFs.
+- llama-server no longer mounts `config/llama-server/models.ini`. llama.cpp
+  reads a preset file only with `--models-preset`, which ODS does not pass;
+  ODS still writes the file.
+- Corrections to earlier notes on llama.cpp env names: `LLAMA_ARG_NO_CACHE_PROMPT`
+  does work on b9014 (any value disables prompt caching), and
+  `LLAMA_ARG_CHECKPOINT_EVERY_N_TOKENS` never existed in llama.cpp; the flag's
+  env name is `LLAMA_ARG_CHECKPOINT_EVERY_NT`.
 
 ## [3.0.0] - 2026-09-24
 

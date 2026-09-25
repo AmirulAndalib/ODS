@@ -241,7 +241,7 @@ function Resolve-GemmaTierConfig {
 
     # Keep this aligned with docker-compose.nvidia.yml so preflight validates
     # the same CUDA runtime image compose will start.
-    $runtimeImage = "ghcr.io/ggml-org/llama.cpp:server-cuda-b9014"
+    $runtimeImage = "ghcr.io/ggml-org/llama.cpp:server-cuda-b9014@sha256:fcf285820892e7ce3218379634e3590826fc697e8b6745b9392072462e355c4f"
     $runtimeTag = "b9014"
 
     switch ($Tier) {

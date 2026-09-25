@@ -84,6 +84,7 @@ test: ## Run unit and contract tests
 	@echo "=== Overlay/plist contracts ==="
 	@bash tests/contracts/test-overlay-map-coherence.sh
 	@bash tests/contracts/test-plist-log-paths.sh
+	@python3 tests/contracts/test-llama-cpp-compat.py
 	@python3 tests/contracts/test-llama-runtime-tunables.py
 	@python3 tests/contracts/test-llama-spec-default.py
 	@bash tests/test-llama-mtp-args.sh
