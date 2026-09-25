@@ -502,7 +502,8 @@ LLM_MODEL="" GGUF_FILE="" MAX_CONTEXT="" MODEL_RUNTIME_PROFILE="" LLAMA_ARG_N_CP
 load_selector_env "$_selector_env"
 assert_eq "SELECTOR_LLM_MODEL" "gemma-4-e4b-it" "$LLM_MODEL"
 assert_eq "SELECTOR_GGUF_FILE" "gemma-4-E4B-it-Q4_K_M.gguf" "$GGUF_FILE"
-assert_eq "SELECTOR_CONTEXT" "32768" "$MAX_CONTEXT"
+# Sliding-window layout: 64K costs ~6.1 GiB (1 GiB of KV), within 8 GB.
+assert_eq "SELECTOR_CONTEXT" "65536" "$MAX_CONTEXT"
 assert_eq "SELECTOR_RUNTIME_PROFILE" "" "$MODEL_RUNTIME_PROFILE"
 assert_eq "SELECTOR_N_CPU_MOE" "" "$LLAMA_ARG_N_CPU_MOE"
 assert_eq "SELECTOR_CACHE_V" "" "$LLAMA_ARG_CACHE_TYPE_V"

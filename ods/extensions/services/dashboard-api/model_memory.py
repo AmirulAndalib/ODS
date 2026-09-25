@@ -14,7 +14,9 @@ There are two estimate paths:
   without it a hybrid model cannot be told apart from a dense one. The estimate
   is weights + KV on attention layers only + per-sequence recurrent state +
   compute overhead, and it is authoritative (``vram_required_gb`` is not a
-  floor).
+  floor). Sliding-window (SWA) layers, declared with ``sliding_window`` and
+  the ``sliding_window_*`` keys, hold only the window, not the context: the
+  ``attention_*`` keys then describe the full-attention layers alone.
 * **Legacy.** Everything else (imports, unknown GGUFs, entries not reviewed
   yet) keeps the historical estimate exactly: file size + KV (from metadata or
   a parameter-count heuristic), floored by ``vram_required_gb``.
@@ -37,6 +39,8 @@ MEMORY_METADATA_KEYS = (
     "attention_key_length", "attention_value_length", "kv_cache_element_bytes",
     "attention_layer_count", "full_attention_interval", "recurrent_state_bytes",
     "size_bytes", "max_context_length",
+    "sliding_window", "sliding_window_layer_count", "sliding_window_head_count_kv",
+    "sliding_window_key_length", "sliding_window_value_length",
 )
 
 MIB = 1024.0 ** 2
@@ -62,6 +66,11 @@ OVERHEAD_BASE_GIB = 0.35
 OVERHEAD_PER_WEIGHT_GIB = 0.015
 # llama.cpp b9014 default --ctx-checkpoints (common.h n_ctx_checkpoints).
 LLAMA_DEFAULT_CTX_CHECKPOINTS = 32
+# llama.cpp b9014 sizes a sliding-window cache at n_swa * n_seq + n_ubatch
+# cells, padded to 256 and capped at the context (llama-kv-cache-iswa.cpp);
+# the default --ubatch-size is 512 and ODS does not change it.
+SWA_UBATCH_CELLS = 512
+SWA_CELL_PADDING = 256
 # A discrete card also drives the display and the CUDA context of other
 # processes; the architecture estimate must leave this much free. The
 # GPU-residency work owns tuning these two values.
@@ -235,6 +244,35 @@ def kv_bytes_per_token(
     )
 
 
+def sliding_window_kv_bytes_per_cell(
+    model: dict[str, Any],
+    cache_type_k: str = "f16",
+    cache_type_v: str = "f16",
+) -> float:
+    """KV bytes per cached cell summed over the sliding-window layers (0 if none)."""
+    window = _positive_number(model.get("sliding_window"))
+    layers = _positive_number(model.get("sliding_window_layer_count"))
+    heads = _positive_number(model.get("sliding_window_head_count_kv"))
+    key_dimension = _positive_number(model.get("sliding_window_key_length"))
+    value_dimension = _positive_number(model.get("sliding_window_value_length")) or key_dimension
+    if not (window and layers and heads and key_dimension):
+        return 0.0
+    return layers * heads * (
+        key_dimension * _cache_element_bytes(cache_type_k)
+        + value_dimension * _cache_element_bytes(cache_type_v)
+    )
+
+
+def sliding_window_cells(model: dict[str, Any], context_length: int, parallel: int = 1) -> int:
+    """Cells llama.cpp allocates for the sliding-window cache at this context."""
+    window = int(_positive_number(model.get("sliding_window")))
+    if not window:
+        return 0
+    cells = window * max(int(parallel or 1), 1) + SWA_UBATCH_CELLS
+    padded = -(-cells // SWA_CELL_PADDING) * SWA_CELL_PADDING
+    return min(int(context_length), padded)
+
+
 def architecture_metadata_complete(model: dict[str, Any]) -> bool:
     """True when the entry carries a reviewed attention layout (see module doc)."""
     return (
@@ -278,6 +316,9 @@ class MemoryEstimate(NamedTuple):
     device_gib: float
     total_gib: float
     method: str
+    # Part of ``kv_gib`` held by sliding-window layers (fixed by the window,
+    # not the context). Last, so positional users of the tuple keep working.
+    swa_kv_gib: float = 0.0
 
     def as_dict(self) -> dict[str, Any]:
         return dict(self._asdict())
@@ -297,6 +338,9 @@ def estimate_model_memory(
 
     llama.cpp's ``--ctx-size`` is the total across slots, so the KV cache is
     not multiplied by ``parallel``; recurrent state is per sequence and is.
+    A sliding-window cache holds ``n_swa * parallel + n_ubatch`` cells (see
+    :func:`sliding_window_cells`). Context checkpoints, kept in host RAM,
+    copy each sequence's recurrent and sliding-window state.
     ``weight_size_mb`` (the file on disk, MiB) overrides catalog sizes.
     """
     context = _context(model, context_length)
@@ -308,9 +352,11 @@ def estimate_model_memory(
     if architecture_metadata_complete(model):
         per_token = kv_bytes_per_token(model, cache_k, cache_v) or 0.0
         weights = _weights_bytes(model, weight_size_mb) / GIB
-        kv = per_token * context / GIB
-        state_bytes = _non_negative_number(model.get("recurrent_state_bytes")) or 0.0
         sequences = max(int(parallel or 1), 1)
+        swa_per_cell = sliding_window_kv_bytes_per_cell(model, cache_k, cache_v)
+        swa_kv = swa_per_cell * sliding_window_cells(model, context, sequences) / GIB
+        kv = per_token * context / GIB + swa_kv
+        state_bytes = _non_negative_number(model.get("recurrent_state_bytes")) or 0.0
         recurrent = state_bytes * sequences / GIB
         overhead = OVERHEAD_BASE_GIB + OVERHEAD_PER_WEIGHT_GIB * weights
         checkpoints = (
@@ -318,7 +364,8 @@ def estimate_model_memory(
             if ctx_checkpoints is None
             else max(int(ctx_checkpoints), 0)
         )
-        host = checkpoints * state_bytes * sequences / GIB
+        swa_state_bytes = swa_per_cell * sliding_window_cells(model, context, 1)
+        host = checkpoints * (state_bytes + swa_state_bytes) * sequences / GIB
         device = weights + kv + recurrent + overhead
         return MemoryEstimate(
             context_length=context,
@@ -335,6 +382,7 @@ def estimate_model_memory(
             device_gib=round(device, 2),
             total_gib=round(device + host, 2),
             method="architecture",
+            swa_kv_gib=round(swa_kv, 3),
         )
 
     # Legacy path: bit-for-bit the historical estimate (size_mb, not

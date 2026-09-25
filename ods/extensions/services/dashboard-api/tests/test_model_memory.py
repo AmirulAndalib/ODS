@@ -289,6 +289,8 @@ from model_memory import (  # noqa: E402
     kv_bytes_per_token,
     kv_layer_count,
     memory_fits,
+    sliding_window_cells,
+    sliding_window_kv_bytes_per_cell,
 )
 
 
@@ -339,6 +341,15 @@ ARCH = {
                    attention_value_length=128, recurrent_state_bytes=0, size_mb=42500),
     "qwen3-30b-a3b": dict(block_count=48, attention_head_count_kv=4, attention_key_length=128,
                           attention_value_length=128, recurrent_state_bytes=0, size_mb=18600),
+    # google/gemma-4-26B-A4B-it config.json: 5 full-attention layers with 2
+    # global KV heads x 512, 25 sliding-window layers with 8 KV heads x 256
+    # over a 1,024-token window.
+    "gemma4-26b-a4b": dict(block_count=30, attention_layer_count=5, attention_head_count_kv=2,
+                           attention_key_length=512, attention_value_length=512,
+                           sliding_window=1024, sliding_window_layer_count=25,
+                           sliding_window_head_count_kv=8, sliding_window_key_length=256,
+                           sliding_window_value_length=256, recurrent_state_bytes=0,
+                           size_bytes=16796010720),
 }
 
 
@@ -505,3 +516,31 @@ class TestArchitectureEstimator:
         assert context_fitting_model(short, 7.5, min_context=65536, memory_class="discrete")["context_length"] == 32768
         capped = {**short, "max_context_length": 32768}
         assert context_fitting_model(capped, 48.0, min_context=65536, memory_class="discrete") is capped
+
+    def test_sliding_window_layers_hold_only_the_window(self):
+        gemma = ARCH["gemma4-26b-a4b"]
+        # Only the 5 full-attention layers grow with the context.
+        assert kv_bytes_per_token(gemma) == 5 * 2 * (512 + 512) * 2
+        assert sliding_window_kv_bytes_per_cell(gemma) == 25 * 8 * (256 + 256) * 2
+        # llama.cpp b9014: n_swa * n_seq + n_ubatch (512), padded to 256,
+        # capped at the context.
+        assert sliding_window_cells(gemma, 65536) == 1536
+        assert sliding_window_cells(gemma, 65536, parallel=2) == 2560
+        assert sliding_window_cells(gemma, 1024) == 1024
+        at_64k = estimate_model_memory(gemma, context_length=65536)
+        at_128k = estimate_model_memory(gemma, context_length=131072)
+        swa_gib = 204800 * 1536 / 1024 ** 3
+        assert at_64k.swa_kv_gib == at_128k.swa_kv_gib == round(swa_gib, 3)
+        assert at_64k.kv_gib == round(20480 * 65536 / 1024 ** 3 + swa_gib, 3)
+        # Doubling the context adds only the full-attention KV (1.25 GiB);
+        # charging every layer at the full context would add 12.5 GiB.
+        assert round(at_128k.device_gib - at_64k.device_gib, 2) == 1.25
+        assert at_64k.device_gib == 17.77
+        # Context checkpoints copy the window state for each checkpoint.
+        assert at_64k.host_checkpoint_gib == round(LLAMA_DEFAULT_CTX_CHECKPOINTS * swa_gib, 3)
+        assert estimate_model_memory(gemma, context_length=65536, ctx_checkpoints=0).host_checkpoint_gib == 0
+
+    def test_models_without_a_window_are_unchanged(self):
+        assert sliding_window_kv_bytes_per_cell(ARCH["qwen3.5-9b"]) == 0
+        assert sliding_window_cells(ARCH["qwen3.5-9b"], 65536) == 0
+        assert estimate_model_memory(ARCH["qwen3.5-9b"], context_length=65536).swa_kv_gib == 0
