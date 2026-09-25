@@ -16120,12 +16120,12 @@ test('invalid JSON publication stays failed until repaired files are republished
   assert.equal(guard.verificationForRun(context.runId).status,'passed');
 });
 
-for(const fault of ['detached-exec','failed','running','env','pending-read','wrong-run','wrong-session','wrong-key','ended']) test(`final preview revalidation fails closed: ${fault}`,async()=>{
+for(const fault of ['detached-exec','timed-out','running','env','pending-read','wrong-run','wrong-session','wrong-key','ended']) test(`final preview revalidation fails closed: ${fault}`,async()=>{
   let probes=0;const {guard,context,invoke}=revalidationGuardFixture(async()=>{probes++;return true;});
   const params={command:fault==='detached-exec'?'python3 test.py &':'ls -la signal-garden/'};
   if(fault==='env')params.env={PATH:'/workspace'};
   const result={content:[{type:'text',text:'observed'}],details:{status:'completed',exitCode:0}};
-  if(fault==='failed'){result.isError=true;result.details.exitCode=1;}
+  if(fault==='timed-out'){result.isError=true;result.details={status:'failed',exitCode:null,timedOut:true,failureKind:'overall-timeout'};}
   if(fault==='running'){result.details={status:'running',sessionId:'background-session'};}
   invoke('exec',params,result,'inspection');
   if(fault==='pending-read')invoke('read',{path:'signal-garden/index.html'},null,'pending');
@@ -16326,7 +16326,35 @@ for(const deferred of [false,true]) for(const matched of [false,true]) test(`com
   assert.equal(guard.verificationForRun(context.runId).status,matched?'passed':'failed');
 });
 
-for(const fault of ['failed-write','failed-check','pending-check','missing-result','foreign-completion','changed-root','cancelled']) test(`post-effect revalidation keeps independent rejection: ${fault}`,async()=>{
+// A call the guard refuses runs nothing; its blocked receipt, reported through
+// both hooks as OpenClaw does, neither advances nor revokes the comparison.
+test('a refused call after publication keeps the pending host comparison',async()=>{
+  let probes=0;const {guard,context,invoke}=revalidationGuardFixture(async()=>{probes++;return true;});
+  invoke('exec',{command:'python3 report.py data.csv'},{content:[{type:'text',text:'{}'}],details:{status:'completed',exitCode:0}},'demo');
+  const params={path:'signal-garden/index.html',oldText:'garden',newText:'garden'},ctx={...context,toolName:'edit',toolCallId:'noop'};
+  const refused=guard.beforeToolCall({toolName:'edit',toolCallId:'noop',params},ctx);
+  assert.equal(refused?.block,true);
+  const receipt={isError:true,content:[{type:'text',text:refused.blockReason}],details:{status:'blocked',deniedReason:'plugin-before-tool-call',reason:refused.blockReason}};
+  guard.afterToolCall({toolName:'edit',toolCallId:'noop',params,result:receipt,error:refused.blockReason},ctx);
+  guard.toolResultPersist({toolName:'edit',toolCallId:'noop',message:{role:'toolResult',toolName:'edit',toolCallId:'noop',...receipt}},ctx);
+  assert.equal(await guard.revalidateWorkspacePreview({},context),true);
+  assert.equal(probes,1);
+  assert.equal(guard.verificationForRun(context.runId).status,'passed');
+});
+
+// Tower2 round 061: an exited check settles; host bytes, not its exit code,
+// decide publication currency, and the failed check still rejects delivery.
+test('a failed check after publication regains byte currency but keeps its independent rejection',async()=>{
+  let probes=0;const {guard,context,invoke}=revalidationGuardFixture(async()=>{probes++;return true;});
+  invoke('exec',{command:'python3 -m unittest'},{isError:true,content:[{type:'text',text:'FAILED (failures=1)'}],details:{status:'completed',exitCode:1}},'failed');
+  const before=guard.verificationForRun(context.runId).status;
+  assert.notEqual(before,'passed');
+  assert.equal(await guard.revalidateWorkspacePreview({},context),true);
+  assert.equal(probes,1);
+  assert.equal(guard.verificationForRun(context.runId).status,before,'currency cannot pass a failed check');
+});
+
+for(const fault of ['failed-write','pending-check','missing-result','foreign-completion','changed-root','cancelled']) test(`post-effect revalidation keeps independent rejection: ${fault}`,async()=>{
   let probes=0;const user='ods-'+'c'.repeat(64);
   const {guard,context,invoke}=revalidationGuardFixture(async()=>{probes++;return true;},{context:{sessionKey:`agent:pixel:openai-user:${user}`},guard:{abortRunAndDrain:async()=>({aborted:true,drained:true,forceCleared:false})}});
   const result={content:[{type:'text',text:'observed'}],details:{status:'completed',exitCode:0}};

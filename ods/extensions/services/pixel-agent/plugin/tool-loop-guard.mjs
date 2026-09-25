@@ -35,7 +35,7 @@ import { workspaceMutationFiles } from "./workspace-projects.mjs";
 import {WORKSPACE_BUNDLE_TOOL, normalizeWorkspaceBundle} from './workspace-bundle.mjs';
 import { PREVIEW_INSPECTION_TOOL, requestsVisibilityInteraction, requestsBehaviorPreservation, boundVisibilityInspection, boundStaticPreviewInspection,
   boundInspectionPageErrors, pageErrorRepairInstruction, visibilityInspectionMatches, visibilityInspectionInstruction } from './preview-interaction-assurance.mjs';
-import { workspaceRevalidationCandidate, workspaceReadOnlyCall, completedPreviewInspection, boundedPreviewVerification } from "./preview-revalidation.mjs";
+import { workspaceRevalidationCandidate, workspaceReadOnlyCall, settledRevalidationReceipt, boundedPreviewVerification } from "./preview-revalidation.mjs";
 import { boundedPreviewDelivery } from './preview-delivery-recovery.mjs';
 import { extractRequestedLiterals, requestedTextCheck, requestedTextInstruction, requestedTextDeliveryNote } from './requested-literals.mjs';
 
@@ -7250,7 +7250,34 @@ export function createToolLoopGuard({
     } catch { observe({callbackThrew:true}); }
   }
 
+  // Publication currency across later calls (see preview-revalidation.mjs).
+  // A call this guard refuses runs nothing: it neither advances nor revokes a
+  // pending host comparison, and its receipt is recognized by exact call ID.
   function beforeToolCall(event, context, agentId = "pixel") {
+    const decision = decideToolCall(event, context, agentId);
+    const toolName = context?.toolName ?? event?.toolName;
+    const { runId } = runIdentity(event, context);
+    const state = context?.agentId === agentId && runId ? runs.get(runId) : undefined;
+    if (!state || workspaceReadOnlyCall(toolName, event?.params)) return decision;
+    const callId = context?.toolCallId ?? event?.toolCallId;
+    if (decision?.block === true && typeof callId === 'string' && callId) {
+      const refused = state.previewRevalidationRefusedCalls ??= new Set();
+      if (refused.size >= MAX_TRACKED_RUNS) refused.delete(refused.values().next().value);
+      refused.add(callId);
+      return decision;
+    }
+    state.previewVerificationGeneration = (state.previewVerificationGeneration ?? 0) + 1;
+    const selected = toolName === 'tool_call'
+      ? /^(?:openclaw:core:)?(?:exec|read|write|edit|apply_patch)$/.test(event?.params?.id ?? '')
+        ? {name:event.params.id.split(':').at(-1),params:event.params.args} : undefined
+      : {name:toolName,params:event?.params};
+    if (!workspaceRevalidationCandidate(selected?.name, selected?.params)) {
+      state.previewRevalidationCandidate = undefined;
+    }
+    return decision;
+  }
+
+  function decideToolCall(event, context, agentId) {
     if (context?.agentId !== agentId) return undefined;
     // OpenClaw 2026.6 does not consistently expose sessionKey during
     // before_prompt_build for OpenAI-compatible HTTP turns. Tool hooks do
@@ -7269,18 +7296,6 @@ export function createToolLoopGuard({
     // policy and deterministic routing active from runId alone; operations
     // that truly need a session still fail closed on the optional sessionId.
     const state = runId ? stateFor(runId) : undefined;
-    if (state && !workspaceReadOnlyCall(toolName, event?.params)) {
-      state.previewVerificationGeneration = (state.previewVerificationGeneration ?? 0) + 1;
-      const selected = toolName === 'tool_call'
-        ? /^(?:openclaw:core:)?(?:exec|read|write|edit|apply_patch)$/.test(event?.params?.id ?? '')
-          ? {name:event.params.id.split(':').at(-1),params:event.params.args}
-          : event?.params?.id === `openclaw:pixel-ods:${PREVIEW_INSPECTION_TOOL}`
-            ? {name:PREVIEW_INSPECTION_TOOL,params:event.params.args} : undefined
-        : {name:toolName,params:event?.params};
-      if (!workspaceRevalidationCandidate(selected?.name, selected?.params)) {
-        state.previewRevalidationCandidate = undefined;
-      }
-    }
     // Every tool stays blocked after the budget stops the response. Until the
     // model has seen the finalization instruction, the refusal carries it; a
     // tool call during the answer turn forfeits that turn and ends the run at
@@ -9620,8 +9635,9 @@ export function createToolLoopGuard({
           ? boundInspectionPageErrors(inspected.params, inspected.result, state.workspacePreview) : undefined;
       }
     }
-    const readOnlyCall = workspaceReadOnlyCall(toolName, event?.params);
-    if (!readOnlyCall) state.previewVerificationGeneration = (state.previewVerificationGeneration ?? 0) + 1;
+    const refusedCall = state.previewRevalidationRefusedCalls?.delete(toolCallId) === true && failedToolOutcome(event);
+    const noWorkspaceEffect = refusedCall || workspaceReadOnlyCall(toolName, event?.params);
+    if (!noWorkspaceEffect) state.previewVerificationGeneration = (state.previewVerificationGeneration ?? 0) + 1;
     // Nested Tool Search executions also emit hooks. Count only the outer
     // call (or an ordinary direct call), never both receipts for one action.
     if ((event?.result || event?.error) && !String(toolCallId).startsWith('tool_search_code:')) {
@@ -9823,12 +9839,9 @@ export function createToolLoopGuard({
         const prefix = `tool_search_code:${parent}:${toolName}:`;
         return toolCallId.startsWith(prefix) && /^[1-9][0-9]*$/.test(toolCallId.slice(prefix.length));
       }) : [];
-    if (state.previewRevalidationCandidate && revalidationParents.length !== 1 && !readOnlyCall) {
+    if (state.previewRevalidationCandidate && revalidationParents.length !== 1 && !noWorkspaceEffect) {
       const selectedName = pendingToolRun?.selectedToolName;
-      const completed = toolName === 'tool_call'
-        ? selectedName === PREVIEW_INSPECTION_TOOL
-          ? toolSearchEventEnvelope(event, selectedName, 'pixel-ods')
-          : toolSearchSelectedToolEvent(event, selectedName, 'core') : event;
+      const completed = toolName === 'tool_call' ? toolSearchSelectedToolEvent(event, selectedName, 'core') : event;
       const candidate = state.previewRevalidationCandidate;
       const paired = pendingToolRun?.runId === runId && pendingToolRun.transport === toolName &&
         (event?.runId === undefined || event.runId === runId) &&
@@ -9841,16 +9854,18 @@ export function createToolLoopGuard({
         // eligibility still classifies the model's original command.
         isDeepStrictEqual(completed?.params,selectedName === 'exec' ? pendingToolRun.executedParams : pendingToolRun.selectedParams) &&
         workspaceRevalidationCandidate(selectedName, pendingToolRun.selectedParams);
-      const terminal = paired && !failedToolOutcome(event) && completed?.result && !toolCallFailed(completed) &&
-        (selectedName !== PREVIEW_INSPECTION_TOOL ||
-          workspacePreviewInspectionAvailable && completedPreviewInspection(completed.params,completed.result,candidate.preview)) &&
-        (selectedName !== 'exec' || (completed.result.details?.status === 'completed' &&
-          completed.result.details.exitCode === 0 && !runningExecSessionId(completed)));
+      // Settled, not necessarily successful: the host digest decides what the
+      // call changed. A failed test or CLI demo exits and leaves nothing running.
+      const terminal = paired && Boolean(completed?.result) && settledRevalidationReceipt(selectedName, completed) &&
+        (selectedName !== 'exec' || completed.result.details.exitCode !== 0 || !failedToolOutcome(event)) &&
+        !runningExecSessionId(completed);
       if (terminal) state.previewRevalidationCompletedGeneration = state.previewVerificationGeneration;
       else state.previewRevalidationCandidate = undefined;
     }
+    // A command that exited non-zero may also have changed published files.
     if (state.workspacePreview && (successfulMutation ||
-        (completedExecution?.result && !toolCallFailed(completedExecution) &&
+        (completedExecution?.result && (!toolCallFailed(completedExecution) ||
+          settledRevalidationReceipt('exec', completedExecution)) &&
           !isLiteralEcho(completedCommand)))) {
       // Shell commands and patches need not declare all affected files.
       // Preserve the immutable host snapshot, but require fresh publication
