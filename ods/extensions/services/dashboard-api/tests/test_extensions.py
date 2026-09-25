@@ -2651,12 +2651,26 @@ class TestScanComposeVolumeBypass:
         )
 
     def test_allows_project_relative_subdir_bind(self, tmp_path):
-        # A ./subdir bind stays inside the extension's own directory.
+        # Compose resolves a relative bind against the project directory,
+        # which is the ODS install directory (the first -f file), so
+        # ./data/<extension> is that extension's own data directory.
         self._scan(
             tmp_path,
             "services:\n  svc:\n    image: test\n"
-            "    volumes:\n      - ./data:/data\n",
+            "    volumes:\n      - ./data/svc:/data\n",
         )
+
+    @pytest.mark.parametrize("source", [".", "./", "./.env", "./data", "./config", "./.git/config"])
+    def test_rejects_the_install_directory_its_secrets_and_all_data(self, tmp_path, source):
+        # ./.env is the owner's secrets and ./data holds every service's state.
+        with pytest.raises(HTTPException) as exc:
+            self._scan(
+                tmp_path,
+                "services:\n  svc:\n    image: test\n"
+                f"    volumes:\n      - '{source}:/mnt'\n",
+            )
+        assert exc.value.status_code == 400
+        assert "ODS install directory" in exc.value.detail
 
 
 # --- skip_gpu_passthrough_check flag isolation ---

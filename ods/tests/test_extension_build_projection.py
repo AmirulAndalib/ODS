@@ -335,3 +335,55 @@ def test_resolver_rejects_gpus_and_runtime_for_every_recipe(tmp_path, upstream, 
     files, diagnostics = resolve_root(root, 'nvidia')
     assert not any('user-extensions/gpu-recipe/' in path for path in files)
     assert reason in diagnostics
+
+
+IMPORTED = {'origin': 'github-proposal', 'repository': 'https://github.com/owner/project'}
+
+
+@pytest.mark.parametrize('upstream', [None, IMPORTED], ids=['curated', 'imported'])
+@pytest.mark.parametrize('base, reason', [
+    ({'privileged': 'true'}, 'uses privileged mode'),
+    ({'network_mode': '${RECIPE_NET:-host}'}, 'network_mode must be a literal string'),
+    ({'cap_add': ['CAP_SYS_ADMIN']}, 'adds dangerous capability: CAP_SYS_ADMIN'),
+    ({'security_opt': ['systempaths=unconfined']}, "dangerous security_opt 'systempaths=unconfined'"),
+    ({'group_add': ['docker']}, 'adds supplementary groups'),
+    ({'device_cgroup_rules': ['c 1:1 rwm']}, 'declares device_cgroup_rules'),
+    ({'extends': {'file': 'base.yml', 'service': 'base'}}, 'extends another service definition'),
+    ({'volumes': ['./.env:/secrets/.env:ro']}, 'bind-mounts the ODS install directory'),
+], ids=['string-privileged', 'interpolated-host-network', 'cap-prefix', 'systempaths', 'group-add',
+        'device-cgroup-rules', 'extends', 'install-env'])
+def test_resolver_applies_the_shared_policy_to_every_recipe(tmp_path, upstream, base, reason):
+    """The shared compose policy drops the whole recipe, curated or imported."""
+    root = gpu_recipe_root(tmp_path, upstream=upstream, base=base)
+    files, diagnostics = resolve_root(root, 'nvidia')
+    assert not any('user-extensions/gpu-recipe/' in path for path in files)
+    assert reason in diagnostics
+
+
+@pytest.mark.parametrize('upstream, volume, kept', [
+    (IMPORTED, './data/gpu-recipe/state:/state', True),
+    (IMPORTED, './config/gpu-recipe/app.yaml:/etc/app.yaml:ro', True),
+    (IMPORTED, './scripts:/host-scripts', False),
+    (IMPORTED, './data/n8n:/n8n', False),
+    (IMPORTED, './upload:/upload', False),
+    (None, './upload:/upload', True),
+], ids=['imported-own-data', 'imported-own-config', 'imported-ods-scripts', 'imported-core-data',
+        'imported-install-root', 'curated-reviewed-bind'])
+def test_resolver_keeps_imported_binds_in_their_own_namespace(tmp_path, upstream, volume, kept):
+    """Relative binds resolve against the install directory; an imported recipe
+    may reach only its own ./data/<id> and ./config/<id>."""
+    root = gpu_recipe_root(tmp_path, upstream=upstream, base={'volumes': [volume]})
+    files, diagnostics = resolve_root(root, 'nvidia')
+    assert ('data/user-extensions/gpu-recipe/compose.yaml' in files) is kept, diagnostics
+    if not kept:
+        assert 'outside its own ./data/gpu-recipe and ./config/gpu-recipe' in diagnostics
+
+
+def test_resolver_rejects_an_unparseable_user_extension_without_failing_the_stack(tmp_path):
+    """Invalid UTF-8 used to raise out of the scan and abort every `ods` command."""
+    root = gpu_recipe_root(tmp_path)
+    (root / 'data/user-extensions/gpu-recipe/compose.yaml').write_bytes(
+        b'services:\n  gpu-recipe:\n    image: \xff\xfe\n')
+    files, diagnostics = resolve_root(root, 'nvidia')  # exits 0: the stack still resolves
+    assert not any('user-extensions/gpu-recipe/' in path for path in files)
+    assert 'invalid compose file' in diagnostics
