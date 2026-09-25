@@ -12904,6 +12904,11 @@ class AgentHandler(BaseHTTPRequestHandler):
                     "LLAMA_ARG_N_CPU_MOE",
                     "LLAMA_ARG_NO_CACHE_PROMPT",
                     "LLAMA_ARG_CHECKPOINT_EVERY_NT",
+                    # Host-RAM caps of CPU runtime profiles. Like the memory
+                    # limit they are not removed on a switch: the next
+                    # profile sets its own, and an owner's tuning survives.
+                    "LLAMA_ARG_CTX_CHECKPOINTS",
+                    "LLAMA_ARG_CACHE_RAM",
                     "LLAMA_ARG_SPEC_TYPE",
                     "LLAMA_ARG_SPEC_DRAFT_N_MAX",
                 }

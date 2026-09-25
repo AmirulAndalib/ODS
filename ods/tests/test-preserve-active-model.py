@@ -151,6 +151,24 @@ def test_valid_curated_model_is_preserved() -> None:
             assert key not in values, f"inactive optional runtime key was exported: {key}"
 
 
+def test_cpu_profile_host_ram_caps_are_preserved() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        env, catalog, imports, models_dir = write_model_fixture(Path(tmp))
+        env.write_text(
+            env.read_text(encoding="utf-8")
+            + "LLAMA_ARG_CTX_CHECKPOINTS=4\nLLAMA_ARG_CACHE_RAM=1024\n",
+            encoding="utf-8",
+        )
+        values = run_helper(env, catalog, imports, models_dir)
+        assert values["LLAMA_ARG_CTX_CHECKPOINTS"] == "4"
+        assert values["LLAMA_ARG_CACHE_RAM"] == "1024"
+        env.write_text(
+            env.read_text(encoding="utf-8").replace("LLAMA_ARG_CTX_CHECKPOINTS=4", "LLAMA_ARG_CTX_CHECKPOINTS=many"),
+            encoding="utf-8",
+        )
+        assert "LLAMA_ARG_CTX_CHECKPOINTS" not in run_helper(env, catalog, imports, models_dir)
+
+
 def test_valid_dashboard_import_is_preserved() -> None:
     with tempfile.TemporaryDirectory() as tmp:
         env, catalog, imports, models_dir = write_model_fixture(Path(tmp), imported=True)

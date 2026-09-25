@@ -2038,6 +2038,8 @@ function Start-NativeInferenceServer {
             $checkpointArgs = Get-ODSNativeCheckpointIntervalArgs -Executable $llamaExecutable -Value $envVars["LLAMA_ARG_CHECKPOINT_EVERY_NT"]
             if ($checkpointArgs.Warning) { Write-AIWarn $checkpointArgs.Warning }
             $llamaArgs += @($checkpointArgs.Arguments)
+            if ($envVars["LLAMA_ARG_CTX_CHECKPOINTS"]) { $llamaArgs += @("--ctx-checkpoints", $envVars["LLAMA_ARG_CTX_CHECKPOINTS"]) }
+            if ($envVars["LLAMA_ARG_CACHE_RAM"]) { $llamaArgs += @("--cache-ram", $envVars["LLAMA_ARG_CACHE_RAM"]) }
             if ($envVars["LLAMA_ARG_NO_CACHE_PROMPT"] -and $envVars["LLAMA_ARG_NO_CACHE_PROMPT"] -notin @("0", "false", "off", "no")) { $llamaArgs += @("--no-cache-prompt") }
             if ($envVars["LLAMA_ARG_SPEC_TYPE"]) { $llamaArgs += @("--spec-type", $envVars["LLAMA_ARG_SPEC_TYPE"]) }
             if ($envVars["LLAMA_ARG_SPEC_DRAFT_N_MAX"]) { $llamaArgs += @("--spec-draft-n-max", $envVars["LLAMA_ARG_SPEC_DRAFT_N_MAX"]) }

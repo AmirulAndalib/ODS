@@ -7623,6 +7623,8 @@ class TestModelActivateRollback:
                         "LLAMA_ARG_N_CPU_MOE": "30",
                         "LLAMA_ARG_NO_CACHE_PROMPT": "1",
                         "LLAMA_ARG_CHECKPOINT_EVERY_NT": "-1",
+                        "LLAMA_ARG_CTX_CHECKPOINTS": "4",
+                        "LLAMA_ARG_CACHE_RAM": "1024",
                         "LLAMA_ARG_SPEC_TYPE": "draft-mtp",
                         "LLAMA_ARG_SPEC_DRAFT_N_MAX": "3",
                     },
@@ -7657,6 +7659,8 @@ class TestModelActivateRollback:
         assert "LLAMA_ARG_N_CPU_MOE=30" in env_text
         assert "LLAMA_ARG_CHECKPOINT_EVERY_NT=-1" in env_text
         assert "LLAMA_ARG_CHECKPOINT_EVERY_N_TOKENS" not in env_text
+        assert "LLAMA_ARG_CTX_CHECKPOINTS=4" in env_text
+        assert "LLAMA_ARG_CACHE_RAM=1024" in env_text
         assert "LLAMA_ARG_SPEC_TYPE=draft-mtp" in env_text
         assert "LLAMA_ARG_SPEC_DRAFT_N_MAX=3" in env_text
 

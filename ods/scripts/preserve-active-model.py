@@ -31,6 +31,8 @@ RUNTIME_KEYS = (
     "LLAMA_ARG_N_CPU_MOE",
     "LLAMA_ARG_NO_CACHE_PROMPT",
     "LLAMA_ARG_CHECKPOINT_EVERY_NT",
+    "LLAMA_ARG_CTX_CHECKPOINTS",
+    "LLAMA_ARG_CACHE_RAM",
     "LLAMA_ARG_SPEC_TYPE",
     "LLAMA_ARG_SPEC_DRAFT_N_MAX",
     "LLAMA_ARG_SPEC_DRAFT_TYPE_K",
@@ -50,6 +52,8 @@ PORTABLE_STATE_RECOVERY_KEYS = {
     "LLAMA_ARG_FLASH_ATTN",
     "LLAMA_ARG_CACHE_TYPE_K",
     "LLAMA_ARG_CACHE_TYPE_V",
+    "LLAMA_ARG_CTX_CHECKPOINTS",
+    "LLAMA_ARG_CACHE_RAM",
 }
 
 
@@ -343,6 +347,10 @@ def valid_runtime_value(key: str, value: str) -> bool:
         return value.lower() in {"", "on", "off", "true", "false", "0", "1"}
     if key == "LLAMA_ARG_CHECKPOINT_EVERY_NT":
         return bool(re.fullmatch(r"-?[0-9]{1,10}", value))
+    if key == "LLAMA_ARG_CTX_CHECKPOINTS":
+        return value.isdigit() and int(value) <= 64
+    if key == "LLAMA_ARG_CACHE_RAM":
+        return value == "-1" or (value.isdigit() and int(value) <= 1048576)
     if key == "LLAMA_ARG_SPEC_TYPE":
         return bool(re.fullmatch(r"[A-Za-z0-9_,.-]{1,64}", value))
     if key == "LLAMA_ARG_SPEC_DRAFT_N_MAX":
