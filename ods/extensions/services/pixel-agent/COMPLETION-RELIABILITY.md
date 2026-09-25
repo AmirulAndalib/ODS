@@ -35,7 +35,9 @@ opening them. Before judging the answer, the host reads those pages itself
 source-read request whose run already got web results, and only when every
 unread citation can be checked. The reads use the same guarded reader as
 `pixel_ods_web_extract` (OpenClaw's strict SSRF guard, no environment proxy,
-three redirects, 1 MB, text extraction), in parallel under one 4-second
+three redirects, 1 MB, a browser-compatible request with one plain fallback
+after a 403/406, text extraction; a bot challenge counts as not read), in
+parallel under one 4-second
 deadline, and each counts against the response's page-reading and total web
 allowances. Nothing is read when the operator disabled or denied page reads,
 the owner excluded web access, a private-network request was denied, the run
