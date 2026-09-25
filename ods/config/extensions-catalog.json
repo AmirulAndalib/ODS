@@ -1,5 +1,5 @@
 {
-  "generated_at": "2026-09-25T16:40:30Z",
+  "generated_at": "2026-09-25T17:56:01Z",
   "schema_version": "1.0.0",
   "extensions": [
     {
@@ -1413,8 +1413,6 @@
           "key": "COUCHDB_PASSWORD",
           "required": true,
           "description": "Initial password for the ods administrator. Use a single-line password; later changes are managed in CouchDB and persisted.",
-          "pattern": "^(?!-hashed-|-pbkdf2)[!-~]+$",
-          "format_description": "printable ASCII without spaces, not starting with -hashed- or -pbkdf2",
           "generate": "password"
         }
       ],
@@ -2149,9 +2147,6 @@
           "description": "Independent random secret for the built-in user OAuth client.",
           "pattern": "^(?!(true|false|null|undefined)$)(?=[^g-hj-mp-su-wzG-HJ-NP-WYZ]*[g-hj-mp-su-wzG-HJ-NP-WYZ])[^\\n]+$",
           "format_description": "text Etherpad keeps as text: include a letter such as g, h, k, m, p, r, s, u, w or z, and not true, false, null or undefined",
-          "distinct_from": [
-            "ETHERPAD_ADMIN_SECRET"
-          ],
           "generate": "token"
         }
       ],
@@ -3991,8 +3986,6 @@
           "key": "HUGINN_SECRET_TOKEN",
           "required": true,
           "description": "Persistent random Rails secret, at least 64 random characters.",
-          "pattern": "^[A-Za-z0-9]+$",
-          "format_description": "letters and digits only",
           "min_length": 64,
           "generate": "hex128"
         },
@@ -4000,8 +3993,6 @@
           "key": "HUGINN_ADMIN_PASSWORD",
           "required": true,
           "description": "Strong initial owner password; does not reset an existing account.",
-          "pattern": "^[A-Za-z0-9]+$",
-          "format_description": "letters and digits only",
           "min_length": 8,
           "max_length": 128,
           "generate": "password"
@@ -4010,8 +4001,6 @@
           "key": "HUGINN_INVITATION_CODE",
           "required": true,
           "description": "Private invitation code needed for additional registrations.",
-          "pattern": "^[A-Za-z0-9]+$",
-          "format_description": "letters and digits only",
           "generate": "password"
         },
         {
@@ -4756,8 +4745,6 @@
           "key": "KESTRA_DATABASE_PASSWORD",
           "required": true,
           "description": "Persistent private PostgreSQL password.",
-          "pattern": "^[!-#%-~]+$",
-          "format_description": "printable ASCII without spaces or $",
           "generate": "password"
         },
         {
@@ -4780,11 +4767,6 @@
           "key": "KESTRA_MANAGEMENT_PASSWORD",
           "required": true,
           "description": "Separate random password for the internal management endpoints.",
-          "pattern": "^[!-#%-~]+$",
-          "format_description": "printable ASCII without spaces or $",
-          "distinct_from": [
-            "KESTRA_DATABASE_PASSWORD"
-          ],
           "generate": "password"
         },
         {
@@ -5462,20 +5444,17 @@
         {
           "key": "LIGHTRAG_EMBEDDING_DIM",
           "required": true,
-          "description": "Exact embedding dimension from the active embedding service; changing it requires reindexing.",
-          "format": "integer"
+          "description": "Exact embedding dimension from the active embedding service; changing it requires reindexing."
         },
         {
           "key": "LIGHTRAG_EMBEDDING_TOKEN_LIMIT",
           "required": true,
-          "description": "Actual maximum input tokens supported by the active embedding model.",
-          "format": "integer"
+          "description": "Actual maximum input tokens supported by the active embedding model."
         },
         {
           "key": "LIGHTRAG_MAX_TOTAL_TOKENS",
           "required": true,
-          "description": "Retrieval context budget below the selected chat model context, leaving room for instructions and output.",
-          "format": "integer"
+          "description": "Retrieval context budget below the selected chat model context, leaving room for instructions and output."
         }
       ],
       "tags": [
@@ -5924,7 +5903,7 @@
           "key": "LLDAP_BASE_DN",
           "required": true,
           "description": "Directory namespace, for example dc=yourorganization,dc=internal.",
-          "pattern": "^[A-Za-z]+=[A-Za-z0-9_-]+(,[A-Za-z]+=[A-Za-z0-9_-]+)*$",
+          "pattern": "^[^=,]+=[^=,]+(,[^=,]+=[^=,]+)*$",
           "format_description": "comma-separated attribute=value pairs such as dc=example,dc=internal"
         }
       ],
@@ -6197,15 +6176,15 @@
           "key": "MAILPIT_UI_AUTH",
           "required": true,
           "description": "UI credentials in username:password format; separate multiple pairs with spaces. No whitespace inside a username/password.",
-          "pattern": "^[A-Za-z0-9._@-]+:[!-#%-z|}~][!-~]*( [A-Za-z0-9._@-]+:[!-#%-z|}~][!-~]*)*$",
-          "format_description": "username:password pairs separated by single spaces, each password ASCII and not starting with $ or {"
+          "pattern": "^[^\\s:]+:[^\\s]+( +[^\\s:]+:[^\\s]+)*$",
+          "format_description": "username:password pairs separated by spaces"
         },
         {
           "key": "MAILPIT_SMTP_AUTH",
           "required": true,
           "description": "SMTP credentials in username:password format; use separate development-only credentials.",
-          "pattern": "^[A-Za-z0-9._@-]+:[!-#%-z|}~][!-~]*( [A-Za-z0-9._@-]+:[!-#%-z|}~][!-~]*)*$",
-          "format_description": "username:password pairs separated by single spaces, each password ASCII and not starting with $ or {"
+          "pattern": "^[^\\s:]+:[^\\s]+( +[^\\s:]+:[^\\s]+)*$",
+          "format_description": "username:password pairs separated by spaces"
         },
         {
           "key": "MAILPIT_SMTP_PORT",
@@ -6598,9 +6577,6 @@
           "key": "MICROBIN_ADMIN_PASSWORD",
           "required": true,
           "description": "Separate administrator password; replaces the upstream default.",
-          "distinct_from": [
-            "MICROBIN_ACCESS_PASSWORD"
-          ],
           "generate": "password"
         }
       ],
@@ -7212,6 +7188,8 @@
           "required": true,
           "description": "Random 64-hex password for the ods single-user administrator.",
           "format": "hex64",
+          "pattern": "^[0-9a-f]+$",
+          "format_description": "lowercase only",
           "generate": "hex64"
         },
         {
@@ -7219,6 +7197,8 @@
           "required": true,
           "description": "Independent random 64-hex flow encryption key; retain unchanged with backups.",
           "format": "hex64",
+          "pattern": "^[0-9a-f]+$",
+          "format_description": "lowercase only",
           "distinct_from": [
             "NIFI_ADMIN_PASSWORD"
           ],
@@ -7915,6 +7895,8 @@
           "required": true,
           "description": "Random 64-hex password for the orthanc web/API account.",
           "format": "hex64",
+          "pattern": "^[0-9a-f]+$",
+          "format_description": "lowercase only",
           "generate": "hex64"
         }
       ],
@@ -8627,7 +8609,9 @@
           "key": "PIXEL_OPENWEBUI_KEY",
           "required": true,
           "description": "Scoped bearer token for Open WebUI authentication",
-          "format": "hex64"
+          "format": "hex64",
+          "pattern": "^[0-9a-f]+$",
+          "format_description": "lowercase only"
         },
         {
           "key": "PIXEL_INGRESS_GID",
@@ -8709,7 +8693,9 @@
           "key": "PIXEL_MODEL_RELAY_KEY",
           "required": true,
           "description": "Pixel-only bearer key for host-local inference",
-          "format": "hex64"
+          "format": "hex64",
+          "pattern": "^[0-9a-f]+$",
+          "format_description": "lowercase only"
         }
       ],
       "tags": [],
@@ -9419,6 +9405,8 @@
           "required": true,
           "description": "Random 64-hex password for the ods backup transport account; not the Restic encryption password.",
           "format": "hex64",
+          "pattern": "^[0-9a-f]+$",
+          "format_description": "lowercase only",
           "generate": "hex64"
         }
       ],
@@ -9869,6 +9857,8 @@
           "required": true,
           "description": "Random 64-hex initial ods administrator password; retain or rotate using the native security API.",
           "format": "hex64",
+          "pattern": "^[0-9a-f]+$",
+          "format_description": "lowercase only",
           "generate": "hex64"
         }
       ],

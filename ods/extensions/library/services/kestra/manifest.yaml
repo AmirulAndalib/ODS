@@ -27,8 +27,6 @@ service:
     required: true
     secret: true
     description: Persistent private PostgreSQL password.
-    pattern: '^[!-#%-~]+$'
-    format_description: 'printable ASCII without spaces or $'
     generate: password
   - key: KESTRA_ADMIN_EMAIL
     required: true
@@ -49,9 +47,6 @@ service:
     required: true
     secret: true
     description: Separate random password for the internal management endpoints.
-    pattern: '^[!-#%-~]+$'
-    format_description: 'printable ASCII without spaces or $'
-    distinct_from: [KESTRA_DATABASE_PASSWORD]
     generate: password
   - key: KESTRA_URL
     required: false

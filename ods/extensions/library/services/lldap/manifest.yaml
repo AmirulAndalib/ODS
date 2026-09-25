@@ -46,7 +46,7 @@ service:
   - key: LLDAP_BASE_DN
     required: true
     description: Directory namespace, for example dc=yourorganization,dc=internal.
-    pattern: '^[A-Za-z]+=[A-Za-z0-9_-]+(,[A-Za-z]+=[A-Za-z0-9_-]+)*$'
+    pattern: '^[^=,]+=[^=,]+(,[^=,]+=[^=,]+)*$'
     format_description: 'comma-separated attribute=value pairs such as dc=example,dc=internal'
   ui_path: /
 tags:

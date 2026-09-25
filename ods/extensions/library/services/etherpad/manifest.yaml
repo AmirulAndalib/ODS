@@ -57,7 +57,6 @@ service:
     description: Independent random secret for the built-in user OAuth client.
     pattern: '^(?!(true|false|null|undefined)$)(?=[^g-hj-mp-su-wzG-HJ-NP-WYZ]*[g-hj-mp-su-wzG-HJ-NP-WYZ])[^\n]+$'
     format_description: 'text Etherpad keeps as text: include a letter such as g, h, k, m, p, r, s, u, w or z, and not true, false, null or undefined'
-    distinct_from: [ETHERPAD_ADMIN_SECRET]
     generate: token
   ui_path: /
 tags:

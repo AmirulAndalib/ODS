@@ -24,8 +24,8 @@ const extension = {
   features: [{ category: 'productivity', icon: 'Box' }],
 }
 const hex64 = (distinctFrom = []) => ({
-  name: 'hex64', patterns: ['^[0-9a-f]{64}$'], minLength: null, maxLength: null, generate: 'hex64', distinctFrom,
-  hint: '64 lowercase hexadecimal characters (0-9, a-f)',
+  name: 'hex64', patterns: ['^[0-9a-fA-F]{64}$'], minLength: null, maxLength: null, generate: 'hex64', distinctFrom,
+  hint: '64 hexadecimal characters (0-9, a-f)',
 })
 const email = {
   name: 'email', patterns: ['^[^@]+@[^@]+$'], minLength: null, maxLength: null, generate: null, distinctFrom: [],
@@ -84,18 +84,20 @@ test('shows the expected format and keeps Save disabled until the value matches 
   const dialog = await openDialog()
   const save = within(dialog).getByRole('button', { name: 'Save and install' })
 
-  expect(within(dialog).getByText('Format: 64 lowercase hexadecimal characters (0-9, a-f)')).toBeInTheDocument()
+  expect(within(dialog).getByText('Format: 64 hexadecimal characters (0-9, a-f)')).toBeInTheDocument()
   expect(save).toBeDisabled()
 
   fireEvent.change(input(dialog, 'SHLINK_DB_PASSWORD'), { target: { value: 'not-hex-at-all' } })
-  expect(within(dialog).getByText('Expected 64 lowercase hexadecimal characters (0-9, a-f).')).toBeInTheDocument()
+  expect(within(dialog).getByText('Expected 64 hexadecimal characters (0-9, a-f).')).toBeInTheDocument()
   expect(input(dialog, 'SHLINK_DB_PASSWORD')).toHaveAttribute('aria-invalid', 'true')
   expect(save).toBeDisabled()
 
-  // Shlink itself accepts upper case; ODS asks for the lowercase subset
-  // every recipe with a 64-hex setting accepts.
-  fireEvent.change(input(dialog, 'SHLINK_DB_PASSWORD'), { target: { value: 'A'.repeat(64) } })
+  fireEvent.change(input(dialog, 'SHLINK_DB_PASSWORD'), { target: { value: 'a'.repeat(63) } })
   expect(save).toBeDisabled()
+
+  // Shlink's own check accepts either case, and so does the declared format.
+  fireEvent.change(input(dialog, 'SHLINK_DB_PASSWORD'), { target: { value: 'A'.repeat(64) } })
+  expect(save).toBeEnabled()
 
   fireEvent.change(input(dialog, 'SHLINK_DB_PASSWORD'), { target: { value: 'a'.repeat(64) } })
   expect(within(dialog).queryByText(/^Expected /)).toBeNull()
@@ -182,12 +184,41 @@ test('settings that must differ cannot be saved with the same value', async () =
   expect(within(dialog).getByRole('button', { name: 'Save and install' })).toBeEnabled()
 })
 
+test('a saved value outside its format is a warning, never a block, and names no value', async () => {
+  // Reinstall after uninstall: .env still holds the old values, and the
+  // environment editor cannot clear a library secret.
+  const install = vi.fn(async () => json({ id: 'shlink', action: 'installed', message: 'Extension installed and starting.' }))
+  mockApi([], {
+    'GET /api/extensions/shlink/install-plan': async () => json({
+      schemaVersion: 1, extensionId: 'shlink', requiresConfiguration: false, blocked: false, pending: false,
+      executionStarted: false,
+      steps: [{ extensionId: 'shlink', status: 'not_installed', action: 'install', dependsOn: [], reason: null,
+        configuration: [{ ...DB, configured: true }, { ...API, configured: true }], missingConfiguration: [],
+        setupHook: false, savedConfigurationWarnings: ['SHLINK_DB_PASSWORD', 'SHLINK_API_KEY', 'not a key'] }],
+    }),
+    'POST /api/extensions/shlink/install': install,
+  })
+  render(<Extensions />)
+  fireEvent.click(await screen.findByRole('button', { name: 'Install' }))
+  const dialog = screen.getByRole('dialog', { name: 'Confirm action' })
+
+  const note = await within(dialog).findByRole('note')
+  expect(note).toHaveTextContent(
+    'The saved settings SHLINK_DB_PASSWORD, SHLINK_API_KEY do not have the format Shlink requires.')
+  expect(note).toHaveTextContent(/data volumes are kept too/)
+  expect(note).not.toHaveTextContent(/remove|not a key/i)
+  const confirm = within(dialog).getByRole('button', { name: 'Install' })
+  expect(confirm).toBeEnabled()
+  fireEvent.click(confirm)
+  await waitFor(() => expect(install).toHaveBeenCalledOnce())
+})
+
 test('an API format refusal is shown without the value, and nothing is installed', async () => {
-  const message = 'SHLINK_DB_PASSWORD must be 64 lowercase hexadecimal characters (0-9, a-f). Nothing was saved.'
+  const message = 'SHLINK_DB_PASSWORD must be 64 hexadecimal characters (0-9, a-f). Nothing was saved.'
   const fetchMock = mockApi([setting('SHLINK_DB_PASSWORD', null)], {
     'POST /api/extensions/shlink/configure': async () => json({ detail: {
       code: 'invalid_configuration', service_id: 'shlink', message,
-      invalid_configuration: [{ key: 'SHLINK_DB_PASSWORD', expected: '64 lowercase hexadecimal characters (0-9, a-f)' }],
+      invalid_configuration: [{ key: 'SHLINK_DB_PASSWORD', expected: '64 hexadecimal characters (0-9, a-f)' }],
     } }, 422),
   })
   const dialog = await openDialog()

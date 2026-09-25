@@ -18,9 +18,11 @@ import re
 _EMAIL = (r'^(?=.{3,254}$)(?=[^@]{1,64}@)[A-Za-z0-9_%+-]+(\.[A-Za-z0-9_%+-]+)*'
           r'@([A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?\.)+[A-Za-z]{2,63}$')
 NAMED_FORMATS = {
-    'hex32': ('^[0-9a-f]{32}$', '32 lowercase hexadecimal characters (0-9, a-f)'),
-    'hex64': ('^[0-9a-f]{64}$', '64 lowercase hexadecimal characters (0-9, a-f)'),
-    'hex128': ('^[0-9a-f]{128}$', '128 lowercase hexadecimal characters (0-9, a-f)'),
+    # Either case, as the recipes' own checks accept; generated values are
+    # lowercase. A recipe that only accepts lowercase adds a pattern.
+    'hex32': ('^[0-9a-fA-F]{32}$', '32 hexadecimal characters (0-9, a-f)'),
+    'hex64': ('^[0-9a-fA-F]{64}$', '64 hexadecimal characters (0-9, a-f)'),
+    'hex128': ('^[0-9a-fA-F]{128}$', '128 hexadecimal characters (0-9, a-f)'),
     'email': (_EMAIL, 'a plain email address such as name@example.com'),
     'url': ('^https?://[^\\s/?#@]+([/?#][^\\s]*)?$', 'an http:// or https:// URL without credentials'),
     'integer': ('^[1-9][0-9]*$', 'a positive whole number (digits only, no leading zeros)'),
@@ -30,8 +32,12 @@ FIELDS = ('format', 'pattern', 'format_description', 'min_length', 'max_length',
 KEY = re.compile(r'[A-Z][A-Z0-9_]{0,127}')
 MAX_VALUE_BYTES = 4096
 # Patterns run in Python here and as JavaScript RegExps in the dashboard.
-# These constructs differ between the two engines (or do not exist in one).
-_UNPORTABLE = re.compile(r'\\[dDwWbBAZzGQE]|\(\?[PiLmsux#<a-z]|\\[pP]\{')
+# These constructs differ between the two engines (or do not exist in one):
+# Unicode-dependent classes and anchors, property escapes, and every group
+# opener other than (?: (?= (?!. The manifest schema's `pattern` rule rejects
+# the same set (UNPORTABLE_PATTERN_RULE; a test keeps the two identical).
+_UNPORTABLE = re.compile(r'\\[dDwWbBAZzGQEpP]|\(\?(?![=!:])')
+UNPORTABLE_PATTERN_RULE = r'^\^(?!.*\\[dDwWbBAZzGQEpP])(?!.*\(\?(?![=!:])).*\$$'
 
 
 class SettingFormatError(ValueError):
@@ -125,7 +131,11 @@ def conforms(value, spec):
         return True
     if spec['minLength'] and len(value) < spec['minLength']:
         return False
-    if spec['maxLength'] and len(value.encode('utf-8')) > spec['maxLength']:
+    try:
+        size = len(value.encode('utf-8'))
+    except UnicodeEncodeError:  # A lone surrogate is not a value any service can use.
+        return False
+    if spec['maxLength'] and size > spec['maxLength']:
         return False
     return all(re.fullmatch(pattern, value) for pattern in spec['patterns'])
 

@@ -170,13 +170,13 @@
               "format": {
                 "type": "string",
                 "enum": ["hex32", "hex64", "hex128", "email", "url", "integer"],
-                "description": "Named value format checked by the dashboard and dashboard-api before the value is saved: hexN = exactly N lowercase hexadecimal characters; email; url = http(s) URL without credentials; integer = positive whole number without leading zeros."
+                "description": "Named value format checked by the dashboard and dashboard-api before the value is saved: hexN = exactly N hexadecimal characters in either case (add a pattern where the service accepts only lowercase); email; url = http(s) URL without credentials; integer = positive whole number without leading zeros."
               },
               "pattern": {
                 "type": "string",
-                "pattern": "^\\^.*\\$$",
+                "pattern": "^\\^(?!.*\\\\[dDwWbBAZzGQEpP])(?!.*\\(\\?(?![=!:])).*\\$$",
                 "maxLength": 512,
-                "description": "Anchored regular expression the whole value must match, in addition to format. Must behave identically in Python re and JavaScript RegExp: use explicit classes such as [0-9] (no \\d, \\w, \\b), no inline flags or named groups. Requires format_description."
+                "description": "Anchored regular expression the whole value must match, in addition to format. Must behave identically in Python re and JavaScript RegExp: use explicit classes such as [0-9] (no \\d, \\w, \\b), no \\p escapes, and no group opener other than (?: (?= (?!. Requires format_description."
               },
               "format_description": {
                 "type": "string",

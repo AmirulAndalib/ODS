@@ -141,6 +141,25 @@ export function installPlanSettings(plan, serviceId) {
   return fields.some(field => !field) ? null : uniqueFields(fields)
 }
 
+// Saved settings whose value does not match the declared format (names only,
+// never values). A warning, not a refusal: ODS never changes saved settings,
+// and an uninstall keeps them and the extension's data volumes.
+export function installPlanWarnings(plan, serviceId) {
+  if (plan?.schemaVersion !== 1 || plan.extensionId !== serviceId || !Array.isArray(plan.steps)) return []
+  const step = plan.steps.find(item => item?.extensionId === serviceId)
+  const keys = Array.isArray(step?.savedConfigurationWarnings) ? step.savedConfigurationWarnings : []
+  return keys.filter(key => typeof key === 'string' && SETTING_KEY.test(key)).slice(0, 128)
+}
+
+export function savedSettingsWarning(name, keys) {
+  if (!keys.length) return ''
+  const several = keys.length > 1
+  return `The saved ${several ? 'settings' : 'setting'} ${keys.join(', ')} ${several ? 'do' : 'does'} not have the ` +
+    `format ${name} requires. ODS keeps saved settings unchanged, and an earlier installation's data volumes ` +
+    'are kept too and may still expect the saved value, so the installation may not start; if it fails, ' +
+    'its error shows the service’s own reason.'
+}
+
 // The install/enable refusal: {code: 'missing_configuration', service_id, message, configuration}.
 export function missingSettingsRefusal(detail) {
   if (detail?.code !== 'missing_configuration' || !SERVICE_ID.test(detail.service_id || '')) return null

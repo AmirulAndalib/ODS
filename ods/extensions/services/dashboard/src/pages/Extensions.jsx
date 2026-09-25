@@ -12,7 +12,8 @@ import { createRecoveryTracker } from '../utils/recoveryTracker'
 import MetalMetricIcon from '../components/MetalMetricIcon'
 import FittedLibraryPage from '../components/FittedLibraryPage'
 import {
-  ExtensionSettingsFields, installPlanSettings, missingSettingsRefusal, saveExtensionSettings, settingProblem,
+  ExtensionSettingsFields, installPlanSettings, installPlanWarnings, missingSettingsRefusal, saveExtensionSettings,
+  savedSettingsWarning, settingProblem,
 } from '../components/ExtensionInstallSettings'
 import './extensions-refined.css'
 
@@ -247,13 +248,18 @@ export default function Extensions({ compact = false }) {
     if (current.action === 'install' && current.settings?.loading) {
       const timeout = setTimeout(() => request.abort(), 15000)
       fetch(`/api/extensions/${current.ext.id}/install-plan`, { signal: request.signal, cache: 'no-store' })
-        .then(async response => (response.ok ? installPlanSettings(await response.json(), current.ext.id) : null))
+        .then(async response => {
+          if (!response.ok) return null
+          const plan = await response.json()
+          return { fields: installPlanSettings(plan, current.ext.id), warnings: installPlanWarnings(plan, current.ext.id) }
+        })
         .catch(() => null)
-        .then(fields => {
+        .then(result => {
           // Without a plan the install endpoint still refuses missing
           // settings, and this dialog then asks for them.
           setConfirm(open => (open?.id === dialogId
-            ? { ...open, settings: { ...open.settings, fields: fields || [], loading: false } } : open))
+            ? { ...open, settings: { ...open.settings, fields: result?.fields || [],
+              warnings: result?.warnings || [], loading: false } } : open))
         })
         .finally(() => clearTimeout(timeout))
     }
@@ -649,6 +655,11 @@ export default function Extensions({ compact = false }) {
             {confirm.settings?.loading && (
               <p className="mb-5 flex items-center gap-2 text-[11px] text-theme-text-muted/70">
                 <Loader2 size={12} className="animate-spin" /> Checking required settings…
+              </p>
+            )}
+            {confirm.settings?.warnings?.length > 0 && (
+              <p role="note" className="mb-5 text-[11px] leading-relaxed text-amber-300">
+                {savedSettingsWarning(confirm.ext.name, confirm.settings.warnings)}
               </p>
             )}
             {confirm.settings?.fields?.length > 0 && (

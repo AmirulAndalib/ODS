@@ -34,16 +34,12 @@ service:
     required: true
     secret: true
     description: Persistent random Rails secret, at least 64 random characters.
-    pattern: '^[A-Za-z0-9]+$'
-    format_description: letters and digits only
     min_length: 64
     generate: hex128
   - key: HUGINN_ADMIN_PASSWORD
     required: true
     secret: true
     description: Strong initial owner password; does not reset an existing account.
-    pattern: '^[A-Za-z0-9]+$'
-    format_description: letters and digits only
     min_length: 8
     max_length: 128
     generate: password
@@ -51,8 +47,6 @@ service:
     required: true
     secret: true
     description: Private invitation code needed for additional registrations.
-    pattern: '^[A-Za-z0-9]+$'
-    format_description: letters and digits only
     generate: password
   - key: HUGINN_ADMIN_USER
     required: false

@@ -86,8 +86,8 @@ def test_unmatched_host_receipt_cannot_claim_success(monkeypatch):
 
 @pytest.mark.parametrize('values,keys,expected', [
     ({'DEMO_DB_PASSWORD': 'private-not-hex'}, ['DEMO_DB_PASSWORD'],
-     'DEMO_DB_PASSWORD must be 64 lowercase hexadecimal characters (0-9, a-f). Nothing was saved.'),
-    ({'DEMO_DB_PASSWORD': 'A' * 64}, ['DEMO_DB_PASSWORD'], None),
+     'DEMO_DB_PASSWORD must be 64 hexadecimal characters (0-9, a-f). Nothing was saved.'),
+    ({'DEMO_DB_PASSWORD': 'G' * 64}, ['DEMO_DB_PASSWORD'], None),
     ({'DEMO_DB_PASSWORD': HEX_KEY + ' '}, ['DEMO_DB_PASSWORD'], None),
     ({'DEMO_ADMIN_PASSWORD': 'private'}, ['DEMO_ADMIN_PASSWORD'],
      'DEMO_ADMIN_PASSWORD must be at least 12 characters, no more than 72 bytes. Nothing was saved.'),
@@ -115,13 +115,26 @@ def test_values_outside_their_declared_format_are_refused_before_the_host(monkey
     host.assert_not_called()
 
 
-def test_conforming_values_and_unconstrained_settings_reach_the_host(monkeypatch):
-    values = {'DEMO_DB_PASSWORD': HEX_KEY, 'DEMO_ADMIN_PASSWORD': 'twelve-chars', 'DEMO_PASSWORD': 'x'}
+@pytest.mark.parametrize('db_password', [HEX_KEY, HEX_KEY.upper()])
+def test_conforming_values_and_unconstrained_settings_reach_the_host(monkeypatch, db_password):
+    # Upper-case hex is accepted: the recipes' own checks accept either case.
+    values = {'DEMO_DB_PASSWORD': db_password, 'DEMO_ADMIN_PASSWORD': 'twelve-chars', 'DEMO_PASSWORD': 'x'}
     host = Mock(return_value={'service_id': 'demo', 'status': 'saved', 'saved_keys': sorted(values)})
     monkeypatch.setattr(extensions, 'request_agent_json', host)
     response = asyncio.run(extensions.extension_configure('demo', request({'values': values}), 'test'))
     assert json.loads(response.body)['saved_keys'] == sorted(values)
     host.assert_called_once()
+
+
+def test_a_lone_surrogate_is_a_bad_request_not_a_server_error(monkeypatch):
+    host = Mock()
+    monkeypatch.setattr(extensions, 'request_agent_json', host)
+    # Valid JSON ("\ud800" escape) that no UTF-8 .env can hold.
+    raw = b'{"values": {"DEMO_ADMIN_PASSWORD": "abcdefghijkl\\ud800"}}'
+    with pytest.raises(HTTPException) as error:
+        asyncio.run(extensions.extension_configure('demo', request(raw), 'test'))
+    assert error.value.status_code == 400
+    host.assert_not_called()
 
 
 def test_undeclared_keys_are_left_to_the_host_agent_to_refuse(monkeypatch):

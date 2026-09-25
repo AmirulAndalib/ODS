@@ -6942,7 +6942,7 @@ def _enable_retry_work(service_id: str) -> None:
                 msg = f"Container did not reach running state within {startup_timeout}s (state={state or 'unknown'})"
                 if state_error:
                     msg += f": {state_error}"
-                msg += _container_start_diagnostic(container_name, retry_service_def)
+                msg += _container_start_diagnostic(container_name, retry_service_def, ext_dir)
                 _write_progress(service_id, "error", "Start failed", error=msg)
                 return
 
@@ -7389,10 +7389,16 @@ def _redact_untrusted_output(output: str, services: dict, extra_secrets=()) -> s
     """
     secrets = {value for value in extra_secrets if isinstance(value, str) and value}
     sensitive = re.compile(r'(?i)(secret|token|password|passwd|credential|api.?key|private.?key|authorization)')
+    # Names that usually hold a credential (..._KEY, ...PASS..., salts,
+    # peppers, seeds, cookies, encryption keys) but also flags: only values
+    # long enough to be a credential, so "true" or "1" never blank the output.
+    likely = re.compile(r'(?i)(pass|salt|pepper|seed|cookie|encrypt|(^|_)key($|_))')
     def collect(values):
         if isinstance(values, dict):
             for key, value in values.items():
-                if sensitive.search(str(key)) and isinstance(value, str) and value:
+                if not isinstance(value, str) or not value:
+                    continue
+                if sensitive.search(str(key)) or (likely.search(str(key)) and len(value) >= 8):
                     secrets.add(value)
     collect(dict(os.environ))
     try:
@@ -7417,25 +7423,52 @@ def _redact_untrusted_output(output: str, services: dict, extra_secrets=()) -> s
     return ''.join(c for c in output if c in '\n\t' or ord(c) >= 32)
 
 
-def _declared_secret_values(service_def: dict) -> list[str]:
-    """Current .env values of the settings an extension declares secret."""
+_COMPOSE_VARIABLE_RE = re.compile(r'\$\{?([A-Za-z_][A-Za-z0-9_]*)')
+
+
+def _declared_secret_values(service_def: dict, ext_dir: Path | None = None) -> list[str]:
+    """Current .env values an extension's container output must not show.
+
+    Every setting the extension declares secret, whatever it is named, and
+    every variable its Compose file interpolates (``${NAME}``), except
+    values too plain to be a credential (port-sized numbers, booleans).
+    """
     declarations = service_def.get('env_vars') if isinstance(service_def, dict) else None
-    keys = {item.get('key') for item in declarations or [] if isinstance(item, dict) and item.get('secret') is True}
-    if not keys:
-        return []
+    declarations = declarations if isinstance(declarations, list) else []
+    secret_keys = {item.get('key') for item in declarations if isinstance(item, dict) and item.get('secret') is True}
+    compose_keys: set[str] = set()
+    compose = ext_dir / 'compose.yaml' if ext_dir is not None else None
+    if compose is not None and compose.is_file() and not compose.is_symlink():
+        compose_keys.update(_COMPOSE_VARIABLE_RE.findall(compose.read_text(encoding='utf-8')))
     env = load_env(INSTALL_DIR / '.env')
-    return [env[key] for key in keys if isinstance(key, str) and env.get(key)]
+    values = [env[key] for key in secret_keys if isinstance(key, str) and env.get(key)]
+    values += [env[key] for key in compose_keys if env.get(key)
+               and not re.fullmatch(r'[0-9]{1,5}|(?i:true|false|yes|no|on|off)', env[key])]
+    return values
 
 
-def _container_start_diagnostic(container_name: str, service_def: dict) -> str:
+def _container_start_diagnostic(container_name: str, service_def: dict, ext_dir: Path | None = None) -> str:
     """Why a container did not stay running: exit code, health check, log tail.
 
     Appended to the install/retry error so the owner sees the service's own
     reason (for example a rejected setting) instead of only its state. The
-    container's output is untrusted: configured credentials and the
-    extension's declared secret settings are redacted before the tail is
-    bounded, and the container's environment is never read.
+    container's output is untrusted: configured credentials, the
+    extension's declared secret settings and the values its Compose file
+    interpolates are redacted before the tail is bounded, and the
+    container's environment is never read.
+
+    This only adds evidence to a failure already being recorded, so any
+    error here is logged and reported as unavailable diagnostics: it must
+    never end the install worker before it writes its terminal state.
     """
+    try:
+        return _collect_container_start_diagnostic(container_name, service_def, ext_dir)
+    except Exception:
+        logger.exception("Container start diagnostics failed for %s", container_name)
+        return '\nContainer diagnostics unavailable.'
+
+
+def _collect_container_start_diagnostic(container_name: str, service_def: dict, ext_dir: Path | None) -> str:
     try:
         inspected = subprocess.run(['docker', 'inspect', '--format', '{{json .State}}', container_name],
                                    capture_output=True, text=True, timeout=10)
@@ -7463,7 +7496,7 @@ def _container_start_diagnostic(container_name: str, service_def: dict) -> str:
         notes.append(f'Last exit code: {exit_code}.')
     if health_output.strip() or log_text.strip():
         try:
-            declared = _declared_secret_values(service_def)
+            declared = _declared_secret_values(service_def, ext_dir)
         except (OSError, UnicodeError):
             declared = None
         # Redact each part before bounding it, so a cut never exposes part
@@ -11015,7 +11048,7 @@ class AgentHandler(BaseHTTPRequestHandler):
                         # The generic state rarely says why; the service's own
                         # last words (a rejected setting, a failed health check)
                         # usually do.
-                        msg += _container_start_diagnostic(container_name, install_service_def)
+                        msg += _container_start_diagnostic(container_name, install_service_def, ext_dir)
                         _write_progress(service_id, "error", "Installation failed",
                                         error=msg)
                         return

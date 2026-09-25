@@ -32,7 +32,6 @@ service:
     required: true
     secret: true
     description: Separate administrator password; replaces the upstream default.
-    distinct_from: [MICROBIN_ACCESS_PASSWORD]
     generate: password
   ui_path: /
 tags:

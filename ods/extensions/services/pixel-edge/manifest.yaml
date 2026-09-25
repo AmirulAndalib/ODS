@@ -24,6 +24,8 @@ service:
       secret: true
       description: Scoped bearer token for Open WebUI authentication
       format: hex64
+      pattern: '^[0-9a-f]+$'
+      format_description: lowercase only
     - key: PIXEL_INGRESS_GID
       required: true
       description: Numeric GID allowed to connect to the host Pixel ingress socket

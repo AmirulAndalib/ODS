@@ -27,3 +27,5 @@ service:
       secret: true
       description: Pixel-only bearer key for host-local inference
       format: hex64
+      pattern: '^[0-9a-f]+$'
+      format_description: lowercase only

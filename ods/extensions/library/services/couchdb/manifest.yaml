@@ -28,8 +28,6 @@ service:
     secret: true
     description: Initial password for the ods administrator. Use a single-line password;
       later changes are managed in CouchDB and persisted.
-    pattern: '^(?!-hashed-|-pbkdf2)[!-~]+$'
-    format_description: 'printable ASCII without spaces, not starting with -hashed- or -pbkdf2'
     generate: password
   ui_path: /_utils/
 tags:
