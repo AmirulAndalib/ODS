@@ -18653,8 +18653,9 @@ def _reconcile_native_pixel_startup():
     except (OSError, ValueError, SyntaxError):
         logger.warning('Pixel startup reproof refused: helper custody')
         return
+    unavailable = None
     for attempt in range(12):
-        acquired, _active = _begin_model_lifecycle('pixel_startup_reproof')
+        acquired, active = _begin_model_lifecycle('pixel_startup_reproof')
         if acquired:
             try:
                 result = subprocess.run(
@@ -18687,6 +18688,7 @@ def _reconcile_native_pixel_startup():
                 if not retry:
                     logger.warning('Pixel startup reproof requires attention')
                     return
+                unavailable = (diagnostic.get('stage'), projection.get('reason'))
             except (OSError, ValueError, TypeError, AttributeError, subprocess.TimeoutExpired):
                 logger.warning('Pixel startup reproof failed; no automatic mutation retry')
                 return
@@ -18694,9 +18696,17 @@ def _reconcile_native_pixel_startup():
                 _end_model_lifecycle('pixel_startup_reproof')
         if attempt < 11:
             time.sleep(5)
-    logger.warning('Pixel startup reproof readiness window exhausted')
     # Every exhausted attempt was either lock contention or read-only
     # unavailability. No uncertain change is eligible for another cycle.
+    if unavailable is None:
+        # The helper never ran: another model lifecycle operation (usually a
+        # multi-minute model download) owned the lock for the whole window.
+        # The check was deferred, not failed; the next cycle retries it.
+        logger.info('Pixel access reproof deferred while %s is in progress',
+                    active.get('operation') or 'another model lifecycle operation')
+    else:
+        logger.warning('Pixel startup reproof readiness window exhausted '
+                       '(last stage=%s reason=%s)', *unavailable)
     return True
 
 
