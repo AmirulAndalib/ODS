@@ -4,6 +4,8 @@
 // snapshot. This never blocks publication: a miss withholds the completion
 // claim and gives one repair step. Precision over recall: anything ambiguous
 // is skipped, never reported, and dynamic script content counts as present.
+// A listed item name that is present, but whose card heading only contains it
+// while the other listed items are exact headings, is reported the same way.
 import {createHash} from 'node:crypto';
 import * as fs from 'node:fs';
 import path from 'node:path';
@@ -17,6 +19,8 @@ const MAX_FILE_BYTES = 4 * 1024 * 1024;
 const MAX_SNAPSHOT_BYTES = 16 * 1024 * 1024;
 const MAX_ELEMENT_RAW = 2000;
 const MAX_ELEMENT_TEXTS = 50000;
+const MAX_HEADINGS = 500;
+const MAX_REPORTED_HEADING_CHARS = 120;
 const PATH_COMPONENT = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
 const HTML_FILE = /\.html?$/i;
 const TEXT_FILE = /\.(?:html?|m?js|json|css|svg|txt|csv|tsv|md|markdown|map)$/i;
@@ -233,6 +237,9 @@ function readHtml(source, corpus) {
       const values = [record(joined.slice(element.joined)), record(spaced.slice(element.spaced))].filter(Boolean);
       if (element.name === 'title') corpus.titles.push(...values);
       if (element.name === 'h1') corpus.h1s.push(...values);
+      if (/^h[1-6]$/.test(element.name) && values.length && corpus.headings.length <= MAX_HEADINGS) {
+        corpus.headings.push({level: Number(element.name[1]), forms: values});
+      }
     }
   };
   while ((match = tag.exec(html))) {
@@ -268,7 +275,7 @@ function readHtml(source, corpus) {
 }
 
 function textCorpus(files) {
-  const corpus = {visible: [], attributes: [], elements: [], titles: [], h1s: [], opaque: []};
+  const corpus = {visible: [], attributes: [], elements: [], titles: [], h1s: [], headings: [], opaque: []};
   for (const file of files) {
     if (HTML_FILE.test(file.path)) readHtml(file.text, corpus);
     else if (/\.m?js$/i.test(file.path)) corpus.opaque.push(withoutComments(file.text, 'script'));
@@ -280,13 +287,50 @@ function textCorpus(files) {
   const form = (key, make) => forms.get(key) ?? forms.set(key, make()).get(key);
   return {
     titles: corpus.titles, h1s: corpus.h1s,
+    // Every hN element in document order, with its level and relaxed forms.
+    headings: () => form('headings', () => corpus.headings.length > MAX_HEADINGS ? []
+      : corpus.headings.map(({level, forms}) => ({level, forms, keys: forms.map(relaxed)}))),
     opaque: exact => form(`opaque:${exact}`, () => corpus.opaque.map(exact ? canonicalText : folded)),
     visible: exact => form(`visible:${exact}`, () => [...corpus.visible, ...corpus.attributes].map(exact ? canonicalText : folded)),
     elements: () => form('elements', () => new Set(corpus.elements.map(relaxed))),
   };
 }
 
-function literalMisses(literal, corpus) {
+// Whole-word occurrence of a relaxed phrase inside relaxed text.
+function containsPhrase(text, phrase) {
+  for (let at = text.indexOf(phrase); phrase && at >= 0; at = text.indexOf(phrase, at + 1)) {
+    if (!/[\p{L}\p{N}]$/u.test(text.slice(Math.max(0, at - 2), at)) &&
+        !/^[\p{L}\p{N}]/u.test(text.slice(at + phrase.length, at + phrase.length + 2))) return true;
+  }
+  return false;
+}
+
+const reportedHeading = value => {
+  const chars = Array.from(value);
+  return chars.length > MAX_REPORTED_HEADING_CHARS ? `${chars.slice(0, MAX_REPORTED_HEADING_CHARS - 1).join('')}…` : value;
+};
+
+// A listed item that is on the page but is never a whole heading, while a
+// heading of some level contains it. Reported only if another listed item is
+// exactly a heading of that same level (the items are evidently titled by
+// those headings) and the longer heading names no other listed item. Tower2
+// round 073: "Dawn jazz" was a badge; its h2 read "Dawn Jazz at the Rose
+// Pavilion" beside h2 "River Lantern Walk".
+function headingOnlyMatch(key, corpus, items) {
+  const headings = corpus.headings();
+  if (!headings.length || headings.some(heading => heading.keys.includes(key))) return undefined;
+  const others = items.filter(other => other !== key);
+  const levels = new Set(headings.filter(heading => heading.keys.some(value => others.includes(value)))
+    .map(heading => heading.level));
+  const match = headings.find(heading => levels.has(heading.level) &&
+    heading.keys.some(value => containsPhrase(value, key)) &&
+    !others.some(other => heading.keys.some(value => containsPhrase(value, other))));
+  return match ? reportedHeading(match.forms.at(-1)) : undefined;
+}
+
+// Each miss is {} (absent), {target} (not the page title or h1) or {heading}
+// (a listed item only inside a longer heading).
+function literalMisses(literal, corpus, items) {
   const exact = literal.match === 'exact';
   const needle = exact ? canonicalText(literal.text) : folded(literal.text);
   // Script, data and style bytes may render the text at runtime. That is not
@@ -294,20 +338,26 @@ function literalMisses(literal, corpus) {
   if (!needle || corpus.opaque(exact).some(source => source.includes(needle))) return [];
   if (literal.targets.length) {
     const equals = value => exact ? value === needle : relaxed(value) === relaxed(needle);
-    return literal.targets.filter(target => !(target === 'page title' ? corpus.titles : corpus.h1s).some(equals));
+    return literal.targets.filter(target => !(target === 'page title' ? corpus.titles : corpus.h1s).some(equals))
+      .map(target => ({target}));
   }
-  if (literal.match === 'item') return corpus.elements().has(relaxed(needle)) ? [] : [undefined];
-  return corpus.visible(exact).some(value => value.includes(needle)) ? [] : [undefined];
+  if (literal.match === 'item') {
+    if (!corpus.elements().has(relaxed(needle))) return [{}];
+    const heading = items.length > 1 ? headingOnlyMatch(relaxed(needle), corpus, items) : undefined;
+    return heading ? [{heading}] : [];
+  }
+  return corpus.visible(exact).some(value => value.includes(needle)) ? [] : [{}];
 }
 
 // Pure check over already snapshot-bound text files ({path, text}).
 export function missingRequestedText(literals, files) {
   if (!Array.isArray(literals) || !literals.length || !Array.isArray(files)) return [];
   const corpus = textCorpus(files);
+  const items = literals.filter(literal => literal.match === 'item').map(literal => relaxed(literal.text));
   const missing = [];
   for (const literal of literals) {
-    for (const target of literalMisses(literal, corpus)) {
-      missing.push(Object.freeze(target ? {text: literal.text, target} : {text: literal.text}));
+    for (const miss of literalMisses(literal, corpus, items)) {
+      missing.push(Object.freeze({text: literal.text, ...miss}));
     }
   }
   return missing;
@@ -375,17 +425,25 @@ export function requestedTextCheck(literals, preview, {receipt, trackedContent, 
   }
 }
 
-const missingList = check => check.missing
+const absent = check => check.missing.filter(miss => !miss.heading);
+const inHeadings = check => check.missing.filter(miss => miss.heading);
+const missingList = misses => misses
   .map(miss => JSON.stringify(miss.text) + (miss.target ? ` (${miss.target})` : '')).join(', ');
+const nameList = misses => JSON.stringify([...new Set(misses.map(miss => miss.text))]);
 const boundMisses = (preview, check) => Boolean(check?.missing?.length && preview &&
   check.siteId === preview.siteId && check.sha256 === preview.sha256);
+const sentences = parts => parts.filter(Boolean).join(' ');
 
-// Byte-stable apart from the quoted owner literals and fixed target labels,
-// so per-slot coaching dedupe applies.
+// Byte-stable apart from the quoted owner literals, fixed target labels and
+// the snapshot's own heading text, so per-slot coaching dedupe applies.
 export function requestedTextInstruction(preview, check) {
-  return boundMisses(preview, check)
-    ? `Requested text not found: ${missingList(check)}. Use the owner's exact wording, republish and re-inspect.`
-    : undefined;
+  if (!boundMisses(preview, check)) return undefined;
+  const missing = absent(check);
+  return sentences([
+    missing.length && `Requested text not found: ${missingList(missing)}. Use the owner's exact wording, republish and re-inspect.`,
+    ...inHeadings(check).map(miss => `${JSON.stringify(miss.text)} appears only inside a longer heading ` +
+      `(${JSON.stringify(miss.heading)}); use the exact name as the heading, then republish and re-inspect.`),
+  ]);
 }
 
 // The one bounded revision for a snapshot that still lacks requested text:
@@ -397,14 +455,29 @@ export const REQUESTED_TEXT_REVISION_INSTRUCTION = [
   'and keep everything else unchanged.',
 ];
 
+// The same bounded revision for listed names that are only inside longer headings.
+export const REQUESTED_HEADING_REVISION_INSTRUCTION = [
+  'Requested names still appear only inside longer headings on the published page: ',
+  '. Use each exact name as the whole heading of its item and put extra detail in body text, ' +
+  'republish with pixel_ods_workspace_preview, and keep everything else unchanged.',
+];
+
 export function requestedTextRevisionInstruction(preview, check) {
-  return boundMisses(preview, check)
-    ? REQUESTED_TEXT_REVISION_INSTRUCTION.join(JSON.stringify([...new Set(check.missing.map(miss => miss.text))]))
-    : undefined;
+  if (!boundMisses(preview, check)) return undefined;
+  const missing = absent(check), headings = inHeadings(check);
+  return sentences([
+    missing.length && REQUESTED_TEXT_REVISION_INSTRUCTION.join(nameList(missing)),
+    headings.length && REQUESTED_HEADING_REVISION_INSTRUCTION.join(nameList(headings)),
+  ]);
 }
 
 export function requestedTextDeliveryNote(preview, check) {
-  return boundMisses(preview, check)
-    ? `The published page does not contain text the owner requested: ${missingList(check)}. The preview is available, but that requirement is not met.`
-    : undefined;
+  if (!boundMisses(preview, check)) return undefined;
+  const missing = absent(check), headings = inHeadings(check);
+  return sentences([
+    missing.length && `The published page does not contain text the owner requested: ${missingList(missing)}.`,
+    headings.length && 'The published page uses requested names only inside longer headings: ' +
+      `${headings.map(miss => `${JSON.stringify(miss.text)} (${JSON.stringify(miss.heading)})`).join(', ')}.`,
+    'The preview is available, but that requirement is not met.',
+  ]);
 }
