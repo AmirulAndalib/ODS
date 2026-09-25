@@ -3,7 +3,7 @@
 const normalize = value => String(value ?? '').normalize('NFKD').replace(/\p{M}/gu, '').toLowerCase();
 const WEB = new Set(['web_search', 'web_fetch', 'pixel_ods_web_extract', 'pixel_ods_research', 'browser']);
 const DISCOVERY = new Set(['tool_search', 'tool_describe']);
-function publicSourceUrl(value) {
+export function publicSourceUrl(value) {
   try {
     const url = new URL(value);
     if (!['http:', 'https:'].includes(url.protocol) || url.username || url.password || url.href.length > 2048 ||
@@ -41,7 +41,7 @@ function openedSourceUrls(tool, result) {
 // parsing already lowercases the scheme and host and drops default ports;
 // the fragment and one trailing path slash are also ignored. The query string
 // is kept because it can select a different page.
-function citationKey(value) {
+export function citationKey(value) {
   const href = publicSourceUrl(value);
   if (!href) return;
   const url = new URL(href);
@@ -58,7 +58,7 @@ const count = (value, character) => value.split(character).length - 1;
 // Every URL in the text with its exact span. With a `read` key set, a public
 // URL whose key is not in it is unread, and `labelled` records whether the
 // answer itself marks that link as unverified or not opened.
-function citationSpans(text, read) {
+export function citationSpans(text, read) {
   const matches = [...text.matchAll(CITATION_URL)];
   return matches.map((match, i) => {
     let raw = match[0];
@@ -104,6 +104,7 @@ export const UNREAD_SOURCES_REVISION_INSTRUCTION = [
   '. Revise your answer: replace each listed URL with a page you actually read successfully in this response that supports the same claim, ' +
   'or remove that URL and mark the claim as unverified. Do not guess a replacement URL, and keep the rest of your answer. ' +
   'If a necessary page can still be read within existing permissions and allowances, use the normal web tools; do not repeat failed or denied calls or expand any budget. ' +
+  'When each item needs its own source, such as one page per event, prefer that item\'s own page over a shared listing page. ' +
   'A search snippet, failed fetch or HTTP error is not a successful page read. A successful read alone does not verify every claim: check the actual returned evidence. ' +
   'State the remaining limitation honestly.',
 ];
@@ -237,6 +238,11 @@ export function createCompletionAssurance() {
   const sources = new Set();
   const opened = new Set();
   const browserSnapshots = new Set();
+  // A separate receipt kind: pages the host itself fetched at finalization and
+  // found to carry the answer's own claim anchors (citation-verification.mjs).
+  // They satisfy the cited-page read check, but are never model reads.
+  const hostVerified = new Set();
+  const readSources = () => new Set([...opened, ...browserSnapshots, ...hostVerified]);
   return {
     begin(ownerText, event) {
       if (initialized) return;
@@ -273,9 +279,22 @@ export function createCompletionAssurance() {
         for (const url of sourceUrls(event.result)) if (sources.size < 12) sources.add(url);
       }
     },
+    // Cited public URLs the host may try to verify before this answer is
+    // judged: only for a source-read request in a run whose web tools already
+    // returned a result, and only the unlabelled unread citations.
+    hostVerificationCandidates(text) {
+      if (!readsRequired || conversational || !webObserved) return;
+      const urls = unreadCitations(String(text ?? ''), readSources());
+      return urls.length ? {urls, portuguese} : undefined;
+    },
+    observeHostVerification(url) {
+      const href = publicSourceUrl(url);
+      if (href && hostVerified.size < 16) hostVerified.add(href);
+    },
+    get hostVerifiedSources() { return [...hostVerified]; },
     finalize(text) {
       if (conversational) return;
-      const read = new Set([...opened, ...browserSnapshots]);
+      const read = readSources();
       const unread = readsRequired ? unreadCitations(text, read) : [];
       if (unread.length) {
         // Never mark the answer successful or leave an unread link presented
@@ -298,7 +317,7 @@ export function createCompletionAssurance() {
       const attributionSources = readsRequired ? new Set([...opened, ...browserSnapshots]) : sources;
       const missingResearch = research && (!webObserved || sources.size === 0);
       const cited = sources.size ? new Set(citationSpans(String(text)).map(span => span.key).filter(Boolean)) : new Set();
-      const missingCitations = sources.size > 0 && ![...sources].some(url => text.includes(url) ||
+      const missingCitations = sources.size > 0 && ![...sources, ...hostVerified].some(url => text.includes(url) ||
         text.includes(url.replaceAll('(', '%28').replaceAll(')', '%29')) || cited.has(citationKey(url)));
       // A candid failure or clarification is a valid terminal answer. It must
       // not be turned into another attempt that repeats denied work.
@@ -343,7 +362,7 @@ export function createCompletionAssurance() {
     // Read-only attribution check for an answer that cannot be revised (the
     // tool-limit finalization turn): cited links without a current-run read.
     unverifiedCitations(text) {
-      return readsRequired ? unreadCitations(String(text ?? ''), new Set([...opened, ...browserSnapshots])) : [];
+      return readsRequired ? unreadCitations(String(text ?? ''), readSources()) : [];
     },
     get terminal() { return terminal; },
     get terminalStatus() { return terminalStatus; },

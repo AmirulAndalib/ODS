@@ -29,10 +29,39 @@ after conservative normalization only: scheme and host case, default ports,
 the fragment and one trailing path slash. The query string is kept. A link the
 answer itself labels as unverified or not opened stays as written.
 
+Models often cite event detail links they saw on a listing page without
+opening them. Before judging the answer, the host reads those pages itself
+(`citation-verification.mjs`): at most four public URLs per answer, only for a
+source-read request whose run already got web results, and only when every
+unread citation can be checked. The reads use the same guarded reader as
+`pixel_ods_web_extract` (OpenClaw's strict SSRF guard, no environment proxy,
+three redirects, 1 MB, text extraction), in parallel under one 4-second
+deadline, and each counts against the response's page-reading and total web
+allowances. Nothing is read when the operator disabled or denied page reads,
+the owner excluded web access, a private-network request was denied, the run
+was cancelled, or the URL was already host-read in this run.
+
+A host read counts only when the page returns 2xx HTML or text on the cited
+site (not its root) and carries the claim anchors the answer attaches to that
+citation: the words of the item's title (title field, heading, bold name, link
+text or leading proper nouns) together, and the attributed date (day, month
+and any stated year), within 400 characters and with no other date between
+them. A time stated next to the date must not be contradicted; a claim without
+a date is anchored by its numbers. Anchors never come from the URL and
+URL-shaped page text is ignored, so a slug such as `flyers-capitals-9-26-26`
+matches only the page's own display title and date. Error pages, cancelled or
+postponed events and query strings that could echo the terms do not count. A
+verified page is a separate host-verification receipt, not a model read. When
+every unread citation verifies, the answer is delivered unchanged without
+another model turn; otherwise verified pages count as read and the rest follow
+the revision below. `tests/host_citation_verification.test.mjs` replays the
+tower3 and tower1 fleet cases.
+
 An answer that cites unread URLs gets one revision (idempotency key
 `ods-opened-source-attribution`). Its fixed instruction names exactly those
 URLs and asks the model to replace each with a page it actually read in this
-response or remove it and mark the claim unverified. If the answer still cites
+response or remove it and mark the claim unverified; where each item needs its
+own source, it prefers the item's own page to a shared listing. If the answer still cites
 unread URLs afterwards, or the harness refuses the revision, the owner receives
 that answer with only those links replaced by `[source not verified]`
 (`[fonte não verificada]` in Portuguese), Markdown link syntax around them
