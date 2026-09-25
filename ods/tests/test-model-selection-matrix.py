@@ -5,7 +5,11 @@ Runs scripts/simulate-model-selection.py's simulator (which executes the real
 scripts/select-model.py against config/model-library.json) and pins:
 
 * the fleet hosts' defaults, which this selector must never move;
-* the tier-map size ceilings the simulator reads for non-Pixel hosts.
+* the tier-map size ceilings the simulator reads for non-Pixel hosts;
+* every envelope's pick (tests/fixtures/model-selection-golden.json);
+* invariants: every pick is an install recommendation, fits with its memory
+  class's margin and serves the 64K Hermes floor itself, file size only
+  breaks ties, and a dashboard switch to the pick serves the same context.
 """
 
 from __future__ import annotations
@@ -23,6 +27,7 @@ import pytest
 ROOT = Path(__file__).resolve().parents[1]
 ENVELOPES = ROOT / "tests" / "fixtures" / "model-selection-envelopes.json"
 SIMULATOR = ROOT / "scripts" / "simulate-model-selection.py"
+sys.path.insert(0, str(ROOT / "extensions" / "services" / "dashboard-api"))
 
 # Fleet hosts (ODS-Fleet-Qualification STATE.md, 2026-09-25). A change to any
 # of these is a fleet default change and needs fleet evidence first.
@@ -140,6 +145,103 @@ def test_simulator_reads_the_tier_map_ceilings():
         parsed = module.tier_map_size_mb(tier_map, str(envelope["tier"]), envelope["host_arch"])
         assert parsed == int(sourced), envelope["id"]
         assert _rows()[envelope["id"]]["ceiling_mb"] == int(sourced), envelope["id"]
+
+
+GOLDEN = ROOT / "tests" / "fixtures" / "model-selection-golden.json"
+HERMES_FLOOR = 65536
+
+
+def _selector_module():
+    spec = importlib.util.spec_from_file_location("ods_select_model_for_matrix", ROOT / "scripts" / "select-model.py")
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+@functools.lru_cache(maxsize=1)
+def _catalog() -> dict[str, dict]:
+    selector = _selector_module()
+    return {model["id"]: model for model in selector.load_catalog(ROOT / "config" / "model-library.json")}
+
+
+def test_every_envelope_matches_the_golden_file():
+    module = _simulator_module()
+    expected = json.loads(GOLDEN.read_text(encoding="utf-8"))
+    actual = module.golden_view(list(_rows().values()))
+    mismatches = sorted(
+        envelope for envelope in set(expected) | set(actual)
+        if expected.get(envelope) != actual.get(envelope)
+    )
+    assert not mismatches, [(envelope, expected.get(envelope), actual.get(envelope)) for envelope in mismatches]
+
+
+@pytest.mark.parametrize("envelope_id", [envelope["id"] for envelope in _envelopes()])
+def test_every_pick_fits_and_meets_the_floor(envelope_id):
+    row = _rows()[envelope_id]
+    model = _catalog()[row["pick"]]
+    assert model["install_recommendation"] is True, row["pick"]
+    assert row["fits"] is True, row
+    assert row["fits_at_hermes"] in (True, "n/a"), row
+    assert row["context_length"] <= int(model.get("max_context_length") or model["context_length"]), row
+    # Every qwen-profile pick serves the Hermes floor itself: the installers
+    # no longer rely on a raise after the fit check.
+    assert row["context_length"] >= HERMES_FLOOR, row
+
+
+@pytest.mark.parametrize("envelope_id", [envelope["id"] for envelope in _envelopes()])
+def test_file_size_is_only_a_tie_breaker(envelope_id):
+    from model_selection import rank_catalog_models, usable_memory_gb
+
+    row = _rows()[envelope_id]
+    if "+" in str(row["policy"]):
+        pytest.skip("architecture policy substitution, not a ranking")
+    envelope = next(item for item in _envelopes() if item["id"] == envelope_id)
+    capacity, _label = usable_memory_gb(
+        envelope["backend"], envelope["memory_type"], envelope["vram_mb"], envelope["ram_gb"],
+    )
+    ranked = rank_catalog_models(
+        _catalog().values(), capacity_gb=capacity, profile="qwen", installable_only=True,
+        backend=envelope["backend"], memory_type=envelope["memory_type"],
+        vram_mb=envelope["vram_mb"], ram_gb=envelope["ram_gb"], host_arch=envelope["host_arch"],
+        max_size_mb=row["ceiling_mb"], min_context=HERMES_FLOOR, include_size_tiebreak=False,
+    )
+    assert ranked and ranked[0].id == row["pick"], (envelope_id, [c.id for c in ranked[:3]])
+
+
+@pytest.mark.parametrize("envelope_id", [envelope["id"] for envelope in _envelopes()])
+def test_a_switch_serves_what_the_installer_serves(envelope_id):
+    """The dashboard's switch policy is the installer's, for every envelope.
+
+    routers/models.py plans a load through performance_oracle ->
+    model_selection.plan_model_context, which runs plan_candidate: the code
+    select-model.py ranks with. Loading the installer's pick on the same
+    hardware must give the same context and runtime profile.
+    """
+    from model_selection import plan_model_context, usable_memory_gb
+
+    row = _rows()[envelope_id]
+    envelope = next(item for item in _envelopes() if item["id"] == envelope_id)
+    capacity, _label = usable_memory_gb(
+        envelope["backend"], envelope["memory_type"], envelope["vram_mb"], envelope["ram_gb"],
+    )
+    plan = plan_model_context(
+        _catalog()[row["pick"]], capacity_gb=capacity, backend=envelope["backend"],
+        memory_type=envelope["memory_type"], vram_mb=envelope["vram_mb"], ram_gb=envelope["ram_gb"],
+        host_arch=envelope["host_arch"], min_context=HERMES_FLOOR,
+    )
+    assert plan["fits"] is True, (envelope_id, plan)
+    assert (plan["context_length"], plan["runtime_profile"]) == (row["context_length"], row["runtime_profile"]), (
+        envelope_id, plan, row,
+    )
+    # A restore that starts from a context recorded below the floor (the
+    # tower1/tower3 MODEL_RECOMMENDED_CONTEXT=32768) still lands on it.
+    below = plan_model_context(
+        _catalog()[row["pick"]], capacity_gb=capacity, backend=envelope["backend"],
+        memory_type=envelope["memory_type"], vram_mb=envelope["vram_mb"], ram_gb=envelope["ram_gb"],
+        host_arch=envelope["host_arch"], min_context=HERMES_FLOOR, preferred_context=32768,
+    )
+    assert below["context_length"] >= HERMES_FLOOR, (envelope_id, below)
 
 
 if __name__ == "__main__":

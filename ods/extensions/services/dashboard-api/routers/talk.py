@@ -82,6 +82,19 @@ _TALK_BLOCKING_COMPATIBILITY_STATUSES = {
 }
 
 
+def _served_context_length() -> int | None:
+    """The context llama-server was launched with (CTX_SIZE, else MAX_CONTEXT)."""
+    for key in ("CTX_SIZE", "MAX_CONTEXT"):
+        for reader in (read_env_file_value, read_env_value):
+            try:
+                value = int(str(reader(key, INSTALL_DIR) or "").strip())
+            except (TypeError, ValueError):
+                continue
+            if value > 0:
+                return value
+    return None
+
+
 async def _active_model_app_compatibility() -> dict[str, Any]:
     catalog = load_model_catalog(INSTALL_DIR)
     loaded_model = await get_loaded_model()
@@ -93,9 +106,13 @@ async def _active_model_app_compatibility() -> dict[str, Any]:
         gguf = read_env_file_value("GGUF_FILE", INSTALL_DIR) or read_env_value("GGUF_FILE", INSTALL_DIR)
     entry = find_catalog_model(catalog, model_name, gguf)
     runtime_context = model_compatibility_runtime_context(INSTALL_DIR)
+    # The served context decides ODS Talk before Hermes does: below the
+    # Hermes floor Hermes answers every turn with an HTTP 502, so report the
+    # block (with the reason) here instead.
     compatibility = model_app_compatibility(
         entry or {},
         runtime_context=runtime_context,
+        context_length=_served_context_length() if entry else None,
     )
     compatibility["activeModel"] = {
         "id": entry.get("id") if entry else None,

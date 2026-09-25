@@ -2281,3 +2281,76 @@ def test_dashboard_ranker_matches_the_installer_on_every_envelope(monkeypatch):
         if got != want:
             mismatches.append((envelope["id"], want, got))
     assert not mismatches, mismatches
+
+
+def test_talk_verdict_follows_the_context_the_model_is_served_at():
+    model = {
+        "id": "qwen3.5-27b-q4", "context_length": 65536, "max_context_length": 262144,
+        "app_compatibility": {"hermes_talk": {"status": "verified"}},
+    }
+    assert model_app_compatibility(model, context_length=65536)["hermesTalk"]["status"] == "verified"
+    served_low = model_app_compatibility(model, context_length=32768)["hermesTalk"]
+    assert served_low["status"] == "unsupported"
+    assert served_low["code"] == "context_below_hermes_minimum"
+    assert "32K" in served_low["userMessage"] and "64K" in served_low["userMessage"]
+    # Without a known context the catalog verdict stands.
+    assert model_app_compatibility(model)["hermesTalk"]["status"] == "verified"
+
+
+def test_talk_verdict_names_a_native_context_limit():
+    native = model_app_compatibility({"id": "phi4-q4", "context_length": 16384, "max_context_length": 16384})
+    assert native["hermesTalk"]["status"] == "unsupported"
+    assert "supports only 16K" in native["hermesTalk"]["userMessage"]
+    # An unknown limit (a GGUF whose header was unreadable) is not guessed.
+    unknown = model_app_compatibility({
+        "id": "import", "context_length": 8192, "max_context_length": 8192, "context_limit_known": False,
+    })
+    assert unknown["hermesTalk"]["status"] == "unknown"
+
+
+def test_existing_blocking_verdict_keeps_its_own_copy():
+    model = {
+        "id": "granite", "context_length": 131072, "max_context_length": 131072,
+        "app_compatibility": {"hermes_talk": {
+            "status": "unsupported_until_revalidated", "userNote": "Granite can't keep up with Talk yet.",
+        }},
+    }
+    talk = model_app_compatibility(model, context_length=32768)["hermesTalk"]
+    assert talk["status"] == "unsupported_until_revalidated"
+    assert talk["userMessage"] == "Granite can't keep up with Talk yet."
+
+
+def test_model_list_plans_every_context_with_the_install_policy(data_dir, tmp_path):
+    """A pick recorded below the floor is listed (and loaded) at the floor."""
+    install_dir = tmp_path / "ods"
+    (install_dir / "data" / "models").mkdir(parents=True)
+    (install_dir / ".env").write_text(
+        "LLM_MODEL=qwen3.5-27b\n"
+        "GGUF_FILE=Qwen3.5-27B-Q4_K_M.gguf\n"
+        "SYSTEM_RAM_GB=61\n"
+        "MODEL_RECOMMENDED_MODEL=qwen3.5-27b\n"
+        "MODEL_RECOMMENDED_GGUF=Qwen3.5-27B-Q4_K_M.gguf\n"
+        "MODEL_RECOMMENDED_CONTEXT=32768\n",
+        encoding="utf-8",
+    )
+    catalog = [
+        raw for raw in _official_model_catalog()
+        if raw["id"] in {"qwen3.5-27b-q4", "gemma4-26b-a4b-q4", "phi4-q4"}
+    ]
+    payload = build_models_payload(
+        _gpu("NVIDIA GeForce RTX 5090", 32607), None, 0, install_dir, data_dir,
+        catalog=catalog, evidence=[], downloaded_files_override={},
+    )
+    by_id = {model["id"]: model for model in payload["models"]}
+    assert by_id["qwen3.5-27b-q4"]["contextLength"] == 65536
+    assert by_id["gemma4-26b-a4b-q4"]["contextLength"] == 65536
+    assert by_id["phi4-q4"]["contextLength"] == 16384
+    assert by_id["phi4-q4"]["appCompatibility"]["hermesTalk"]["status"] == "unsupported"
+    # On a 16 GB card the 27B cannot hold the floor: the list says why up front.
+    small = build_models_payload(
+        _gpu("NVIDIA GeForce RTX 4080", 16376), None, 0, install_dir, data_dir,
+        catalog=catalog, evidence=[], downloaded_files_override={},
+    )
+    small_27b = next(model for model in small["models"] if model["id"] == "qwen3.5-27b-q4")
+    assert small_27b["contextLength"] < 65536
+    assert small_27b["appCompatibility"]["hermesTalk"]["code"] == "context_below_hermes_minimum"

@@ -414,6 +414,78 @@ def plan_candidate(model: dict[str, Any], *, capacity_gb: float, mclass: str,
     return None
 
 
+def plan_model_context(model: dict[str, Any], *, capacity_gb: float, backend: Any,
+                       memory_type: Any, vram_mb: Any, ram_gb: Any, host_arch: Any,
+                       min_context: int = 0,
+                       preferred_context: int | None = None) -> dict[str, Any]:
+    """The context to serve ``model`` at on this hardware.
+
+    This is the install policy (:func:`plan_candidate`, the same code the
+    ranker uses) applied to one model, so a dashboard switch, a restore of
+    the installer's pick and the installer itself serve the same context:
+    start at ``preferred_context`` (the context already chosen for this
+    model, e.g. the installer's recommendation) or the catalog default; raise
+    it to ``min_context`` (the Hermes floor) when the model's native maximum
+    allows and it fits; step down only when it does not fit. A matching
+    runtime profile fixes the context.
+
+    Returns ``fits: False`` with the unchanged context when no context fits
+    (the caller keeps today's behavior; the model may run partly offloaded).
+    """
+    mclass = memory_class(backend, memory_type, vram_mb)
+    default = _int_or_zero(model.get("context_length"))
+    native = _int_or_zero(model.get("max_context_length")) or default
+    # A context already chosen for this model (by the installer or the
+    # owner) is honored as the starting point, as activation always did; the
+    # floor can raise it only as far as the catalog's native maximum.
+    preferred = _int_or_zero(preferred_context)
+    planned = model
+    if preferred and preferred != default:
+        planned = {**model, "context_length": preferred, "max_context_length": max(native, preferred)}
+    floor = max(_int_or_zero(min_context), 0)
+    candidate = plan_candidate(
+        planned, capacity_gb=capacity_gb, mclass=mclass, backend=backend,
+        memory_type=memory_type, vram_mb=vram_mb, ram_gb=ram_gb,
+        host_arch=host_arch, min_context=floor,
+    )
+    if candidate is None:
+        context = preferred or default
+        return {
+            "context_length": context,
+            "fits": False,
+            "meets_min_context": (not floor) or context >= floor,
+            "min_context": floor,
+            "max_context_length": native,
+            "memory_class": mclass,
+            "capacity_gb": round(float(capacity_gb or 0), 2),
+            "required_gb": None,
+            "runtime_profile": None,
+            "estimate_source": None,
+        }
+    summary = candidate.summary()
+    return {
+        "context_length": candidate.context_length,
+        "fits": True,
+        "meets_min_context": candidate.meets_min_context,
+        "min_context": floor,
+        "max_context_length": max(native, candidate.context_length),
+        "memory_class": mclass,
+        "capacity_gb": summary["capacity_gb"],
+        "required_gb": candidate.required_gb,
+        "runtime_profile": (candidate.runtime_profile or {}).get("id"),
+        "estimate_source": summary["estimate_source"],
+    }
+
+
+def _int_or_zero(value: Any) -> int:
+    if isinstance(value, bool):
+        return 0
+    try:
+        return max(int(value or 0), 0)
+    except (TypeError, ValueError):
+        return 0
+
+
 def rank_key(candidate: Candidate, profile: str, *,
              include_size_tiebreak: bool = True) -> tuple:
     family_match = 1 if profile == "gemma4" and normalize_key(candidate.model.get("family")) == "gemma4" else 0
