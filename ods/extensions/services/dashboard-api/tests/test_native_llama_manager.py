@@ -1,4 +1,7 @@
+import os
+import shutil
 import subprocess
+from pathlib import Path
 
 import pytest
 import test_host_agent as fixtures
@@ -84,12 +87,14 @@ def test_restart_qualifies_selected_profile_before_stop(managed, monkeypatch):
     monkeypatch.setattr(host, '_require_macos_bridge_manager', lambda _: None)
     monkeypatch.setattr(host, 'load_env', lambda _: {'GGUF_FILE': 'test.gguf'})
     monkeypatch.setattr(host._model_stores, 'lemonade_profile', lambda *_: {'executable': str(root / 'selected-runtime')})
-    monkeypatch.setattr(host, '_native_llama_tuning_arguments', lambda env, binary: events.append(('qualify', binary)) or [])
+    monkeypatch.setattr(host, '_native_llama_tuning_arguments',
+                        lambda env, binary, defaults=True: events.append(('qualify', binary, defaults)) or [])
     monkeypatch.setattr(host, '_stop_macos_native_llama_server', lambda *_: events.append('stop'))
     monkeypatch.setattr(host, '_configure_macos_llm_bridge', lambda *_: events.append('bridge'))
     monkeypatch.setattr(host, '_launch_native_llama_server', lambda *_: events.append('launch'))
     host._restart_macos_native_llama_server(root / '.env', root / 'bin/llama-server', root / 'log', root / 'pid')
-    assert events == [('qualify', root / 'selected-runtime'), 'stop', 'bridge', 'launch']
+    # A registered profile keeps its own arguments: no macOS defaults.
+    assert events == [('qualify', root / 'selected-runtime', False), 'stop', 'bridge', 'launch']
 
 
 def test_tuning_arguments_preserve_zero_and_idle(managed, monkeypatch):
@@ -120,6 +125,111 @@ def test_tuning_arguments_read_the_installer_checkpoint_keys(managed, monkeypatc
     assert '--min-spacing=2048' in commands[1]
     # Former names are not read by llama.cpp or by the installer.
     commands.clear()
-    assert host._native_llama_tuning_arguments(
-        {'LLAMA_ARG_CHECKPOINT_EVERY_N_TOKENS': '-1', 'LLAMA_ARG_CHECKPOINT_MIN_STEP': '512'}, root / 'binary') == []
+    stale = {'LLAMA_ARG_CHECKPOINT_EVERY_N_TOKENS': '-1', 'LLAMA_ARG_CHECKPOINT_MIN_STEP': '512'}
+    assert host._native_llama_tuning_arguments(stale, root / 'binary', defaults=False) == []
     assert commands == []
+    # With the macOS defaults the qualifier still runs, but gets empty values.
+    assert host._native_llama_tuning_arguments(stale, root / 'binary') == []
+    assert '--interval=' in commands[0] and '--min-spacing=' in commands[0]
+    assert '--interval=-1' not in commands[0] and '--min-spacing=512' not in commands[0]
+
+
+def test_darwin_restart_applies_macos_defaults_through_the_qualifier(managed, monkeypatch):
+    root, _ = managed
+    (root / 'installers/macos/lib/native-checkpoint-args.py').touch()
+    commands = []
+    def run(args, **kwargs):
+        commands.append(args)
+        return subprocess.CompletedProcess(args, 0, stdout=b'--ctx-checkpoints\x0032\x00--spec-type\x00ngram-mod\x00')
+    monkeypatch.setattr(host.subprocess, 'run', run)
+    result = host._native_llama_tuning_arguments({'LLAMA_SPEC_TYPE': 'none'}, root / 'binary')
+    assert result == ['--ctx-checkpoints', '32', '--spec-type', 'ngram-mod']
+    assert commands[0][1:4] == [str(root / 'installers/macos/lib/native-checkpoint-args.py'), '--binary', str(root / 'binary')]
+    assert '--apply-defaults' in commands[0]
+    assert '--spec-default=none' in commands[0]
+    assert '--explicit-spec-type=' in commands[0]
+    assert '--reasoning-mode=' in commands[0]
+
+
+@pytest.mark.skipif(os.name == 'nt', reason='needs an executable shell script as the runtime')
+@pytest.mark.parametrize('release,expected', [
+    ('b8210', ['--draft-max', '3', '--ctx-checkpoints', '32']),
+    ('b9014', ['--spec-draft-n-max', '3', '--ctx-checkpoints', '32', '--spec-type', 'ngram-mod', '--reasoning', 'off']),
+])
+def test_real_qualifier_accepts_the_host_agent_command(managed, release, expected):
+    """The host agent's argv must parse in the shipped helper, per installed runtime."""
+    root, _ = managed
+    ods = Path(__file__).resolve().parents[4]
+    shutil.copy(ods / 'installers/macos/lib/native-checkpoint-args.py', root / 'installers/macos/lib/')
+    runtime = root / 'llama-server'
+    runtime.write_text(f"#!/bin/sh\n[ \"$1\" = --help ] && exec cat '{ods / 'tests/fixtures/llama-server-help' / (release + '.txt')}'\nexit 9\n")
+    runtime.chmod(0o755)
+    env = {'LLAMA_ARG_SPEC_DRAFT_N_MAX': '3', 'LLAMA_REASONING': 'off'}
+    assert host._native_llama_tuning_arguments(env, runtime) == expected
+
+
+def test_missing_qualifier_only_skips_defaults(managed, monkeypatch):
+    root, _ = managed
+    monkeypatch.setattr(host.subprocess, 'run', lambda *_a, **_k: pytest.fail('no qualifier to run'))
+    assert host._native_llama_tuning_arguments({}, root / 'binary') == []
+    with pytest.raises(RuntimeError, match='validator is missing'):
+        host._native_llama_tuning_arguments({'LLAMA_ARG_SPEC_DRAFT_N_MAX': '3'}, root / 'binary')
+
+
+def _capture_launch(root, monkeypatch, env, profile=None):
+    (root / 'installers/macos/lib/native-checkpoint-args.py').touch()
+    monkeypatch.setattr(host, 'load_env', lambda _: env)
+    monkeypatch.setattr(host._model_stores, 'lemonade_profile', lambda *_: profile)
+    monkeypatch.setattr(host, '_active_model_directory', lambda _: root / 'data/models')
+    monkeypatch.setattr(host, '_disable_conflicting_macos_bridge', lambda *_: None)
+    calls = []
+    def run(args, **kw):
+        calls.append(args)
+        if 'native-checkpoint-args.py' in str(args[1]):
+            return subprocess.CompletedProcess(args, 0, stdout=b'--draft-max\x003\x00--ctx-checkpoints\x0032\x00')
+        (root / 'pid').write_text('4321\n', encoding='utf-8')
+        return subprocess.CompletedProcess(args, 0)
+    monkeypatch.setattr(host.subprocess, 'run', run)
+    host._launch_native_llama_server(root / '.env', root / 'bin/llama-server', root / 'log', root / 'pid')
+    return calls
+
+
+def test_darwin_launch_spells_draft_flags_through_the_qualifier(managed, monkeypatch):
+    """--spec-draft-n-max stopped the b8210 Mac server; the qualifier picks the runtime's spelling."""
+    root, manager = managed
+    env = {'GGUF_FILE': 'test.gguf', 'LLAMA_ARG_SPEC_TYPE': 'ngram-mod', 'LLAMA_ARG_SPEC_DRAFT_N_MAX': '3',
+           'LLAMA_ARG_SPEC_DRAFT_TYPE_K': 'q8_0'}
+    qualify, start = _capture_launch(root, monkeypatch, env)
+    assert '--draft-n-max=3' in qualify and '--draft-type-k=q8_0' in qualify
+    assert '--explicit-spec-type=ngram-mod' in qualify and '--apply-defaults' in qualify
+    assert start[:3] == ['/bin/bash', str(manager), 'start']
+    assert start[start.index('--spec-type') + 1] == 'ngram-mod'
+    assert start[-4:] == ['--draft-max', '3', '--ctx-checkpoints', '32']
+    assert '--spec-draft-n-max' not in start and '--spec-draft-type-k' not in start
+
+
+def test_darwin_profile_launch_gets_no_macos_defaults(managed, monkeypatch):
+    root, _ = managed
+    profile = {'executable': str(root / 'profile-runtime')}
+    qualify, start = _capture_launch(root, monkeypatch, {'GGUF_FILE': 'test.gguf', 'LLAMA_ARG_SPEC_DRAFT_N_MAX': '2'}, profile)
+    assert qualify[qualify.index('--binary') + 1] == str(root / 'profile-runtime')
+    assert '--draft-n-max=2' in qualify
+    assert '--apply-defaults' not in qualify
+    assert not any(part.startswith(('--spec-default=', '--reasoning-mode=')) for part in qualify)
+
+
+def test_windows_launch_keeps_its_direct_flags(tmp_path, monkeypatch):
+    monkeypatch.setattr(host, 'INSTALL_DIR', tmp_path)
+    monkeypatch.setattr(host.platform, 'system', lambda: 'Windows')
+    monkeypatch.setattr(host, 'load_env', lambda _: {'GGUF_FILE': 'test.gguf', 'LLAMA_ARG_SPEC_DRAFT_N_MAX': '3'})
+    monkeypatch.setattr(host._model_stores, 'lemonade_profile', lambda *_: None)
+    monkeypatch.setattr(host, '_active_model_directory', lambda _: tmp_path / 'models')
+    monkeypatch.setattr(host, '_disable_conflicting_macos_bridge', lambda *_: None)
+    monkeypatch.setattr(host.subprocess, 'run', lambda *_a, **_k: pytest.fail('macOS qualifier ran on Windows'))
+    launched = []
+    class Process:
+        pid = 99
+    monkeypatch.setattr(host.subprocess, 'Popen', lambda args, **_k: launched.append(args) or Process())
+    host._launch_native_llama_server(tmp_path / '.env', tmp_path / 'llama-server.exe', tmp_path / 'log', tmp_path / 'pid')
+    assert launched[0][launched[0].index('--spec-draft-n-max') + 1] == '3'
+    assert '--ctx-checkpoints' not in launched[0]

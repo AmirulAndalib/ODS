@@ -2300,7 +2300,6 @@ else
         _gpu_layers=$(grep '^N_GPU_LAYERS=' "$INSTALL_DIR/.env" 2>/dev/null | cut -d= -f2 | tr -d '"' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//' || echo "")
         [[ -z "$_gpu_layers" ]] && _gpu_layers="auto"
         _spec_type=$(grep '^LLAMA_ARG_SPEC_TYPE=' "$INSTALL_DIR/.env" 2>/dev/null | cut -d= -f2 | tr -d '"' || echo "")
-        _spec_draft_n_max=$(grep '^LLAMA_ARG_SPEC_DRAFT_N_MAX=' "$INSTALL_DIR/.env" 2>/dev/null | cut -d= -f2 | tr -d '"' || echo "")
         _llama_args=(
             --host "$_bind" --port "$_native_llama_port"
             --model "$MODEL_FULL_PATH"
@@ -2319,11 +2318,8 @@ else
         [[ -n "$_cache_type_v" ]] && _llama_args+=(--cache-type-v "$_cache_type_v")
         [[ -n "$_n_cpu_moe" ]] && _llama_args+=(--n-cpu-moe "$_n_cpu_moe")
         [[ -n "$_spec_type" ]] && _llama_args+=(--spec-type "$_spec_type")
-        [[ -n "$_spec_draft_n_max" ]] && _llama_args+=(--spec-draft-n-max "$_spec_draft_n_max")
-        _spec_draft_type_k="$(read_env_value "$INSTALL_DIR/.env" "LLAMA_ARG_SPEC_DRAFT_TYPE_K")"
-        _spec_draft_type_v="$(read_env_value "$INSTALL_DIR/.env" "LLAMA_ARG_SPEC_DRAFT_TYPE_V")"
-        [[ -n "$_spec_draft_type_k" ]] && _llama_args+=(--spec-draft-type-k "$_spec_draft_type_k")
-        [[ -n "$_spec_draft_type_v" ]] && _llama_args+=(--spec-draft-type-v "$_spec_draft_type_v")
+        # Draft flags, --ctx-checkpoints 32 and the ngram-mod default are
+        # spelled for, and only added when supported by, this runtime.
         macos_resolve_checkpoint_args "$INSTALL_DIR" "$LLAMA_SERVER_BIN" || exit 1
         _llama_args+=("${MACOS_NATIVE_CHECKPOINT_ARGS[@]}")
         fi

@@ -3526,6 +3526,35 @@ elif [[ -f "$INSTALL_DIR/data/.llama-server.pid" ]]; then
         if [[ ! -f "$_model_path" ]]; then
             log "WARNING: Model file not found at $_model_path"
         else
+            # Spell draft flags for this runtime and add the macOS defaults it
+            # supports (--ctx-checkpoints 32, --spec-type ngram-mod), with the
+            # helper install-macos.sh and ods-macos.sh use, before the bootstrap
+            # model is stopped. A rejected setting must not strand the swap.
+            _llama_tuning_args=()
+            _tuning_helper="$INSTALL_DIR/installers/macos/lib/native-checkpoint-args.py"
+            if [[ -f "$_tuning_helper" ]] && _tuning_file="$(mktemp)"; then
+                if "${ODS_PYTHON_CMD:-python3}" "$_tuning_helper" --binary "$LLAMA_SERVER_BIN" \
+                    --interval="$(read_env_value LLAMA_ARG_CHECKPOINT_EVERY_NT)" \
+                    --checkpoints="$(read_env_value LLAMA_ARG_CTX_CHECKPOINTS)" \
+                    --cache-mib="$(read_env_value LLAMA_ARG_CACHE_RAM)" \
+                    --idle-seconds="$(read_env_value LLAMA_ARG_SLEEP_IDLE_SECONDS)" \
+                    --min-spacing="$(read_env_value LLAMA_ARG_CHECKPOINT_MIN_SPACING_NT)" \
+                    --explicit-spec-type="$(read_env_value LLAMA_ARG_SPEC_TYPE)" \
+                    --spec-default="$(read_env_value LLAMA_SPEC_TYPE)" \
+                    --draft-n-max="$(read_env_value LLAMA_ARG_SPEC_DRAFT_N_MAX)" \
+                    --draft-type-k="$(read_env_value LLAMA_ARG_SPEC_DRAFT_TYPE_K)" \
+                    --draft-type-v="$(read_env_value LLAMA_ARG_SPEC_DRAFT_TYPE_V)" \
+                    --reasoning-mode="$(read_env_value LLAMA_REASONING)" \
+                    --apply-defaults > "$_tuning_file"; then
+                    while IFS= read -r -d '' _tuning_field; do
+                        _llama_tuning_args+=("$_tuning_field")
+                    done < "$_tuning_file"
+                else
+                    log "WARNING: native llama-server tuning was rejected for this runtime; starting the full model without it. Fix .env, then run './ods-macos.sh restart'."
+                fi
+                rm -f "$_tuning_file"
+            fi
+
             # Capture old model path for rollback before we kill the process
             _old_pid=$(cat "$LLAMA_SERVER_PID_FILE" 2>/dev/null | tr -d '[:space:]')
             _old_model_path=""
@@ -3570,7 +3599,6 @@ elif [[ -f "$INSTALL_DIR/data/.llama-server.pid" ]]; then
             _gpu_layers=$(grep '^N_GPU_LAYERS=' "$ENV_FILE" 2>/dev/null | cut -d= -f2 | tr -d '"' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//' || echo "")
             [[ -z "$_gpu_layers" ]] && _gpu_layers="auto"
             _spec_type=$(grep '^LLAMA_ARG_SPEC_TYPE=' "$ENV_FILE" 2>/dev/null | cut -d= -f2 | tr -d '"' || echo "")
-            _spec_draft_n_max=$(grep '^LLAMA_ARG_SPEC_DRAFT_N_MAX=' "$ENV_FILE" 2>/dev/null | cut -d= -f2 | tr -d '"' || echo "")
             _llama_args=(
                 --host "$_bind" --port "$_native_port"
                 --model "$_model_path"
@@ -3584,7 +3612,7 @@ elif [[ -f "$INSTALL_DIR/data/.llama-server.pid" ]]; then
             [[ -n "$_cache_type_v" ]] && _llama_args+=(--cache-type-v "$_cache_type_v")
             [[ -n "$_n_cpu_moe" ]] && _llama_args+=(--n-cpu-moe "$_n_cpu_moe")
             [[ -n "$_spec_type" ]] && _llama_args+=(--spec-type "$_spec_type")
-            [[ -n "$_spec_draft_n_max" ]] && _llama_args+=(--spec-draft-n-max "$_spec_draft_n_max")
+            _llama_args+=(${_llama_tuning_args[@]+"${_llama_tuning_args[@]}"})
 
             # Relaunch with new model
             log "Starting native llama-server with ${_gguf_file}..."

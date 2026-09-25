@@ -35,7 +35,7 @@ Environment variables (set in `.env`):
 | `LLAMA_ARG_N_CPU_MOE` | unset | Optional MoE-only CPU expert offload (`--n-cpu-moe`). Leave unset for dense models |
 | `LLAMA_SPEC_TYPE` | `ngram-mod` on the NVIDIA and CPU images | Default speculative decoding when the model sets no `LLAMA_ARG_SPEC_TYPE`. Set `none` to turn it off. See [N-gram speculative decoding](#n-gram-speculative-decoding) |
 | `LLAMA_ARG_SPEC_TYPE` | unset | Optional per-model speculative decoding mode (`--spec-type`), normally written by a runtime profile. Overrides `LLAMA_SPEC_TYPE`. Use only with supported GGUF/runtime combinations |
-| `LLAMA_ARG_SPEC_DRAFT_N_MAX` | unset | Optional speculative draft token cap (`--spec-draft-n-max`) |
+| `LLAMA_ARG_SPEC_DRAFT_N_MAX` | unset | Optional speculative draft token cap (`--spec-draft-n-max`; `--draft-max` on native macOS b8210) |
 | `LLAMA_SERVER_MEMORY_LIMIT` | `64G` | Docker memory limit for the container |
 
 ### Long-context profile
@@ -63,7 +63,7 @@ Tune this value per machine. Lower values keep more work on GPU and can be faste
 
 ### N-gram speculative decoding
 
-On the NVIDIA and CPU images, ODS starts llama-server with `--spec-type ngram-mod` (set through `LLAMA_ARG_SPEC_TYPE`). llama.cpp drafts tokens by matching n-grams already in the context, and the model verifies every draft before it is emitted. The output is still the model's own, so this is lossless. It speeds up requests that repeat the context: file edits, whole-file rewrites and quoting.
+On the NVIDIA and CPU images and on native macOS, ODS starts llama-server with `--spec-type ngram-mod` (set through `LLAMA_ARG_SPEC_TYPE` in Docker). llama.cpp drafts tokens by matching n-grams already in the context, and the model verifies every draft before it is emitted. The output is still the model's own, so this is lossless. It speeds up requests that repeat the context: file edits, whole-file rewrites and quoting.
 
 On an RTX 5090 with Qwen3.5-27B Q4_K_M and llama.cpp b9014:
 
@@ -90,13 +90,25 @@ The default applies only where the pinned llama.cpp build has the benchmarked im
 |---|---|---|
 | NVIDIA Docker (`docker-compose.nvidia.yml`) | b9014 | `ngram-mod` |
 | CPU Docker (`docker-compose.cpu.yml`) | b9014 | `ngram-mod` |
+| Native macOS Metal | b9014 (installs from before this pin keep b8210) | `ngram-mod` when the installed binary supports it; none on b8210 |
 | AMD (Lemonade, `docker-compose.amd.yml`) | Lemonade-managed | none; not a llama.cpp launch that ODS controls |
 | Intel Arc / SYCL (`docker-compose.intel.yml`, `docker-compose.arc.yml`) | b8248 | none |
-| Apple Docker (`docker-compose.apple.yml`) and native macOS Metal | b8248 / b8210 | none |
+| Apple Docker (`docker-compose.apple.yml`) | b8248 | none |
 | Native Windows llama-server (Vulkan fallback) | b8248 | none |
 | Registered native model-store profiles | qualified executable | none; the profile keeps its own argument list |
 
 Builds b8210 and b8248 accept `--spec-type ngram-mod`, but they predate both changes. They draft with the generic 12-token lookup, which upstream logs as too small, and they turn speculation off for hybrid models. Remote and cloud providers never start llama-server.
+
+### Native macOS runtime arguments
+
+Native macOS keeps the `llama-server` binary it was installed with, so an older install can still run b8210 after ODS moves its pin. Before a running model is stopped, every macOS launcher (installer, `ods-macos.sh`, the bootstrap full-model swap and dashboard model switches) passes the settings below through `installers/macos/lib/native-checkpoint-args.py`. That helper reads the binary's own `--help` and:
+
+- spells the draft settings for that binary. `LLAMA_ARG_SPEC_DRAFT_N_MAX` becomes `--spec-draft-n-max` on b9014 and `--draft-max` on b8210, which rejects the newer name. `LLAMA_ARG_SPEC_DRAFT_TYPE_K`/`_V` work the same way.
+- adds `--ctx-checkpoints 32` unless `LLAMA_ARG_CTX_CHECKPOINTS` is set. b8210 keeps 8 prompt checkpoints per slot, so changing a tool result more than 8 turns back re-processes the whole prompt. On a Mac mini M4 (16 GB) with Qwen3.5-9B and b8210, editing turn 3's result after 12 tool turns took 84.3 s with 8 checkpoints and 33.4 s with 32. b9014 already defaults to 32. Each checkpoint costs about 50 MiB for this model. Set a lower value, or 0, to save memory.
+- adds `--spec-type ngram-mod` when the binary has the b8955+ implementation, `LLAMA_ARG_SPEC_TYPE` is unset and `LLAMA_SPEC_TYPE` is not `none`.
+- adds `--reasoning` from `LLAMA_REASONING` (default `off`) when the binary has that switch, as Docker does with `LLAMA_ARG_REASONING`. b9014 defaults it to `auto`, which turns Qwen3.5 thinking on for every request that does not send `enable_thinking: false`. b8210 has no such switch and never enabled thinking for Qwen3.5.
+
+A setting you add to `.env` that the binary cannot honour stops the restart before the running model is touched. The bootstrap full-model swap instead logs a warning and starts the full model without the tuning. A default the binary does not support is left out. A fresh install, or `get-ods.sh --force`, installs the pinned b9014.
 
 ### MTP speculative decoding
 

@@ -7,8 +7,10 @@ image has the benchmarked implementation: the dedicated ngram-mod parameters
 (llama.cpp b8955+) and speculative checkpoints for hybrid models such as
 Qwen3.5 (b8842+). The benchmarked build is b9014. LLAMA_SPEC_TYPE=none is the
 single opt-out, and a per-model LLAMA_ARG_SPEC_TYPE (e.g. draft-mtp) wins.
-Lemonade (AMD), Intel/Arc (b8248), Apple (b8248) and native runtimes get no
-default.
+Lemonade (AMD), Intel/Arc (b8248), Apple Docker (b8248) and native Windows get
+no default. Native macOS applies the same default through
+installers/macos/lib/native-checkpoint-args.py, only when the installed binary
+has the implementation; tests/test_macos_runtime_llama_args.py covers it.
 
 The env names ODS hands to the b9014 containers must be names llama.cpp reads.
 Docker ignored LLAMA_ARG_CHECKPOINT_EVERY_N_TOKENS for this reason; the

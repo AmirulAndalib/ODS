@@ -2,18 +2,38 @@
 # Resolve one qualified native model without evaluating registry data as shell.
 # Both installers and everyday restarts validate before stopping a live model.
 macos_resolve_checkpoint_args() {
+    # Also resolves speculative-decoding flags and the macOS defaults
+    # (--ctx-checkpoints 32, --spec-type ngram-mod, --reasoning from
+    # LLAMA_REASONING) against the runtime's --help. LLAMA_ARG_SPEC_TYPE
+    # itself is passed by the caller unchanged.
     local install_dir="$1" binary="$2" interval checkpoints cache_mib idle_seconds min_spacing fields_file field
+    local spec_type spec_default draft_n_max draft_type_k draft_type_v reasoning helper
     MACOS_NATIVE_CHECKPOINT_ARGS=()
     interval="$(read_env_value "${install_dir}/.env" LLAMA_ARG_CHECKPOINT_EVERY_NT)"
     checkpoints="$(read_env_value "${install_dir}/.env" LLAMA_ARG_CTX_CHECKPOINTS)"
     cache_mib="$(read_env_value "${install_dir}/.env" LLAMA_ARG_CACHE_RAM)"
     idle_seconds="$(read_env_value "${install_dir}/.env" LLAMA_ARG_SLEEP_IDLE_SECONDS)"
     min_spacing="$(read_env_value "${install_dir}/.env" LLAMA_ARG_CHECKPOINT_MIN_SPACING_NT)"
-    [[ -n "$interval$checkpoints$cache_mib$idle_seconds$min_spacing" ]] || return 0
+    spec_type="$(read_env_value "${install_dir}/.env" LLAMA_ARG_SPEC_TYPE)"
+    spec_default="$(read_env_value "${install_dir}/.env" LLAMA_SPEC_TYPE)"
+    draft_n_max="$(read_env_value "${install_dir}/.env" LLAMA_ARG_SPEC_DRAFT_N_MAX)"
+    draft_type_k="$(read_env_value "${install_dir}/.env" LLAMA_ARG_SPEC_DRAFT_TYPE_K)"
+    draft_type_v="$(read_env_value "${install_dir}/.env" LLAMA_ARG_SPEC_DRAFT_TYPE_V)"
+    reasoning="$(read_env_value "${install_dir}/.env" LLAMA_REASONING)"
+    helper="${install_dir}/installers/macos/lib/native-checkpoint-args.py"
+    if [[ ! -f "$helper" ]]; then
+        # Defaults are best effort; explicit settings must be qualified.
+        [[ -z "$interval$checkpoints$cache_mib$idle_seconds$min_spacing$draft_n_max$draft_type_k$draft_type_v" ]] && return 0
+        echo "The native runtime tuning validator is missing. Repair the ODS installation." >&2
+        return 1
+    fi
     fields_file="$(mktemp)" || return 1
-    if ! "${ODS_PYTHON_CMD:-python3}" "${install_dir}/installers/macos/lib/native-checkpoint-args.py" \
+    if ! "${ODS_PYTHON_CMD:-python3}" "$helper" \
         --binary "$binary" --interval="$interval" --checkpoints="$checkpoints" --cache-mib="$cache_mib" \
-        --idle-seconds="$idle_seconds" --min-spacing="$min_spacing" > "$fields_file"; then
+        --idle-seconds="$idle_seconds" --min-spacing="$min_spacing" \
+        --explicit-spec-type="$spec_type" --spec-default="$spec_default" --draft-n-max="$draft_n_max" \
+        --draft-type-k="$draft_type_k" --draft-type-v="$draft_type_v" --reasoning-mode="$reasoning" \
+        --apply-defaults > "$fields_file"; then
         rm -f "$fields_file"
         return 1
     fi

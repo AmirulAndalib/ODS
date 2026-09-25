@@ -87,6 +87,7 @@ test: ## Run unit and contract tests
 	@python3 tests/contracts/test-llama-runtime-tunables.py
 	@python3 tests/contracts/test-llama-spec-default.py
 	@bash tests/test-llama-mtp-args.sh
+	@python3 -m unittest tests/test_macos_runtime_llama_args.py tests/test_macos_checkpoint_args.py
 	@echo ""
 	@echo "=== safe .env loading (quote/CRLF handling) ==="
 	@bash tests/test-safe-env.sh
