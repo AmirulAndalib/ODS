@@ -15,6 +15,9 @@
 #   ./install-macos.sh --all            # Enable all optional services
 #   ./install-macos.sh --non-interactive # Headless install (defaults)
 #   ./install-macos.sh --no-bootstrap   # Wait for the full model before launch
+#   ./install-macos.sh --preflight-only # Phase 1 environment checks only, no
+#                                       # changes (get-ods.sh --force runs this
+#                                       # before removing an existing install)
 #
 # ============================================================================
 
@@ -121,11 +124,13 @@ OPENCLAW_EXPLICIT=false
 ALL_FEATURES=false
 CLOUD_MODE=false
 NO_BOOTSTRAP=false
+PREFLIGHT_ONLY=false
 HERMES_CONTEXT_SIZE=65536
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --dry-run)       DRY_RUN=true; shift ;;
+        --preflight-only) PREFLIGHT_ONLY=true; shift ;;
         --force)         FORCE=true; shift ;;
         --non-interactive) NON_INTERACTIVE=true; shift ;;
         --tier)          TIER_OVERRIDE="${2:-}"; shift 2 ;;
@@ -947,6 +952,10 @@ _ensure_colima_private_network() {
         ai "[DRY RUN] Would restart Colima with private vmnet as the preferred route"
         return 0
     fi
+    if $PREFLIGHT_ONLY; then
+        ai "The installer will restart Colima with private vmnet as the preferred route"
+        return 0
+    fi
 
     ai_warn "Colima needs a preferred private VM route; restarting its VM to configure one."
     ai_warn "Running non-ODS containers will restart with the Colima VM. Container data is preserved."
@@ -1135,6 +1144,10 @@ _ensure_macos_pyyaml() {
         ai_warn "PyYAML is not importable by $pycmd (dry-run: would create installer Python venv)."
         return 0
     fi
+    if $PREFLIGHT_ONLY; then
+        ai "PyYAML is not importable by $pycmd; the installer will create its Python venv."
+        return 0
+    fi
 
     local venv_dir="${INSTALL_DIR}/.venv/installer-python"
     local venv_python="${venv_dir}/bin/python"
@@ -1166,13 +1179,24 @@ _ensure_macos_pyyaml() {
 # Resolve install directory
 INSTALL_DIR="${ODS_INSTALL_DIR}"
 
-if ! $ENABLE_PIXEL && [[ -e "${INSTALL_DIR}/data/pixel-native" || -L "${INSTALL_DIR}/data/pixel-native" ]]; then
+# --preflight-only runs while get-ods.sh --force still has the installation it
+# is about to replace on disk. installers/reinstall-preflight.sh measures what
+# removing it returns to this filesystem; any other run ignores the value.
+PREFLIGHT_RECLAIMABLE_GB=0
+if $PREFLIGHT_ONLY && [[ "${ODS_PREFLIGHT_RECLAIMABLE_KB:-}" =~ ^[0-9]+$ ]]; then
+    PREFLIGHT_RECLAIMABLE_GB=$(( ODS_PREFLIGHT_RECLAIMABLE_KB / 1048576 ))
+fi
+
+# Both Pixel checks inspect the installation's own native Pixel state. During
+# --preflight-only that is the installation being replaced, which the
+# candidate uninstaller retires; the real install run checks the new tree.
+if ! $PREFLIGHT_ONLY && ! $ENABLE_PIXEL && [[ -e "${INSTALL_DIR}/data/pixel-native" || -L "${INSTALL_DIR}/data/pixel-native" ]]; then
     ai_err "Existing native Pixel installation detected. The base installer cannot migrate it or disable it safely."
     ai "Your configuration is unchanged. Keep data/pixel-native; use the qualified native migration/update path when available."
     exit 1
 fi
 
-if $ENABLE_PIXEL; then
+if $ENABLE_PIXEL && ! $PREFLIGHT_ONLY; then
     _pixel_install_args=(--install-dir "$INSTALL_DIR")
     if ! $NON_INTERACTIVE && ! $DRY_RUN; then
         _pixel_install_args+=(--prompt-for-sudo)
@@ -1209,8 +1233,16 @@ ods_prepare_install_log "$ODS_LOG_FILE" || exit 1
 # ============================================================================
 # PHASE 1 -- PREFLIGHT CHECKS
 # ============================================================================
-show_ods_banner
-show_phase 1 6 "PREFLIGHT CHECKS" "30 seconds"
+# With --preflight-only this phase is the whole run: every check below that
+# can stop the install runs, steps that would change the host only report
+# what the installer will do, and the script exits after the last check.
+if $PREFLIGHT_ONLY; then
+    show_phase 1 6 "PREFLIGHT CHECKS (preflight only)" "30 seconds"
+    ai "Checking this host before an existing installation is replaced. No changes are made."
+else
+    show_ods_banner
+    show_phase 1 6 "PREFLIGHT CHECKS" "30 seconds"
+fi
 
 # macOS version
 get_macos_version
@@ -1289,7 +1321,9 @@ _require_docker_cpu_budget "$_docker_cpu_min" "$_docker_cpu_max_pin" "$_docker_c
 # install, because the helper is only meaningful with Docker Desktop.
 if [[ "${DOCKER_BACKEND:-unknown}" != "desktop" ]] && test_stale_docker_creds_store; then
     ai_warn "Found stale \`credsStore: desktop\` in ~/.docker/config.json — incompatible with backend=${DOCKER_BACKEND:-unknown}."
-    if command -v python3 >/dev/null 2>&1; then
+    if $PREFLIGHT_ONLY && command -v python3 >/dev/null 2>&1; then
+        ai "The installer will strip credsStore=desktop from ~/.docker/config.json"
+    elif command -v python3 >/dev/null 2>&1; then
         python3 -c 'import json,sys,os
 p=os.path.expanduser("~/.docker/config.json")
 d=json.load(open(p))
@@ -1344,11 +1378,16 @@ if ! $DOCKER_SHARE_OK; then
 fi
 ai_ok "Docker Desktop file sharing OK"
 
-# Disk space
-test_disk_space "$INSTALL_DIR" 30
-info_box "Disk free:" "${DISK_FREE_GB} GB"
+# Disk space. A --preflight-only run also counts the space that removing the
+# installation being replaced returns (0 for every other run).
+test_disk_space "$INSTALL_DIR" 30 "$PREFLIGHT_RECLAIMABLE_GB"
+if [[ "$DISK_RECLAIMABLE_GB" -gt 0 ]]; then
+    info_box "Disk free:" "${DISK_FREE_GB} GB now, ${DISK_AVAILABLE_GB} GB once the existing installation is removed"
+else
+    info_box "Disk free:" "${DISK_FREE_GB} GB"
+fi
 if ! $DISK_SUFFICIENT; then
-    ai_err "At least ${DISK_REQUIRED_GB} GB free space required. Found ${DISK_FREE_GB} GB."
+    ai_err "At least ${DISK_REQUIRED_GB} GB free space required. Found ${DISK_AVAILABLE_GB} GB."
     exit 1
 fi
 ai_ok "Disk space OK"
@@ -1359,6 +1398,11 @@ ai_ok "Disk space OK"
 # `pip --user` can fail under PEP 668. Keep the resolver dependency in a
 # ODS-owned venv and point shared Python helpers at that interpreter.
 _ensure_macos_pyyaml
+
+if $PREFLIGHT_ONLY; then
+    ai_ok "Preflight passed; no changes were made."
+    exit 0
+fi
 
 # Ollama conflict detection
 check_ollama_conflict

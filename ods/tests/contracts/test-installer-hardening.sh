@@ -249,10 +249,12 @@ sha_repo="$tmpdir/sha-ref-repo"
 sha_home="$tmpdir/sha-home"
 sha_install="$tmpdir/sha-install"
 sha_marker="$tmpdir/sha-marker"
-mkdir -p "$sha_repo/ods/scripts" "$sha_repo/ods/extensions/library" "$sha_home" "$tmpdir/bin"
+mkdir -p "$sha_repo/ods/scripts" "$sha_repo/ods/extensions/library" "$sha_repo/ods/installers" "$sha_home" "$tmpdir/bin"
+cp installers/reinstall-preflight.sh "$sha_repo/ods/installers/reinstall-preflight.sh"
 cat > "$sha_repo/ods/install.sh" <<'EOF'
 #!/usr/bin/env bash
 set -euo pipefail
+[[ "${1:-}" != --preflight-only ]] || exit 0
 printf '%s\n' first-commit > "${ODS_TEST_BOOTSTRAP_INSTALL_MARKER:?}"
 EOF
 chmod +x "$sha_repo/ods/install.sh"

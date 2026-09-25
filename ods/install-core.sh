@@ -104,6 +104,7 @@ fi
 # Command Line Args
 #=============================================================================
 DRY_RUN=false
+PREFLIGHT_ONLY=false
 SKIP_DOCKER=false
 FORCE=false
 TIER=""
@@ -160,6 +161,9 @@ Usage: $0 [OPTIONS]
 
 Options:
     --dry-run         Show what would be done without making changes
+    --preflight-only  Run only the pre-flight environment checks, change nothing,
+                      and exit (get-ods.sh --force runs this before removing
+                      an existing installation)
     --skip-docker     Skip Docker installation (assume already installed)
     --force           Overwrite existing installation
     --tier N          Force specific tier (1-4) instead of auto-detect
@@ -237,6 +241,7 @@ EOF
 while [[ $# -gt 0 ]]; do
     case $1 in
         --dry-run) DRY_RUN=true; shift ;;
+        --preflight-only) PREFLIGHT_ONLY=true; shift ;;
         --skip-docker) SKIP_DOCKER=true; shift ;;
         --force) FORCE=true; shift ;;
         --tier) TIER="$2"; shift 2 ;;
@@ -356,6 +361,21 @@ fi
 # the correct VERSION before /etc/os-release overwrites it)
 detect_pkg_manager
 log "Installer run started: pid=$$, script=$0"
+
+# get-ods.sh --force runs this through installers/reinstall-preflight.sh while
+# the installation it will replace is still intact. Run the phase-01
+# environment checks that stop an install (root, OS, required tools and
+# network, install-dir filesystem, Docker Desktop sharing) and exit before the
+# sudo prompt, prerequisite installs and every later phase. Disk and other
+# requirement shortfalls are not install-stopping here: phase 04 only warns
+# about them (or asks, when interactive), and phase 05 provisions Docker.
+if [[ "$PREFLIGHT_ONLY" == "true" ]]; then
+    trap 'echo "[ERROR] Preflight stopped during phase: ${INSTALL_PHASE}. No changes were made." >&2; exit 1' ERR
+    INSTALL_PHASE="01-preflight"; source "$SCRIPT_DIR/installers/phases/01-preflight.sh"
+    ai_ok "Preflight passed; no changes were made."
+    exit 0
+fi
+
 ods_prepare_sudo "ODS installer setup"
 export ODS_SR_AUTO_INSTALL_PYYAML=1
 ods_ensure_python_module yaml python3-pyyaml pyyaml PyYAML

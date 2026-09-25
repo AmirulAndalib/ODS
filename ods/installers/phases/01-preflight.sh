@@ -6,6 +6,7 @@
 # Purpose: Root/OS/tools checks, existing installation detection
 #
 # Expects: SCRIPT_DIR, INSTALL_DIR, LOG_FILE, INTERACTIVE, DRY_RUN,
+#           PREFLIGHT_ONLY (install-core.sh --preflight-only: check only),
 #           PKG_MANAGER,
 #           show_phase(), ai(), ai_ok(), signal(), log(), warn(), error()
 # Provides: OS sourced from /etc/os-release, OPTIONAL_TOOLS_MISSING
@@ -203,8 +204,10 @@ if [[ ! -d "$INSTALL_DIR" ]] && ! _ods_truthy "${ODS_ALLOW_LEGACY_PARALLEL:-}"; 
     unset _pre_ods_install_dir _pre_ods_findings _pre_ods_candidate _pre_ods_containers
 fi
 
-# Existing installation — update in place (secrets and data are preserved)
-if [[ -d "$INSTALL_DIR" ]]; then
+# Existing installation — update in place (secrets and data are preserved).
+# A --preflight-only run is checking a host whose installation is about to be
+# replaced, not updated.
+if [[ -d "$INSTALL_DIR" && "${PREFLIGHT_ONLY:-false}" != "true" ]]; then
     log "Existing installation found at $INSTALL_DIR — updating in place"
     signal "Existing install detected. Secrets and data will be preserved."
 fi
