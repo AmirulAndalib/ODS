@@ -2839,6 +2839,79 @@ async def extension_logs(
         raise HTTPException(status_code=502, detail=f"Invalid host agent response: {exc}") from exc
 
 
+def _curated_library_recipe(recipe_dir: Path) -> bool:
+    """Install's trust decision for a staged library recipe.
+
+    Imported GitHub recipes record upstream.json origin github-proposal and
+    never inherit curated-library privileges; every other library recipe is
+    curated. The compose resolver mirrors this (_library_recipe_trusted).
+    """
+    upstream_path = recipe_dir / 'upstream.json'
+    upstream = json.loads(upstream_path.read_text(encoding='utf-8')) if upstream_path.is_file() else {}
+    return not (isinstance(upstream, dict) and upstream.get('origin') == 'github-proposal')
+
+
+def _installed_definition_matches(staged: Path, installed: Path, *,
+                                  compose_path: Path | None = None) -> bool:
+    """True when every file a library install writes is unchanged in installed.
+
+    Compose may build or mount any file shipped by the library, including
+    Dockerfiles and scripts, so every staged path is checked: no link, same
+    type, same executable bit, same bytes. Owner-added data and configuration
+    are not library files and are left alone. ``compose_path`` is the
+    installed file holding the staged compose.yaml (compose.yaml.disabled
+    while the extension is disabled).
+    """
+    for expected in staged.rglob('*'):
+        relative = expected.relative_to(staged)
+        actual = installed / relative
+        if compose_path is not None and relative.as_posix() == 'compose.yaml':
+            actual = compose_path
+        if (actual.is_symlink() or (expected.is_dir() and not actual.is_dir())
+                or (expected.is_file() and (not actual.is_file()
+                    or bool(actual.stat().st_mode & 0o111)
+                       != bool(expected.stat().st_mode & 0o111)
+                    or actual.read_bytes() != expected.read_bytes()))):
+            return False
+    return True
+
+
+def _installed_library_recipe_trusted(service_id: str, ext_dir: Path, compose_path: Path) -> bool:
+    """Whether an installed extension keeps its curated-library compose privileges.
+
+    Install grants a curated recipe its local ``build:`` and the host-gateway
+    ``extra_hosts`` entry only after staging it from the library
+    (_staged_library_extension). Enabling it again, or starting it after a
+    stop, reaches the same decision from the same evidence rather than from
+    its name: stage the library recipe of this id through that install path,
+    which re-runs install's trust decision and every compose scan, and require
+    each file it would install to be unchanged here. An imported recipe, a
+    library recipe that changed since install, or installed files edited after
+    install get the untrusted scan.
+    """
+    installed = USER_EXTENSIONS_DIR / service_id
+    if installed.is_symlink() or installed.resolve() != ext_dir.resolve():
+        return False
+    if not (EXTENSIONS_LIBRARY_DIR / service_id / 'compose.yaml').is_file():
+        return False
+    try:
+        with _staged_library_extension(service_id, ext_dir) as (staged, _source_digest):
+            if not _curated_library_recipe(staged):
+                return False
+            if _installed_definition_matches(staged, ext_dir, compose_path=compose_path):
+                return True
+    except (HTTPException, OSError, ValueError):
+        return False
+    logger.warning(
+        "Installed extension %s no longer matches its curated library recipe "
+        "(the library changed since install, or installed files were edited); "
+        "checking it without curated-library privileges. Update it from the "
+        "library to restore them.",
+        service_id,
+    )
+    return False
+
+
 @contextlib.contextmanager
 def _staged_library_extension(service_id: str, dest: Path):
     """Yield a validated, rewritten library copy on the destination filesystem."""
@@ -2904,10 +2977,7 @@ def _staged_library_extension(service_id: str, dest: Path):
         # Security scan the staged copy (prevents TOCTOU)
         staged_compose = staged / "compose.yaml"
         if staged_compose.exists():
-            # Imported GitHub recipes never inherit curated-library privileges.
-            upstream_path = staged / 'upstream.json'
-            upstream = json.loads(upstream_path.read_text(encoding='utf-8')) if upstream_path.is_file() else {}
-            trusted_library = not (isinstance(upstream, dict) and upstream.get('origin') == 'github-proposal')
+            trusted_library = _curated_library_recipe(staged)
             _scan_compose_content(staged_compose, trusted=trusted_library)
             # The compose resolver also loads compose.<backend>.yaml,
             # compose.local.yaml and compose.multigpu.yaml, with this policy.
@@ -3007,18 +3077,9 @@ def _install_from_library(service_id: str, *, operation_id: str | None = None) -
         # preserves curated-library policy without granting those privileges to
         # a modified installed definition or an imported GitHub recipe.
         with _staged_library_extension(service_id, dest) as (staged, _source_digest):
-            # Compose may build or mount any file shipped by the library,
-            # including Dockerfiles and scripts. Check every staged source
-            # path, while leaving owner-added data and configuration intact.
-            for expected in staged.rglob('*'):
-                actual = dest / expected.relative_to(staged)
-                if (actual.is_symlink() or (expected.is_dir() and not actual.is_dir())
-                        or (expected.is_file() and (not actual.is_file()
-                            or bool(actual.stat().st_mode & 0o111)
-                               != bool(expected.stat().st_mode & 0o111)
-                            or actual.read_bytes() != expected.read_bytes()))):
-                    raise HTTPException(status_code=409,
-                        detail='Existing extension definition changed; files were preserved')
+            if not _installed_definition_matches(staged, dest):
+                raise HTTPException(status_code=409,
+                    detail='Existing extension definition changed; files were preserved')
         return
 
     with _staged_library_extension(service_id, dest) as (staged, source_digest):
@@ -3728,12 +3789,13 @@ def _activate_service(service_id: str) -> dict:
     # still get the full anti-shadowing scan. Some built-ins also legitimately
     # need `user: "0:0"` to perform init-time chown before dropping privileges
     # via setpriv (e.g. openclaw), so skip the root-user check for built-ins
-    # only. The `trusted` flag is separate and controls whether `build:`
-    # directives are allowed (library installs need it, built-in activations
-    # do not).
+    # only. The `trusted` flag is separate: a curated library recipe keeps
+    # install's privileges (local `build:`, the host-gateway route) only while
+    # its installed files still match the library recipe it was installed from.
     is_builtin = ext_dir.is_relative_to(EXTENSIONS_DIR.resolve())
     _scan_compose_content(
         disabled_compose,
+        trusted=not is_builtin and _installed_library_recipe_trusted(service_id, ext_dir, disabled_compose),
         skip_name_collision=is_builtin,
         skip_gpu_passthrough_check=is_builtin,
         skip_root_user_check=is_builtin,
@@ -3815,6 +3877,7 @@ def enable_extension(
             is_builtin = ext_dir.is_relative_to(EXTENSIONS_DIR.resolve())
             _scan_compose_content(
                 enabled_compose,
+                trusted=not is_builtin and _installed_library_recipe_trusted(service_id, ext_dir, enabled_compose),
                 skip_name_collision=is_builtin,
                 skip_gpu_passthrough_check=is_builtin,
                 skip_root_user_check=is_builtin,
