@@ -3,6 +3,8 @@
 Reviewed 2026-09-24 UTC against the 57 curated model records in ODS source
 `1bc5e1cbb24864f1c9efd551e0613202af324e3f`. The `qwen3.6-27b-ud-q4-k-xl`
 candidate row was added on 2026-09-25 with its catalog entry, for 58 records.
+The `gemma4-26b-a4b-q4` and `gemma4-31b-q4` rows were re-pointed on 2026-09-25
+to pinned unsloth revisions after ggml-org deleted their Q4_K_M files upstream.
 
 This is a documentation inventory of upstream repository metadata, not a license
 grant, legal-compatibility decision, or completed per-artifact clearance. A
@@ -70,9 +72,9 @@ A missing or `other` tag requires review, not an assumption of Apache-2.0.
 | `qwen3.8-27b-iq4-xs` | [unsloth/Qwen3.8-27B-GGUF @ 4ca720788d1e](https://huggingface.co/api/models/unsloth/Qwen3.8-27B-GGUF/revision/4ca720788d1e01f1bff70c033e0d0028fd02e502) (requested `4ca720788d1e`) | apache-2.0 | ["Qwen/Qwen3.8-27B"] |
 | `qwen3.5-27b-q4` | [unsloth/Qwen3.5-27B-GGUF @ 3221f178a6b8](https://huggingface.co/api/models/unsloth/Qwen3.5-27B-GGUF/revision/3221f178a6b842d04f1fb42f1c413534adcc0a6a) (requested `main`) | apache-2.0 | ["Qwen/Qwen3.5-27B"] |
 | `qwen3.6-27b-ud-q4-k-xl` | [unsloth/Qwen3.6-27B-GGUF @ 82d411acf4a0](https://huggingface.co/api/models/unsloth/Qwen3.6-27B-GGUF/revision/82d411acf4a06cfb8d9b073a5211bf410bfc29bf) (requested `82d411acf4a0`) | apache-2.0 | ["Qwen/Qwen3.6-27B"] |
-| `gemma4-26b-a4b-q4` | [ggml-org/gemma-4-26B-A4B-it-GGUF @ bb4531cda34d](https://huggingface.co/api/models/ggml-org/gemma-4-26B-A4B-it-GGUF/revision/bb4531cda34d1ea09d9814959ed4d5833cf2a4c8) (requested `main`) | apache-2.0 | ["google/gemma-4-26B-A4B-it"] |
+| `gemma4-26b-a4b-q4` | [unsloth/gemma-4-26B-A4B-it-GGUF @ c099eb48e663](https://huggingface.co/api/models/unsloth/gemma-4-26B-A4B-it-GGUF/revision/c099eb48e663fd284577b04978a94ffccb261841) (requested `c099eb48e663`) | apache-2.0 | google/gemma-4-26B-A4B-it |
 | `qwen3-30b-a3b-q4` | [unsloth/Qwen3-30B-A3B-GGUF @ d5b1d57bd0b5](https://huggingface.co/api/models/unsloth/Qwen3-30B-A3B-GGUF/revision/d5b1d57bd0b504ac62ae6c725904e96ef228dc74) (requested `main`) | apache-2.0 | Qwen/Qwen3-30B-A3B |
-| `gemma4-31b-q4` | [ggml-org/gemma-4-31B-it-GGUF @ 4fa4fdf38bee](https://huggingface.co/api/models/ggml-org/gemma-4-31B-it-GGUF/revision/4fa4fdf38bee237b5c9e8a5b4e72cf39404c9dcc) (requested `main`) | apache-2.0 | ["google/gemma-4-31B-it"] |
+| `gemma4-31b-q4` | [unsloth/gemma-4-31B-it-GGUF @ c1ac76e99d55](https://huggingface.co/api/models/unsloth/gemma-4-31B-it-GGUF/revision/c1ac76e99d5513b141e8adde7288b85c3f9c32ec) (requested `c1ac76e99d55`) | apache-2.0 | google/gemma-4-31B-it |
 | `deepseek-r1-32b-q4` | [unsloth/DeepSeek-R1-Distill-Qwen-32B-GGUF @ 1938d05cc893](https://huggingface.co/api/models/unsloth/DeepSeek-R1-Distill-Qwen-32B-GGUF/revision/1938d05cc893a60f37be1dc16e7465038f4fca63) (requested `main`) | apache-2.0 | deepseek-ai/DeepSeek-R1-Distill-Qwen-32B |
 | `qwen3.5-35b-a3b-q4` | [unsloth/Qwen3.5-35B-A3B-GGUF @ bc014a17be43](https://huggingface.co/api/models/unsloth/Qwen3.5-35B-A3B-GGUF/revision/bc014a17be43adabd7066b7a86075ff935c6a4e2) (requested `main`) | apache-2.0 | ["Qwen/Qwen3.5-35B-A3B"] |
 | `qwen3.6-35b-a3b-ud-q4` | [unsloth/Qwen3.6-35B-A3B-GGUF @ a483e9e6cbd5](https://huggingface.co/api/models/unsloth/Qwen3.6-35B-A3B-GGUF/revision/a483e9e6cbd595906af30beda3187c2663a1118c) (requested `main`) | apache-2.0 | ["Qwen/Qwen3.6-35B-A3B"] |
