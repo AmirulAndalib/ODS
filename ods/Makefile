@@ -32,6 +32,9 @@ test: ## Run unit and contract tests
 	@bash tests/test-hermes-slash-worker-prune.sh
 	@python3 tests/contracts/test-hermes-worker-guardrails.py
 	@echo ""
+	@echo "=== OpenCode managed launchers confine Bun temp copies ==="
+	@bash tests/test-opencode-bun-tmpdir.sh
+	@echo ""
 	@echo "=== Installer contracts ==="
 	@bash tests/contracts/test-installer-contracts.sh
 	@bash tests/test-external-services.sh
