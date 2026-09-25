@@ -38,7 +38,13 @@ def roots(test_client, monkeypatch, tmp_path):
     (install / "config").mkdir(parents=True)
     (install / "data").mkdir()
     shutil.copy2(ODS / "config/core-service-ids.json", install / "config/core-service-ids.json")
-    (install / "docker-compose.base.yml").write_text("services: {}\n", encoding="utf-8")
+    # A resolvable core stack, as test_curated_library_recipes._install_root
+    # writes it: the resolver drops a user extension that needs a service no
+    # resolved file declares.
+    (install / "docker-compose.base.yml").write_text(
+        "services:\n  llama-server:\n    image: example:llama-server\n", encoding="utf-8")
+    for backend in ("nvidia", "amd", "cpu"):
+        (install / f"docker-compose.{backend}.yml").write_text("services: {}\n", encoding="utf-8")
     _patch_mutation_config(monkeypatch, tmp_path, lib_dir=library, user_dir=user)
     monkeypatch.setattr(ext_mod, "_call_agent_invalidate_compose_cache", lambda: None)
     monkeypatch.setattr(ext_mod, "_call_agent_hook", lambda _sid, _hook: True)
@@ -58,6 +64,12 @@ def _install(roots, recipe):
 def _post(test_client, recipe, action):
     return test_client.post(f"/api/extensions/{recipe}/{action}",
                             headers=test_client.auth_headers)
+
+
+def _lost_privileges(response):
+    """The part of a 400 detail that says why curated privileges were lost."""
+    detail = response.json()["detail"]
+    return detail if "no longer has its curated-library privileges" in detail else ""
 
 
 def _mark_imported(directory):
@@ -98,11 +110,13 @@ def test_reenabled_recipes_stay_in_the_resolved_stack(test_client, roots):
         assert _post(test_client, recipe, "disable").status_code == 200
         assert _post(test_client, recipe, "enable").status_code == 200
 
-    files, stderr = _resolve(user.parent.parent, "nvidia")
+    for backend in ("nvidia", "amd", "cpu"):
+        files, stderr = _resolve(user.parent.parent, backend)
 
-    for recipe in ("gaia", "mapshaper"):
-        assert f"data/user-extensions/{recipe}/compose.yaml" in files, stderr
-    assert not [line for line in stderr.splitlines() if line.startswith("WARNING")], stderr
+        for recipe in ("gaia", "mapshaper"):
+            assert f"data/user-extensions/{recipe}/compose.yaml" in files, stderr
+        # Neither refused (compose policy) nor skipped (dependency cascade).
+        assert not [line for line in stderr.splitlines() if line.startswith("WARNING")], stderr
 
 
 @pytest.mark.parametrize("recipe", ["gaia", "mapshaper"])
@@ -130,6 +144,8 @@ def test_same_compose_as_imported_recipe_is_rejected(test_client, roots, recipe)
 
     assert response.status_code == 400
     assert "local build" in response.json()["detail"]
+    # It never had curated privileges, so there are none to explain.
+    assert not _lost_privileges(response)
     assert (installed / "compose.yaml.disabled").is_file()
     assert not (installed / "compose.yaml").exists()
 
@@ -139,10 +155,10 @@ def test_unchanged_imported_recipe_is_not_trusted_as_curated(installed_recipe): 
     keeps install's decision for it, which is untrusted."""
     _root, directory, _library, _candidate, _projection = installed_recipe
     with ext_mod._staged_library_extension("humanize", directory) as (staged, _digest):
-        assert ext_mod._installed_definition_matches(staged, directory)
+        assert ext_mod._installed_definition_difference(staged, directory) is None
 
-    assert ext_mod._installed_library_recipe_trusted(
-        "humanize", directory, directory / "compose.yaml") is False
+    assert ext_mod._installed_library_recipe_trust(
+        "humanize", directory, directory / "compose.yaml") == (False, None)
 
 
 @pytest.mark.parametrize("recipe", ["gaia", "mapshaper"])
@@ -157,6 +173,7 @@ def test_same_compose_without_library_recipe_is_rejected(test_client, roots, rec
 
     assert response.status_code == 400
     assert "local build" in response.json()["detail"]
+    assert not _lost_privileges(response)
     assert (installed / "compose.yaml.disabled").is_file()
 
 
@@ -166,19 +183,32 @@ def _append(path, text):
 
 
 TAMPERING = {
-    "gaia-dockerfile": ("gaia", lambda d: _append(d / "Dockerfile", "RUN id\n")),
-    "gaia-compose": ("gaia", lambda d: _append(d / "compose.yaml.disabled", "# edited\n")),
-    "gaia-hook": ("gaia", lambda d: _append(d / "hooks/post_install.sh", "id\n")),
-    "gaia-entrypoint-removed": ("gaia", lambda d: (d / "docker-entrypoint.sh").unlink()),
-    "mapshaper-dockerfile": ("mapshaper", lambda d: _append(d / "Dockerfile", "RUN id\n")),
-    "mapshaper-nginx-conf": ("mapshaper", lambda d: _append(d / "nginx.conf", "# edited\n")),
-    "mapshaper-manifest": ("mapshaper", lambda d: _append(d / "manifest.yaml", "# edited\n")),
+    "gaia-dockerfile": ("gaia", "Dockerfile", lambda d: _append(d / "Dockerfile", "RUN id\n")),
+    "gaia-compose": ("gaia", "compose.yaml.disabled",
+                     lambda d: _append(d / "compose.yaml.disabled", "# edited\n")),
+    "gaia-hook": ("gaia", "hooks/post_install.sh",
+                  lambda d: _append(d / "hooks/post_install.sh", "id\n")),
+    "gaia-entrypoint-removed": ("gaia", "docker-entrypoint.sh",
+                                lambda d: (d / "docker-entrypoint.sh").unlink()),
+    "mapshaper-dockerfile": ("mapshaper", "Dockerfile", lambda d: _append(d / "Dockerfile", "RUN id\n")),
+    "mapshaper-nginx-conf": ("mapshaper", "nginx.conf", lambda d: _append(d / "nginx.conf", "# edited\n")),
+    "mapshaper-manifest": ("mapshaper", "manifest.yaml",
+                           lambda d: _append(d / "manifest.yaml", "# edited\n")),
 }
+
+
+def _assert_says_edited(response, recipe, changed):
+    """The 400 names the local edit as the cause, not only the lost privilege."""
+    lost = _lost_privileges(response)
+    assert lost.startswith(f"Extension '{recipe}' no longer has its curated-library privileges "
+                           f"because its installed files were edited after install "
+                           f"(first difference: {changed})."), lost
+    assert "library recipe changed" not in lost
 
 
 @pytest.mark.parametrize("case", sorted(TAMPERING))
 def test_curated_recipe_edited_after_install_is_rejected(test_client, roots, case):
-    recipe, tamper = TAMPERING[case]
+    recipe, changed, tamper = TAMPERING[case]
     installed = _install(roots, recipe)
     assert _post(test_client, recipe, "disable").status_code == 200
     tamper(installed)
@@ -187,6 +217,7 @@ def test_curated_recipe_edited_after_install_is_rejected(test_client, roots, cas
 
     assert response.status_code == 400
     assert "local build" in response.json()["detail"]
+    _assert_says_edited(response, recipe, changed)
     assert (installed / "compose.yaml.disabled").is_file()
     assert not (installed / "compose.yaml").exists()
 
@@ -199,6 +230,7 @@ def test_stopped_curated_recipe_edited_after_install_is_rejected(test_client, ro
 
     assert response.status_code == 400
     assert "local build" in response.json()["detail"]
+    _assert_says_edited(response, "gaia", "Dockerfile")
 
 
 @pytest.mark.skipif(os.name == "nt", reason="needs POSIX file modes")
@@ -212,6 +244,7 @@ def test_installed_hook_mode_change_is_rejected(test_client, roots):
     response = _post(test_client, "gaia", "enable")
 
     assert response.status_code == 400
+    _assert_says_edited(response, "gaia", "hooks/post_install.sh")
 
 
 def test_linked_installed_file_is_rejected(test_client, roots, tmp_path):
@@ -228,6 +261,7 @@ def test_linked_installed_file_is_rejected(test_client, roots, tmp_path):
     response = _post(test_client, "mapshaper", "enable")
 
     assert response.status_code == 400
+    _assert_says_edited(response, "mapshaper", "nginx.conf")
 
 
 def test_library_change_after_install_needs_an_update_first(test_client, roots, monkeypatch, caplog):
@@ -242,6 +276,14 @@ def test_library_change_after_install_needs_an_update_first(test_client, roots, 
         refused = _post(test_client, "gaia", "enable")
     assert refused.status_code == 400
     assert "no longer matches its curated library recipe" in caplog.text
+    # The 400 names the library change as the cause, not a local edit.
+    lost = _lost_privileges(refused)
+    assert lost.startswith("Extension 'gaia' no longer has its curated-library privileges because "
+                           "the library recipe changed since install"), lost
+    assert "(first difference: README.md)" in lost
+    assert "Update it from the library to restore them." in lost
+    assert "edited" not in lost
+    assert refused.json()["detail"].endswith("uses a local build without a verified source recipe")
 
     monkeypatch.setattr(ext_mod, "EXTENSION_CATALOG", [{"id": "gaia", "name": "AMD GAIA", "port": 4200}])
     updated = _post(test_client, "gaia", "update")
@@ -251,3 +293,62 @@ def test_library_change_after_install_needs_an_update_first(test_client, roots, 
     enabled = _post(test_client, "gaia", "enable")
     assert enabled.status_code == 200, enabled.text
     assert (installed / "compose.yaml").is_file()
+
+
+def test_library_change_and_local_edit_are_both_named(test_client, roots):
+    library, _user = roots
+    installed = _install(roots, "gaia")
+    assert _post(test_client, "gaia", "disable").status_code == 200
+    _append(library / "gaia" / "README.md", "\nA newer release.\n")
+    _append(installed / "Dockerfile", "RUN id\n")
+
+    response = _post(test_client, "gaia", "enable")
+
+    assert response.status_code == 400
+    lost = _lost_privileges(response)
+    assert ("because the library recipe changed since install and its installed files were "
+            "edited after install (first difference: Dockerfile)") in lost, lost
+    assert "keeps your edited files as the rollback backup" in lost
+
+
+def test_cause_without_an_install_receipt_is_not_guessed(test_client, roots):
+    """A legacy install has no receipt to tell the library change from an edit."""
+    installed = _install(roots, "mapshaper")
+    assert _post(test_client, "mapshaper", "disable").status_code == 200
+    (installed / ".ods-library-receipt.json").unlink()
+    _append(installed / "nginx.conf", "# edited\n")
+
+    response = _post(test_client, "mapshaper", "enable")
+
+    assert response.status_code == 400
+    lost = _lost_privileges(response)
+    assert ("because its installed files differ from the library recipe (first difference: "
+            "nginx.conf), and no install receipt shows whether the library or the installed "
+            "copy changed") in lost, lost
+
+
+def test_curated_recipe_that_still_matches_passes_no_bind_namespace(roots, monkeypatch):
+    """Curated trust and #6718's imported-recipe bind namespace stay separate:
+    the enable re-scan of a matching curated recipe is trusted and passes no
+    extension_id; an imported recipe's re-scan is untrusted and passes it."""
+    library, _user = roots
+    installed = _install(roots, "gaia")
+    compose = installed / "compose.yaml"
+    calls = []
+    scan = ext_mod._scan_compose_content
+
+    def record(path, **kwargs):
+        if path == compose:  # not the staging scans of the library copy
+            calls.append(kwargs)
+        return scan(path, **kwargs)
+
+    monkeypatch.setattr(ext_mod, "_scan_compose_content", record)
+
+    ext_mod._scan_installed_compose("gaia", installed, compose, is_builtin=False)
+    _mark_imported(library / "gaia")
+    _mark_imported(installed)
+    with pytest.raises(ext_mod.HTTPException) as refused:
+        ext_mod._scan_installed_compose("gaia", installed, compose, is_builtin=False)
+
+    assert [(call["trusted"], call["extension_id"]) for call in calls] == [(True, None), (False, "gaia")]
+    assert "local build" in refused.value.detail
