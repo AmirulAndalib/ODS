@@ -23,11 +23,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - Previously issued ODS session cookies are invalidated at upgrade, including
   unexpired chat-only guest cookies. Owners renew through the existing owner
   card or authenticated dashboard flow; default direct Hermes access is unchanged.
-- Every llama.cpp image is now pinned by tag and sha256 digest: NVIDIA
-  `server-cuda-b9014`, CPU `server-b9014`, Intel `server-intel-b8248` and Apple
-  Docker `server-b8248`, including the tier-map, installer, host-agent and
-  catalog copies. The versions are unchanged. The dependency pin check rejects
-  a llama.cpp image without a digest.
+- Every llama.cpp image is now pinned by tag and sha256 digest, including the
+  tier-map, installer, host-agent and catalog copies. The dependency pin check
+  rejects a llama.cpp image without a digest.
 
 ### Changed
 - Every curated catalog download URL now names a Hugging Face commit instead
@@ -37,6 +35,22 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   installer rerun still keeps an active model whose `.env` has the old
   `resolve/main` URL when the repo, file path and sha256 match the catalog, and
   writes the pinned URL.
+- The Intel (`server-intel-b9014`), Apple Docker (`server-b9014`), Intel Arc
+  local build (tag `b9014`, commit `d4b0c22f`) and native Windows Vulkan
+  (`llama-b9014-bin-win-vulkan-x64.zip`) llama.cpp runtimes move from b8248 to
+  b9014, the build NVIDIA and CPU already use. b8248 ignores
+  `LLAMA_ARG_REASONING` and `LLAMA_ARG_SPEC_TYPE`, so ODS's reasoning-off
+  default and per-model speculative settings had no effect on these backends,
+  and b8248 rejects `--spec-draft-n-max`, which the Windows launchers pass
+  when `LLAMA_ARG_SPEC_DRAFT_N_MAX` is set. The images are
+  digest-pinned, the Arc build checks the tag's commit, and the Windows
+  installer now checks the archive's SHA-256. Native Windows launches pass
+  `LLAMA_REASONING` as `--reasoning` when the installed llama-server has that
+  switch, as native macOS does: b9014 defaults it to `auto`, which turns
+  Qwen3.5 thinking on, and `--reasoning-format none` alone returns the
+  reasoning inside the reply. Not measured on Intel or native Windows
+  hardware. Existing native Windows installs keep their llama-server until it
+  is reinstalled.
 - Perplexica now runs upstream release v1.12.2, published under its new name
   Vane (`itzcrazykns1337/vane:slim-v1.12.2`, digest-pinned). The UI shows the
   Vane name; ODS keeps the `perplexica` service, port and volumes, so settings
