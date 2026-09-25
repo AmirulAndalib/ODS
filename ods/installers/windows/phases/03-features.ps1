@@ -174,7 +174,7 @@ if ($enableHermes -and -not $cloudMode) {
                     -RequireMinContext
                 $tierConfig = $hermesReselected
                 $hermesFloorAction = "reselected"
-                Write-AIWarn "Hermes needs 64K context: $hermesPrevious does not fit at 64K, so $($tierConfig.LlmModel) was selected at $($tierConfig.MaxContext)."
+                Write-AIWarn "Hermes needs 64K context: $hermesPrevious cannot serve 64K here, so $($tierConfig.LlmModel) was selected at $($tierConfig.MaxContext)."
             } catch {
                 $hermesFloorAction = "cap"
             }
@@ -187,7 +187,7 @@ if ($enableHermes -and -not $cloudMode) {
             $tierConfig.MaxContext = $hermesContextSize
         } elseif ($hermesFloorAction -eq "cap") {
             $hermesContextBelowFloor = $true
-            Write-AIWarn "Hermes needs at least 64K context, but $($tierConfig.LlmModel) fits only $($tierConfig.MaxContext) on this hardware."
+            Write-AIWarn "Hermes needs at least 64K context, but $($tierConfig.LlmModel) runs at $($tierConfig.MaxContext) here (64K does not fit or exceeds its native context)."
             Write-AIWarn "ODS Talk stays unavailable (the Dashboard says why) until you choose a model that fits 64K in Models."
             if ($tierConfig.ContainsKey("RecommendationReason") -and $tierConfig.RecommendationReason) {
                 $tierConfig.RecommendationReason = "$($tierConfig.RecommendationReason) Hermes requires 64K context, which does not fit here; ODS Talk is unavailable with this model."

@@ -87,7 +87,10 @@ cp extensions/services/dashboard-api/model_memory.py \
     "$fixture_dir/extensions/services/dashboard-api/"
 cp lib/python-cmd.sh "$fixture_dir/lib/"
 
-# run_fit_case VRAM_MB RAM_GB TIER LLM GGUF CONTEXT SOURCE
+# run_fit_case VRAM_MB RAM_GB TIER LLM GGUF CONTEXT SOURCE [REC_LLM REC_GGUF REC_CONTEXT]
+# The REC_* arguments are phase 02's fresh recommendation (INSTALLER_RECOMMENDED_*);
+# they default to the configured model, i.e. this run's own pick. A rerun that
+# preserved an older active model passes the recommendation it did not apply.
 run_fit_case() {
     (
         set -euo pipefail
@@ -116,9 +119,9 @@ run_fit_case() {
         GGUF_FILE="$5"
         MAX_CONTEXT="$6"
         MODEL_SELECTION_SOURCE="$7"
-        INSTALLER_RECOMMENDED_MODEL="$4"
-        INSTALLER_RECOMMENDED_GGUF="$5"
-        INSTALLER_RECOMMENDED_CONTEXT="$6"
+        INSTALLER_RECOMMENDED_MODEL="${8:-$4}"
+        INSTALLER_RECOMMENDED_GGUF="${9:-$5}"
+        INSTALLER_RECOMMENDED_CONTEXT="${10:-$6}"
         MODEL_RECOMMENDATION_REASON="selector chose $6 context"
         WARNINGS=""
 
@@ -178,6 +181,33 @@ if command -v python3 >/dev/null 2>&1; then
     [[ "$(field "$out" MAX_CONTEXT)" == "32768" ]] || fail "no 64K fit must keep the fitting context: $out"
     [[ "$(field "$out" HERMES_CONTEXT_BELOW_FLOOR)" == "true" ]] || fail "no 64K fit must be reported: $out"
     pass "Linux Hermes floor caps when no installable model fits at 64K"
+
+    # (e) The raise is never a fit above the model's native context. phi-4
+    # needs ~21.4 GiB at 64K, so memory alone says it fits a 24 GB card, but
+    # llama.cpp caps its slot at 16,384. As this run's pick it is re-selected.
+    out="$(run_fit_case 24564 64 3 phi-4 phi-4-Q4_K_M.gguf 16384 installer)"
+    [[ "$(field "$out" LLM_MODEL)" == "qwen3.5-27b" ]] || fail "phi-4 above its native context must be re-selected: $out"
+    [[ "$(field "$out" MAX_CONTEXT)" == "65536" ]] || fail "the re-selected model should serve 64K: $out"
+    pass "Linux Hermes floor never raises a model past its native context"
+
+    # (f) A rerun that preserved an older installer pick (source=installer
+    # carried over, but not this run's recommendation) keeps it: no silent
+    # replacement or new download. Talk is reported unavailable, and the
+    # recommendation keeps its own context.
+    out="$(run_fit_case 12282 32 2 phi-4 phi-4-Q4_K_M.gguf 16384 installer         qwen3.5-9b Qwen3.5-9B-Q4_K_M.gguf 65536)"
+    [[ "$(field "$out" LLM_MODEL)" == "phi-4" ]] || fail "a preserved older pick must not be replaced: $out"
+    [[ "$(field "$out" MAX_CONTEXT)" == "16384" ]] || fail "a preserved older pick keeps its context: $out"
+    [[ "$(field "$out" HERMES_CONTEXT_BELOW_FLOOR)" == "true" ]] || fail "below-floor state must be exported: $out"
+    [[ "$(field "$out" WARNINGS)" == *"ODS Talk stays unavailable"* ]] || fail "the cap must say Talk is unavailable: $out"
+    [[ "$(field "$out" INSTALLER_RECOMMENDED_MODEL)" == "qwen3.5-9b" ]] || fail "the recommendation must not change: $out"
+    [[ "$(field "$out" INSTALLER_RECOMMENDED_CONTEXT)" == "65536" ]]         || fail "a preserved model's context must not be recorded as the recommendation's: $out"
+    pass "Linux Hermes floor keeps a preserved older pick and the recommendation's own context"
+
+    # (g) A preserved pick already at 64K skips the raise; its context is
+    # still not recorded for the different recommended model.
+    out="$(run_fit_case 49140 128 4 deepseek-r1-distill-llama-70b DeepSeek-R1-Distill-Llama-70B-Q4_K_M.gguf 65536 installer         qwen3.6-35b-a3b Qwen3.6-35B-A3B-UD-Q4_K_M.gguf 131072)"
+    [[ "$(field "$out" INSTALLER_RECOMMENDED_CONTEXT)" == "131072" ]]         || fail "the recommended Qwen3.6-35B-A3B must keep its 131072, not the preserved R1-70B 65536: $out"
+    pass "Linux phase 03 records the served context only for this run's own pick"
 else
     echo "  SKIP: python3 unavailable; fit re-check cases need the real selector"
 fi

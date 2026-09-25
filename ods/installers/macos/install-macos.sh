@@ -1513,6 +1513,9 @@ if [[ "${ODS_DISABLE_CATALOG_MODEL_SELECTOR:-false}" != "true" && "$SELECTED_TIE
         fi
         if [[ -n "$_selector_python" ]]; then
             _selector_status=0
+            # The tier map's size is a preference the Hermes re-select below
+            # applies too (the selector drops it when nothing fits under it).
+            _selector_max_size_mb="${LLM_MODEL_SIZE_MB:-0}"
             _selector_env="$("$_selector_python" "$_selector_script" \
                 --catalog "$_selector_catalog" \
                 --backend "apple" \
@@ -1521,7 +1524,7 @@ if [[ "${ODS_DISABLE_CATALOG_MODEL_SELECTOR:-false}" != "true" && "$SELECTED_TIE
                 --ram-gb "${SYSTEM_RAM_GB:-0}" \
                 --profile "${MODEL_PROFILE_EFFECTIVE:-${MODEL_PROFILE:-qwen}}" \
                 --tier "$SELECTED_TIER" \
-                --max-size-mb "${LLM_MODEL_SIZE_MB:-0}" \
+                --max-size-mb "$_selector_max_size_mb" \
                 --host-arch "$(uname -m 2>/dev/null || echo unknown)" \
                 --installable-only \
                 --min-context "$HERMES_CONTEXT_SIZE" \
@@ -1700,16 +1703,21 @@ if $ENABLE_HERMES && ! $CLOUD_MODE; then
                 0) _hermes_floor_action="raise" ;;
                 3)
                     _hermes_env="$("$_selector_python" "$_selector_script" "${_hermes_selector_args[@]}" \
-                        --max-size-mb 0 --installable-only \
+                        --max-size-mb "${_selector_max_size_mb:-0}" --installable-only \
                         --min-context "$HERMES_CONTEXT_SIZE" --require-min-context \
                         --env 2>>"$ODS_LOG_FILE")" || _hermes_env=""
                     if [[ -n "$_hermes_env" ]]; then
                         _hermes_previous="${LLM_MODEL:-} at ${MAX_CONTEXT}"
+                        # Drop the previous pick's llama-server settings (the
+                        # LLAMA_ARG_* set installers/phases/03-features.sh
+                        # clears); the loader omits unset optional values.
                         unset MODEL_RUNTIME_PROFILE MODEL_RUNTIME_PROFILE_LABEL MODEL_RUNTIME_PROFILE_SOURCE
                         unset LLAMA_ARG_CACHE_TYPE_K LLAMA_ARG_CACHE_TYPE_V LLAMA_ARG_FLASH_ATTN
+                        unset LLAMA_ARG_N_CPU_MOE LLAMA_ARG_NO_CACHE_PROMPT LLAMA_ARG_CHECKPOINT_EVERY_NT
+                        unset LLAMA_ARG_SPEC_TYPE LLAMA_ARG_SPEC_DRAFT_N_MAX
                         unset LLAMA_ARG_CTX_CHECKPOINTS LLAMA_ARG_CACHE_RAM
                         load_model_selector_env_from_output <<< "$_hermes_env"
-                        ai_warn "Hermes needs 64K context: ${_hermes_previous} does not fit at 64K, so ${LLM_MODEL} was selected at ${MAX_CONTEXT}."
+                        ai_warn "Hermes needs 64K context: ${_hermes_previous} cannot serve 64K here, so ${LLM_MODEL} was selected at ${MAX_CONTEXT}."
                         _hermes_floor_action="reselected"
                         unset _hermes_previous
                     else
@@ -1730,7 +1738,7 @@ if $ENABLE_HERMES && ! $CLOUD_MODE; then
                 ;;
             cap)
                 HERMES_CONTEXT_BELOW_FLOOR=true
-                ai_warn "Hermes needs at least 64K context, but ${LLM_MODEL:-this model} fits only ${MAX_CONTEXT} in this Mac's memory budget."
+                ai_warn "Hermes needs at least 64K context, but ${LLM_MODEL:-this model} runs at ${MAX_CONTEXT} in this Mac's memory budget (64K does not fit or exceeds its native context)."
                 ai_warn "ODS Talk stays unavailable (the Dashboard says why) until you choose a model that fits 64K in Models."
                 MODEL_RECOMMENDATION_REASON="${MODEL_RECOMMENDATION_REASON:-} Hermes requires 64K context, which does not fit here; ODS Talk is unavailable with this model."
                 ;;
