@@ -258,6 +258,46 @@ assert_eq "SELECTOR_GGUF_FILE" "qwen3-coder-next-Q4_K_M.gguf" "$GGUF_FILE"
 assert_eq "SELECTOR_POLICY" "context-aware-largest-capable-general-v1" "$MODEL_RECOMMENDATION_POLICY"
 echo ""
 
+# Qwen 3.6 27B is a fleet A/B candidate (install_recommendation=false). It
+# would outrank Qwen 3.5 27B on file size here, so the installable filter is
+# what keeps the 24-32GB default unchanged. Cover both the tier-3 size ceiling
+# (non-Pixel hosts) and the uncapped Pixel-default path.
+echo "Catalog selector (24-32GB discrete GPUs keep Qwen 3.5 27B; Qwen 3.6 27B stays a candidate):"
+for _vram_mb in 24576 32607; do
+    for _backend in nvidia amd; do
+        for _max_size_mb in 18600 0; do
+            _selector_env="$(python3 "$SCRIPT_DIR/scripts/select-model.py" \
+                --catalog "$SCRIPT_DIR/config/model-library.json" \
+                --backend "$_backend" \
+                --memory-type discrete \
+                --vram-mb "$_vram_mb" \
+                --ram-gb 64 \
+                --profile qwen \
+                --tier 3 \
+                --max-size-mb "$_max_size_mb" \
+                --host-arch amd64 \
+                --installable-only \
+                --env)"
+            LLM_MODEL="" GGUF_FILE="" MAX_CONTEXT="" MODEL_RECOMMENDED_ALTERNATIVES=""
+            load_selector_env "$_selector_env"
+            _case="${_backend} ${_vram_mb}MB max-size ${_max_size_mb}"
+            assert_eq "SELECTOR_LLM_MODEL ($_case)" "qwen3.5-27b" "$LLM_MODEL"
+            assert_eq "SELECTOR_GGUF_FILE ($_case)" "Qwen3.5-27B-Q4_K_M.gguf" "$GGUF_FILE"
+            assert_eq "SELECTOR_CONTEXT ($_case)" "32768" "$MAX_CONTEXT"
+            case ";$MODEL_RECOMMENDED_ALTERNATIVES" in
+                *";qwen3.6-27b-ud-q4-k-xl:"*)
+                    echo "  FAIL: SELECTOR_ALTERNATIVES ($_case) offers the Qwen 3.6 27B candidate"
+                    ((FAIL++)) ;;
+                *)
+                    echo "  PASS: SELECTOR_ALTERNATIVES ($_case) omits the Qwen 3.6 27B candidate"
+                    ((PASS++)) ;;
+            esac
+        done
+    done
+done
+unset _vram_mb _backend _max_size_mb _case
+echo ""
+
 echo "Catalog selector (arm64 NV_ULTRA preserves A3B substitution):"
 _selector_env="$(python3 "$SCRIPT_DIR/scripts/select-model.py" \
     --catalog "$SCRIPT_DIR/config/model-library.json" \

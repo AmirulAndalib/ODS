@@ -1,7 +1,8 @@
 # Model terms source inventory
 
 Reviewed 2026-09-24 UTC against the 57 curated model records in ODS source
-`1bc5e1cbb24864f1c9efd551e0613202af324e3f`.
+`1bc5e1cbb24864f1c9efd551e0613202af324e3f`. The `qwen3.6-27b-ud-q4-k-xl`
+candidate row was added on 2026-09-25 with its catalog entry, for 58 records.
 
 This is a documentation inventory of upstream repository metadata, not a license
 grant, legal-compatibility decision, or completed per-artifact clearance. A
@@ -9,7 +10,7 @@ quantizer's model-card tag can be incomplete or wrong and does not override the
 original model license. Each source link identifies the revision requested by
 the catalog; mutable refs need a separate immutable artifact receipt.
 
-Only one catalog entry has a top-level `license`, none has a top-level
+Two catalog entries have a top-level `license`, none has a top-level
 `license_url`, and one additional entry has nested `source_evidence` license
 information. This page does not change that runtime schema or enforce acceptance.
 The separate Hugging Face browser does display upstream license metadata; that
@@ -68,6 +69,7 @@ A missing or `other` tag requires review, not an assumption of Apache-2.0.
 | `deepseek-r1-14b-q4` | [unsloth/DeepSeek-R1-Distill-Qwen-14B-GGUF @ 7b05b58b41f6](https://huggingface.co/api/models/unsloth/DeepSeek-R1-Distill-Qwen-14B-GGUF/revision/7b05b58b41f623e66fc74cd27b35475267b2f3e3) (requested `main`) | apache-2.0 | deepseek-ai/DeepSeek-R1-Distill-Qwen-14B |
 | `qwen3.8-27b-iq4-xs` | [unsloth/Qwen3.8-27B-GGUF @ 4ca720788d1e](https://huggingface.co/api/models/unsloth/Qwen3.8-27B-GGUF/revision/4ca720788d1e01f1bff70c033e0d0028fd02e502) (requested `4ca720788d1e`) | apache-2.0 | ["Qwen/Qwen3.8-27B"] |
 | `qwen3.5-27b-q4` | [unsloth/Qwen3.5-27B-GGUF @ 3221f178a6b8](https://huggingface.co/api/models/unsloth/Qwen3.5-27B-GGUF/revision/3221f178a6b842d04f1fb42f1c413534adcc0a6a) (requested `main`) | apache-2.0 | ["Qwen/Qwen3.5-27B"] |
+| `qwen3.6-27b-ud-q4-k-xl` | [unsloth/Qwen3.6-27B-GGUF @ 82d411acf4a0](https://huggingface.co/api/models/unsloth/Qwen3.6-27B-GGUF/revision/82d411acf4a06cfb8d9b073a5211bf410bfc29bf) (requested `82d411acf4a0`) | apache-2.0 | ["Qwen/Qwen3.6-27B"] |
 | `gemma4-26b-a4b-q4` | [ggml-org/gemma-4-26B-A4B-it-GGUF @ bb4531cda34d](https://huggingface.co/api/models/ggml-org/gemma-4-26B-A4B-it-GGUF/revision/bb4531cda34d1ea09d9814959ed4d5833cf2a4c8) (requested `main`) | apache-2.0 | ["google/gemma-4-26B-A4B-it"] |
 | `qwen3-30b-a3b-q4` | [unsloth/Qwen3-30B-A3B-GGUF @ d5b1d57bd0b5](https://huggingface.co/api/models/unsloth/Qwen3-30B-A3B-GGUF/revision/d5b1d57bd0b504ac62ae6c725904e96ef228dc74) (requested `main`) | apache-2.0 | Qwen/Qwen3-30B-A3B |
 | `gemma4-31b-q4` | [ggml-org/gemma-4-31B-it-GGUF @ 4fa4fdf38bee](https://huggingface.co/api/models/ggml-org/gemma-4-31B-it-GGUF/revision/4fa4fdf38bee237b5c9e8a5b4e72cf39404c9dcc) (requested `main`) | apache-2.0 | ["google/gemma-4-31B-it"] |

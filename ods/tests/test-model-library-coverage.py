@@ -1,3 +1,4 @@
+import importlib.util
 import json
 from pathlib import Path
 
@@ -1066,6 +1067,111 @@ def test_kat_coder_v25_dev_records_pinned_evidence_without_recommendation():
         "65a24267982811bc72e45db219e09e6e547c9628"
     )
     assert rejected[0]["evidence"]["hosts"] == ["tower2", "strix-halo"]
+
+
+QWEN36_27B_CANDIDATE = "qwen3.6-27b-ud-q4-k-xl"
+QWEN36_27B_REVISION = "82d411acf4a06cfb8d9b073a5211bf410bfc29bf"
+
+
+def _load_selector():
+    spec = importlib.util.spec_from_file_location(
+        "ods_select_model_coverage", ROOT / "scripts" / "select-model.py"
+    )
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def test_qwen36_27b_candidate_records_pinned_artifact_without_recommendation():
+    catalog = json.loads(CATALOG.read_text(encoding="utf-8"))
+    by_id = {model["id"]: model for model in catalog["models"]}
+    model = by_id[QWEN36_27B_CANDIDATE]
+
+    assert model["gguf_file"] == "Qwen3.6-27B-UD-Q4_K_XL.gguf"
+    assert model["gguf_url"] == (
+        "https://huggingface.co/unsloth/Qwen3.6-27B-GGUF/"
+        f"resolve/{QWEN36_27B_REVISION}/"
+        "Qwen3.6-27B-UD-Q4_K_XL.gguf"
+    )
+    assert model["source_repo"] == "unsloth/Qwen3.6-27B-GGUF"
+    assert model["source_revision"] == QWEN36_27B_REVISION
+    assert model["gguf_sha256"] == (
+        "ff6941ded525b34eb159496762c29dd0ec6e71dc31b74d57e75d871a03eec259"
+    )
+    assert model["size_bytes"] == 17612564704
+    assert model["size_mb"] == 17613
+    assert model["license"] == "apache-2.0"
+    assert model["quantization"] == "UD-Q4_K_XL"
+    assert model["llm_model_name"] == "qwen3.6-27b"
+
+    # Candidate only: no install default and no fleet app verdicts yet.
+    assert model["install_recommendation"] is False
+    assert not model.get("app_compatibility")
+    assert "not an install default" in model["description"]
+    for risk in ("thinking mode", "reasoning off", "#27767", "3 of 216 MMBT"):
+        assert risk in model["description"], risk
+
+    # Served like the Qwen 3.5 27B baseline after the Hermes raise.
+    assert model["context_length"] == HERMES_CONTEXT_FLOOR
+    assert model["max_context_length"] == 262144
+
+    # Hybrid attention: only every fourth block (3, 7, ... 63) holds KV cache.
+    kv_heads = model["attention_head_count_kv"]
+    assert model["block_count"] == 64
+    assert len(kv_heads) == model["block_count"]
+    assert [index for index, heads in enumerate(kv_heads) if heads] == list(range(3, 64, 4))
+    assert set(kv_heads) == {0, 4}
+    assert model["attention_key_length"] == model["attention_value_length"] == 256
+
+    selector = _load_selector()
+    normalized = selector.normalize_model(model)
+    # 16 layers x 4 KV heads x (256 + 256) x 2 bytes = 64 KiB per token.
+    assert selector.estimated_context_kv_gb(normalized, 65536) == 4.0
+    assert selector.estimated_context_kv_gb(normalized, 131072) == 8.0
+    assert selector.selector_required_memory_gb(normalized) == 22.0
+    assert model["vram_required_gb"] == 22
+
+    publisher = model["publisher_evidence"]
+    assert publisher["independent"] is False
+    assert QWEN36_27B_REVISION not in publisher["source_url"]
+    assert "6a9e13bd6fc8f0983b9b99948120bc37f49c13e9" in publisher["source_url"]
+    assert publisher["terminal_bench_2_0"] == 59.3
+    assert publisher["baseline_terminal_bench_2_0"] == 41.6
+    assert publisher["swe_bench_verified"] == 77.2
+    assert publisher["baseline_swe_bench_verified"] == 75.0
+    assert "LLAMA_ARG_REASONING=off" in publisher["note"]
+
+
+def test_qwen36_27b_candidate_never_replaces_the_24_to_32gb_default():
+    selector = _load_selector()
+    catalog = selector.load_catalog(CATALOG)
+    promoted = [
+        {**model, "install_recommendation": True}
+        if model["id"] == QWEN36_27B_CANDIDATE
+        else model
+        for model in catalog
+    ]
+
+    for backend in ("nvidia", "amd"):
+        for vram_mb in (24576, 32607):
+            capacity, _ = selector.usable_memory_gb(backend, "discrete", vram_mb, 64)
+            # Tier 3 size ceiling on non-Pixel hosts; uncapped on Pixel hosts.
+            for max_size_mb in (18600, 0):
+                case = (backend, vram_mb, max_size_mb)
+                ranked = selector.rank_models(
+                    catalog, capacity, "qwen", True, backend, "discrete",
+                    vram_mb, 64, "amd64", max_size_mb=max_size_mb,
+                )
+                assert ranked[0]["id"] == "qwen3.5-27b-q4", case
+                assert QWEN36_27B_CANDIDATE not in {m["id"] for m in ranked}, case
+
+                # The candidate fits this hardware, so install_recommendation
+                # is the guard that keeps it out of the installable pool.
+                promoted_ranked = selector.rank_models(
+                    promoted, capacity, "qwen", True, backend, "discrete",
+                    vram_mb, 64, "amd64", max_size_mb=max_size_mb,
+                )
+                assert QWEN36_27B_CANDIDATE in {m["id"] for m in promoted_ranked}, case
 
 
 def test_new_switchboard_models_do_not_change_install_recommendations():
