@@ -26,6 +26,10 @@ digests and provenance in `config/perplexica-release.json`).
   mode and the `scrape_url` tool cannot read pages with this image.
 - The app root moved from `/home/perplexica` to `/home/vane`. ODS mounts the
   existing `perplexica-data` and `perplexica-uploads` volumes at the new paths.
+- Speed and Balanced rank SearXNG results with the configured embedding model.
+  The built-in `Xenova/all-MiniLM-L6-v2` is downloaded from Hugging Face into the
+  container on first use (again after each recreate); without Internet access
+  ranking is skipped and results are used unranked.
 
 To bump: pick a versioned `slim-vX.Y.Z` tag on Docker Hub, verify the manifest
 list with `docker buildx imagetools inspect`, review the upstream compare for
