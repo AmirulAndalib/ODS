@@ -1,5 +1,6 @@
 import {
   hasVisibilityTransitionPlan,
+  inspectionControls,
   inspectionPageErrors,
   normalizeWorkspacePreviewInspectionParams,
   validateWorkspacePreviewInspectionReceipt,
@@ -50,6 +51,18 @@ export function boundInspectionPageErrors(params, result, preview) {
   try {
     const {receipt} = boundReceipt(params, result, preview) ?? {};
     return inspectionPageErrors(receipt) ? Object.freeze({siteId: receipt.siteId, sha256: receipt.sha256}) : undefined;
+  } catch { return undefined; }
+}
+
+// The load-time control names of a valid receipt bound to this snapshot,
+// passed or failed: they are observed before any step runs, so a failed step
+// does not void them. `controls` is undefined when the receipt carries none
+// (an older capsule or a transport failure). Never interaction evidence.
+export function boundInspectionControls(params, result, preview) {
+  try {
+    const {receipt} = boundReceipt(params, result, preview) ?? {};
+    return receipt ? Object.freeze({siteId: receipt.siteId, sha256: receipt.sha256,
+      controls: inspectionControls(receipt)}) : undefined;
   } catch { return undefined; }
 }
 

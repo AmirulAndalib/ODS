@@ -168,6 +168,45 @@ only, never the system prompt. The capture adds about 0.2 seconds to an
 inspection. A host keeps producing receipts without `renderedColors` until the
 installer rebuilds the inspection image.
 
+## Load-time control names
+
+An owner may require a control "named exactly X", and the accessible name is
+what assistive technology and exact role/name locators use, not the visible
+text. A page script can replace a correct name on load (fleet round 100:
+`setAttribute('aria-label', ...)` on the requested button), which neither the
+published bytes nor a CSS-selector plan reveals.
+
+After the 100 ms settle that follows `load`, and before any step runs, the
+capsule evaluates one read-only function in the isolated world. It walks the
+document (and open shadow roots) with the same Playwright-compatible role and
+name rules as the hidden-inclusive matcher and records every element whose
+role is `button` or `link`, hidden ones included, in document order: its role,
+its computed accessible name, whether it is rendered (the same
+`checkVisibility` and client-rect test as a step), what supplied the name
+(`aria-labelledby`, `aria-label`, `content`, or `other` such as `title`,
+`value` or a `<label>`), and its own content text when that differs from the
+name. Names and text are author-controlled: whitespace is collapsed, control,
+format, private-use, surrogate, unassigned and line or paragraph separator code
+points become spaces, and each is cut to 120 characters (119 plus `…`).
+
+The receipt carries `controls: {count, items}`. `count` is the page's total
+number of such elements (saturating at 1000); `items` lists at most the first
+48, and stops earlier when the encoded items would exceed 6 KiB, so `count`
+larger than the list length means the list is incomplete. Each item is exactly
+`{role, name, visible, source}` plus `text` when present. The field is absent
+when capture fails and in receipts from capsules built before it; it is also
+dropped rather than let a receipt reach the 32 KiB output limit. Callers
+validate these exact bounds and reject any other shape.
+
+The names are evidence about names only. They never change a step or the
+receipt status and are not interaction evidence. The tool omits them from its
+quoted evidence copy; when an exact role/name locator matched nothing and a
+control of that role shows the locator's name as its text (or differs only in
+letter case), the locator feedback states the actual name and what supplied it.
+The plugin checks owner-requested control names against them (see
+`COMPLETION-RELIABILITY.md`). A host keeps producing receipts without
+`controls` until the installer rebuilds the inspection image.
+
 ## Host custody and isolation
 
 Linux/WSL uses `/run/ods-pixel-inspection/control.sock`, a root-controlled 0750
@@ -214,16 +253,20 @@ There is no host-browser fallback.
 
 `node --test tests/test-preview-inspection.mjs` checks plugin contracts,
 Unicode hash compatibility, forged/incomplete receipts, unavailable results,
-page-error bounds and presentation, and rendered-color bounds and the fixed
-line.
+page-error bounds and presentation, rendered-color bounds and the fixed
+line, and load-time control-name bounds and locator feedback.
 `python3 -m unittest discover -s tests -p test_preview_inspection.py` checks
 protocol, ownership, paths, immutable bytes, subprocess bounds, cleanup,
 page-error receipt shaping through a scripted browser double, the PNG decoder
-and palette buckets, and the separate palette capture.
+and palette buckets, the separate palette capture, and control-name capture
+order, sanitization and bounds.
 Set `ODS_PREVIEW_BROWSER_TESTS=1` only for the fixture Chromium suite; it also
 checks the hidden-inclusive role/name matcher against Playwright's own
 `includeHidden` engine, and replays the fleet round 069 page
-(`tests/fixtures/preview-palette/tower1-r069`) and its amber repair. Set
+(`tests/fixtures/preview-palette/tower1-r069`) and its amber repair, and the
+fleet round 100 page (`tests/fixtures/preview-controls/tower2-r100`), its repair
+and three small pages for load-time control names, checked against Playwright's
+`getByRole` names. Set
 `ODS_INSPECTION_TEST_IMAGE=sha256:<candidate>` for real isolated-container
 smoke, observed hidden-flex regression, hung-script, and cancellation cleanup.
 These test-only variables never select a production image or grant authority.

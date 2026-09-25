@@ -224,6 +224,54 @@ generates"). The names bind to the published directory's name and are checked
 against the receipt's complete published path list.
 `tests/requested_published_files.test.mjs` replays that case.
 
+### Owner-requested control names
+
+A quotation right after a button or link noun and a naming cue ("an accessible
+button named exactly "Show sold out"", "a link called "Docs"", "a button with
+the label "Close"") is also a control name: some button (or link) must have
+exactly that accessible name after the page scripts ran. The text itself is
+still an ordinary requested literal. Bytes cannot show this: tower2 round 100
+had the right button text, but `script.js` ran
+`setAttribute('aria-label', 'Show the sold out midnight concert card')` on
+load. The model's exact-name click matched nothing, it switched to a CSS
+selector, that inspection passed, and the fleet's
+`getByRole('button', {name: 'Show sold out', exact: true})` click failed.
+
+Every inspection receipt now carries the load-time names of the page's buttons
+and links (`controls`, see `host/preview-inspection-protocol.md`), captured
+before any step, hidden ones included. The latest receipt bound to the current
+snapshot decides, whether its steps passed or failed; "named exactly" compares
+case-sensitively after whitespace and typographic normalization, "named"
+without "exactly" ignores case. A name counts as missing only when the receipt
+lists every button and link of the page. A snapshot without such a receipt
+(no inspection yet, or a capsule built before `controls`) is unverified, never
+failed. The miss keeps the most telling control: the one whose own text is the
+requested name while an `aria-label` or `aria-labelledby` replaced it, one
+named the same except for letter case, or a control of the other role with
+that name. At publication the plugin also records, from the snapshot bytes,
+which published files set `aria-label`/`aria-labelledby` from script and which
+`aria-label` values the HTML markup carries, only to say where the replacing
+name came from.
+
+The repair step travels on that inspection's own result, failed or passed,
+because the pinned harness drops finalization revisions after plugin tool
+calls. For round 100 it reads: "The owner requested a button named exactly
+"Show sold out", but after the page scripts ran no button has that accessible
+name: the button whose text is "Show sold out" is named "Show the sold out
+midnight concert card" by an aria-label that a published script sets when the
+page loads (["script.js"]), which replaces its text as the accessible name.
+Remove that override or make it exactly "Show sold out", republish, then
+inspect the new snapshot." The inspection tool's own locator feedback for an
+exact-name miss says the same from the receipt, instead of blaming hidden
+elements. When no inspection covered the snapshot and no show/hide check
+already asks for one, the next step asks for an inspection by that exact role
+and name. Finalization requests one bounded revision
+(`pixel-ods-workspace-preview-control-name`), and delivery stays `failed` with
+a fixed statement of the missing name. `tests/requested_control_names.test.mjs`
+replays round 100 with the recorded snapshot bytes
+(`ods/tests/fixtures/preview-controls/tower2-r100`), the model's two recorded
+inspection plans and the names this capsule reports for those bytes.
+
 ## Saved project delivery
 
 A model can successfully write an HTML project and then stop without calling
