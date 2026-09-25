@@ -75,7 +75,8 @@ ODS Bootstrap Installer
 Usage: get-ods.sh [--force [--keep-models]] [INSTALLER OPTIONS]
   --force         Replace an existing, identified ODS installation.
   --keep-models   With --force, retain data/models and restore it before install.
-                  Refuses an existing ~/.ods-models-backup; resolve it manually.
+                  Uses an install-adjacent .models-backup on the same filesystem.
+                  Existing adjacent or legacy ~/.ods-models-backup needs recovery.
                   Source, runtime, configuration and other user data are replaced.
                   Restored models still use the ordinary installer validation.
   --non-interactive  Run without interactive prompts.
@@ -90,23 +91,23 @@ fi
 
 validate_bootstrap_model_preservation() {
     [[ "$BOOTSTRAP_KEEP_MODELS" == true ]] || return 0
+    command -v python3 >/dev/null 2>&1 || {
+        warn "Python 3 is required for safe same-filesystem model preservation."
+        return 1
+    }
     validate_force_reinstall_target "$INSTALL_DIR" || return 1
     [[ -n "${HOME:-}" && "$HOME" == /* ]] || return 1
     [[ ! -e "$HOME/.ods-models-backup" && ! -L "$HOME/.ods-models-backup" ]] || return 1
+    [[ ! -e "${INSTALL_DIR%/}.models-backup" && ! -L "${INSTALL_DIR%/}.models-backup" ]] || return 1
     [[ ! -L "$INSTALL_DIR/data" && ! -L "$INSTALL_DIR/data/models" ]] || return 1
     [[ ! -e "$INSTALL_DIR/data/models" || -d "$INSTALL_DIR/data/models" ]]
 }
 
 restore_bootstrap_models() {
     [[ "$BOOTSTRAP_KEEP_MODELS" == true ]] || return 0
-    local backup="$HOME/.ods-models-backup"
-    [[ -e "$backup" || -L "$backup" ]] || return 0
-    [[ -d "$backup" && ! -L "$backup" && ! -L "$INSTALL_DIR/data" ]] || return 1
-    [[ ! -e "$INSTALL_DIR/data/models" && ! -L "$INSTALL_DIR/data/models" ]] || return 1
-    mkdir -p "$INSTALL_DIR/data" || return 1
-    # Both Linux/WSL and native macOS use data/models. Keep the backup outside
-    # TEMP_DIR so source-copy/restore failures cannot delete retained models.
-    mv "$backup" "$INSTALL_DIR/data/models" || return 1
+    # Run the exact candidate helper used to preserve the directory. Older
+    # candidates cannot silently fall back to copying a large cache into HOME.
+    python3 "$BOOTSTRAP_MODEL_HELPER" restore "$INSTALL_DIR" || return 1
     success "Restored retained model cache; normal installer validation still applies"
 }
 
@@ -358,7 +359,7 @@ OS=$(detect_os)
 log "Detected OS: $OS"
 
 if ! validate_bootstrap_model_preservation; then
-    error "Cannot preserve models: --keep-models requires a recognized existing install, a real data/models directory, and no existing ~/.ods-models-backup. Resolve any backup or symlink conflict before retrying."
+    error "Cannot preserve models: --keep-models requires a recognized existing install, a real data/models directory, and no existing adjacent or legacy model backup. Resolve any backup or symlink conflict before retrying."
 fi
 
 case "$OS" in
@@ -574,6 +575,13 @@ if [[ "$BOOTSTRAP_REINSTALL" == "true" ]]; then
     candidate_uninstaller="$TEMP_DIR/repo/ods/ods-uninstall.sh"
     [[ -f "$candidate_uninstaller" && ! -L "$candidate_uninstaller" ]] \
         || error "Requested ODS source does not contain a safe candidate uninstaller. Existing installation was not replaced."
+    if [[ "$BOOTSTRAP_KEEP_MODELS" == true ]]; then
+        BOOTSTRAP_MODEL_HELPER="$TEMP_DIR/repo/ods/lib/model-cache-custody.py"
+        [[ -f "$BOOTSTRAP_MODEL_HELPER" && ! -L "$BOOTSTRAP_MODEL_HELPER" ]] \
+            || error "Requested candidate predates same-filesystem model preservation; use a newer candidate or recover models explicitly. Existing installation was not replaced."
+        python3 "$BOOTSTRAP_MODEL_HELPER" preflight "$INSTALL_DIR" \
+            || error "Model preservation preflight failed. Existing installation was not replaced."
+    fi
     log "Removing the existing installation with the requested candidate uninstaller..."
     candidate_uninstall_args=(--install-dir "$INSTALL_DIR" --force)
     if [[ "$BOOTSTRAP_KEEP_MODELS" == true ]]; then
@@ -624,7 +632,7 @@ else
 fi
 
 if ! restore_bootstrap_models; then
-    error "Could not restore retained models. Any remaining cache is at $HOME/.ods-models-backup; it was not deliberately purged. Resolve the restore conflict before retrying."
+    error "Could not restore retained models. Any remaining cache is at ${INSTALL_DIR%/}.models-backup (or a legacy $HOME/.ods-models-backup); it was not deliberately purged. Resolve the restore conflict before retrying."
 fi
 
 # Pixel refuses group- or world-writable catalog inputs. Git and rsync preserve

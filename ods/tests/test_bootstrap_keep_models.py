@@ -1,5 +1,9 @@
 """Exercise the real bootstrap against an isolated local candidate repository."""
 import json
+import errno
+import importlib.util
+import shutil
+from unittest import mock
 import os
 from pathlib import Path
 import re
@@ -10,6 +14,10 @@ import unittest
 ROOT = Path(__file__).resolve().parents[1]
 BOOTSTRAP = ROOT / 'get-ods.sh'
 UNINSTALL = (ROOT / 'ods-uninstall.sh').read_text()
+HELPER = ROOT / 'lib/model-cache-custody.py'
+spec = importlib.util.spec_from_file_location('model_cache_custody', HELPER)
+custody = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(custody)
 
 def function(source, name):
     return re.search(r'^' + name + r'\(\) \{\n.*?^}', source, re.M | re.S).group()
@@ -33,6 +41,8 @@ class KeepModelsTests(unittest.TestCase):
         self.repo = self.root / 'repo'
         ods = self.repo / 'ods'
         ods.mkdir(parents=True)
+        (ods / 'lib').mkdir()
+        shutil.copyfile(HELPER, ods / 'lib/model-cache-custody.py')
         installer = '''#!/bin/bash
 set -euo pipefail
 python3 - "$@" <<'PY'
@@ -45,12 +55,13 @@ PY
         (ods / 'candidate-only').write_text('fresh source')
         uninstaller = '''#!/bin/bash
 set -euo pipefail
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 printf '%s\\n' "$@" > "$UNINSTALL_ARGS"
 keep=false
 while [[ $# -gt 0 ]]; do
  case "$1" in --install-dir) INSTALL_DIR=$2; shift 2;; --keep-models) keep=true; shift;; --force|--non-interactive) shift;; *) exit 66;; esac
 done
-[[ "$INSTALL_DIR" == "$HOME/ods" && -f "$INSTALL_DIR/old-runtime" ]] || exit 67
+[[ "$INSTALL_DIR" == "$ODS_INSTALL_DIR" && -f "$INSTALL_DIR/old-runtime" ]] || exit 67
 log_info() { :; }
 ''' + function(UNINSTALL, 'preserve_model_cache') + '''
 if $keep; then preserve_model_cache || exit 68; fi
@@ -91,6 +102,7 @@ rm -rf "$INSTALL_DIR"
         self.assertEqual(value['candidate'], 'fresh source')
         self.assertEqual(self.args.read_text().splitlines().count('--keep-models'), 1)
         self.assertFalse((self.home / '.ods-models-backup').exists())
+        self.assertFalse(Path(str(self.install) + '.models-backup').exists())
 
     def test_keep_models_is_consumed_and_restores_only_cache_on_linux(self):
         self.assert_cache_restored(False)
@@ -147,47 +159,116 @@ rm -rf "$INSTALL_DIR"
         self.assertFalse(self.args.exists())
         self.assertFalse(self.result.exists())
 
-    def test_failed_move_stops_production_deletion_and_retains_model_bytes(self):
-        guard = re.search(r'if \$KEEP_MODELS && ! preserve_model_cache; then\n.*?\nfi', UNINSTALL, re.S).group()
-        shell = 'set -eu\nKEEP_MODELS=true\nlog_info() { :; }\nlog_error() { :; }\nmv() { return 23; }\n'
-        shell += function(UNINSTALL, 'preserve_model_cache') + '\n' + guard + '\nrm -rf "$INSTALL_DIR"\n'
-        result = subprocess.run(['bash', '-c', shell], env=dict(self.env, INSTALL_DIR=str(self.install)), capture_output=True, text=True)
-        self.assertNotEqual(result.returncode, 0)
-        self.assertEqual((self.install / 'data/models/llm/model.gguf').read_bytes(), b'GGUF\x00fixture-exact-bytes\n')
-        self.assertTrue((self.install / 'old-runtime').exists())
-        self.assertTrue((self.home / '.ods-models-backup').is_dir())
+    def helper_env(self):
+        return mock.patch.dict(os.environ, {'HOME': str(self.home)})
 
-    def test_partial_move_failure_retains_every_file_and_original_install(self):
+    def test_failed_preservation_stops_production_deletion(self):
         guard = re.search(r'if \$KEEP_MODELS && ! preserve_model_cache; then\n.*?\nfi', UNINSTALL, re.S).group()
-        shell = 'set -eu\nKEEP_MODELS=true\nlog_info() { :; }\nlog_error() { :; }\nmv() { if [[ "$1" == */.cache-state ]]; then return 23; fi; command mv "$@"; }\n'
+        shell = 'set -eu\nKEEP_MODELS=true\nlog_info() { :; }\nlog_error() { :; }\npython3() { return 23; }\n'
         shell += function(UNINSTALL, 'preserve_model_cache') + '\n' + guard + '\nrm -rf "$INSTALL_DIR"\n'
-        result = subprocess.run(['bash', '-c', shell], env=dict(self.env, INSTALL_DIR=str(self.install)), capture_output=True, text=True)
+        result = subprocess.run(['bash', '-c', shell], env=dict(self.env, INSTALL_DIR=str(self.install), SCRIPT_DIR=str(ROOT)), capture_output=True, text=True)
         self.assertNotEqual(result.returncode, 0)
-        self.assertEqual((self.home / '.ods-models-backup/llm/model.gguf').read_bytes(), b'GGUF\x00fixture-exact-bytes\n')
-        self.assertEqual((self.install / 'data/models/.cache-state').read_bytes(), b'hidden-cache\n')
         self.assertTrue((self.install / 'old-runtime').exists())
-
-    def test_restore_conflict_leaves_backup_available(self):
-        source = BOOTSTRAP.read_text()
-        restore = function(source, 'restore_bootstrap_models')
-        backup = self.home / '.ods-models-backup'
-        backup.mkdir()
-        (backup / 'model.gguf').write_bytes(b'retained')
-        shell = 'set -eu\nBOOTSTRAP_KEEP_MODELS=true\nsuccess() { :; }\n' + restore + '\nrestore_bootstrap_models\n'
-        result = subprocess.run(['bash', '-c', shell], env=dict(self.env, INSTALL_DIR=str(self.install)), capture_output=True, text=True)
-        self.assertNotEqual(result.returncode, 0)
-        self.assertEqual((backup / 'model.gguf').read_bytes(), b'retained')
         self.assertTrue((self.install / 'data/models/llm/model.gguf').exists())
 
-    def test_failed_restore_move_retains_backup(self):
-        restore = function(BOOTSTRAP.read_text(), 'restore_bootstrap_models')
-        backup = self.home / '.ods-models-backup'
-        (self.install / 'data/models').rename(backup)
-        shell = 'set -eu\nBOOTSTRAP_KEEP_MODELS=true\nsuccess() { :; }\nmv() { return 23; }\n' + restore + '\nrestore_bootstrap_models\n'
-        result = subprocess.run(['bash', '-c', shell], env=dict(self.env, INSTALL_DIR=str(self.install)), capture_output=True, text=True)
-        self.assertNotEqual(result.returncode, 0)
-        self.assertEqual((backup / 'llm/model.gguf').read_bytes(), b'GGUF\x00fixture-exact-bytes\n')
+    def test_cache_rename_preserves_inode_hidden_files_and_receipt(self):
+        source = self.install / 'data/models'
+        before = source.stat()
+        with self.helper_env():
+            custody.preserve(self.install)
+            backup = Path(str(self.install) + '.models-backup')
+            self.assertEqual((backup / 'models').stat().st_ino, before.st_ino)
+            self.assertEqual((backup / 'models').stat().st_dev, before.st_dev)
+            self.assertFalse(source.exists())
+            custody.restore(self.install)
+        self.assertEqual(source.stat().st_ino, before.st_ino)
+        self.assertEqual((source / '.cache-state').read_bytes(), b'hidden-cache\n')
+        self.assertFalse(backup.exists())
+
+    def test_cross_device_rename_never_copies_or_deletes_source(self):
+        source = self.install / 'data/models'
+        with self.helper_env(), mock.patch.object(custody.os, 'rename', side_effect=OSError(errno.EXDEV, 'cross-device')):
+            with self.assertRaises(OSError):
+                custody.preserve(self.install)
+        self.assertEqual((source / 'llm/model.gguf').read_bytes(), b'GGUF\x00fixture-exact-bytes\n')
+        self.assertTrue((self.install / 'old-runtime').exists())
+        self.assertFalse((Path(str(self.install) + '.models-backup') / 'models').exists())
+
+    def test_separate_model_mount_rejected_before_backup_creation(self):
+        source = self.install / 'data/models'
+        original = custody.directory
+        def separate_device(path):
+            result = original(path)
+            if path == source:
+                fields = list(result)
+                fields[2] += 1
+                return os.stat_result(fields)
+            return result
+        with self.helper_env(), mock.patch.object(custody, 'directory', side_effect=separate_device):
+            with self.assertRaisesRegex(ValueError, 'separate mount'):
+                custody.preflight(self.install)
+        self.assertFalse(Path(str(self.install) + '.models-backup').exists())
+
+    def test_install_on_different_filesystem_from_home_retains_inode(self):
+        if not Path('/dev/shm').is_dir() or Path('/dev/shm').stat().st_dev == self.home.stat().st_dev:
+            self.skipTest('needs separate writable /dev/shm filesystem')
+        with tempfile.TemporaryDirectory(dir='/dev/shm') as other:
+            moved = Path(other) / 'ods'
+            shutil.move(str(self.install), moved)
+            self.install = moved
+            self.env['ODS_INSTALL_DIR'] = str(moved)
+            identity = (moved / 'data/models').stat().st_ino
+            self.assert_cache_restored(False)
+            self.assertEqual((moved / 'data/models').stat().st_ino, identity)
+
+    def test_restore_conflict_or_changed_custody_keeps_backup(self):
+        with self.helper_env():
+            custody.preserve(self.install)
+            backup = Path(str(self.install) + '.models-backup')
+            (self.install / 'data/models').mkdir()
+            with self.assertRaisesRegex(ValueError, 'destination already exists'):
+                custody.restore(self.install)
+            (self.install / 'data/models').rmdir()
+            marker = backup / 'custody.json'
+            receipt = json.loads(marker.read_text())
+            receipt['installRoot'] = str(self.root / 'unrelated')
+            marker.write_text(json.dumps(receipt))
+            with self.assertRaisesRegex(ValueError, 'custody changed'):
+                custody.restore(self.install)
+            self.assertTrue((backup / 'models/llm/model.gguf').is_file())
+
+    def test_failed_restore_rename_keeps_backup(self):
+        with self.helper_env():
+            custody.preserve(self.install)
+            with mock.patch.object(custody.os, 'rename', side_effect=OSError(errno.EXDEV, 'cross-device')):
+                with self.assertRaises(OSError):
+                    custody.restore(self.install)
+        self.assertTrue((Path(str(self.install) + '.models-backup') / 'models/llm/model.gguf').is_file())
         self.assertFalse((self.install / 'data/models').exists())
+
+    def test_adjacent_existing_or_symlink_backup_is_never_overwritten(self):
+        backup = Path(str(self.install) + '.models-backup')
+        for symlink in [False, True]:
+            if symlink:
+                backup.rmdir()
+                backup.symlink_to(self.root / 'missing', target_is_directory=True)
+            else:
+                backup.mkdir()
+            result = self.bootstrap('--force', '--keep-models')
+            self.assertNotEqual(result.returncode, 0)
+            self.assertFalse(self.args.exists())
+            self.assertTrue((self.install / 'old-runtime').exists())
+
+    def test_older_candidate_without_custody_helper_fails_before_uninstall(self):
+        (self.repo / 'ods/lib/model-cache-custody.py').unlink()
+        subprocess.run(['git', '-C', str(self.repo), 'add', '-u'], check=True)
+        subprocess.run(['git', '-C', str(self.repo), '-c', 'user.name=Fixture', '-c', 'user.email=fixture@example.invalid', 'commit', '-qm', 'older candidate'], check=True)
+        self.env['ODS_REF'] = subprocess.check_output(['git', '-C', str(self.repo), 'rev-parse', 'HEAD'], text=True).strip()
+        result = self.bootstrap('--force', '--keep-models')
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn('predates same-filesystem', result.stdout + result.stderr)
+        self.assertFalse(self.args.exists())
+        self.assertTrue((self.install / 'data/models/llm/model.gguf').exists())
 
 if __name__ == '__main__':
     unittest.main()
