@@ -125,3 +125,84 @@ def test_curated_companion_ports_do_not_collide_with_catalog_or_other_recipes():
 ])
 def test_published_port_defaults_cover_companions_and_compose_forms(spec, expected):
     assert _published_defaults(spec) == expected
+
+
+# Name every image at a registry that serves it. Vanity hosts that proxy Docker
+# Hub (their /v2/ challenge names realm="https://auth.docker.io/token") pull
+# from one shared egress address, so all anonymous users of that host share a
+# single Docker Hub pull budget, and docker.io mirrors or `docker login` do not
+# apply. On 2026-09-25 docker.swagger.io and cr.weaviate.io both answered 429
+# (ratelimit-source 54.184.99.3, remaining 0) while docker.io served the same
+# digests, failing the swagger-ui thin build. lscr.io fronts ghcr.io, not Hub.
+IMAGE_REGISTRIES = {"docker.io", "ghcr.io", "quay.io", "mcr.microsoft.com", "lscr.io"}
+FROM_RE = re.compile(r"(?im)^\s*FROM\s+(?:--platform=\S+\s+)?(\S+)(?:\s+AS\s+(\S+))?")
+ARG_IMAGE_RE = re.compile(r"(?im)^\s*ARG\s+\w*IMAGE\w*=(\S+)")
+
+
+def _registry(reference):
+    """Registry host of an image reference, following Docker's reference grammar."""
+    first, _, rest = reference.partition("/")
+    if rest and ("." in first or ":" in first or first == "localhost"):
+        return first.lower()
+    return "docker.io"
+
+
+def _image_references():
+    roots = (LIBRARY, ODS / "extensions/services")
+    for root in roots:
+        for path in sorted(root.rglob("Dockerfile*")):
+            text = path.read_text(encoding="utf-8")
+            stages = {alias.lower() for _, alias in FROM_RE.findall(text) if alias}
+            for base, _ in FROM_RE.findall(text):
+                if not base.startswith("$") and base != "scratch" and base.lower() not in stages:
+                    yield path, base
+            for default in ARG_IMAGE_RE.findall(text):
+                yield path, default
+    composes = [*ODS.glob("docker-compose*.yml"),
+                *(path for root in roots for path in root.rglob("compose*.y*ml"))]
+    for path in sorted(composes):
+        services = (yaml.safe_load(path.read_text(encoding="utf-8")) or {}).get("services") or {}
+        for service in services.values():
+            image = re.sub(r"^\$\{\w+:-(.*)\}$", r"\1", str((service or {}).get("image") or ""))
+            if image and not image.startswith("$"):
+                yield path, image
+    for recipe in RECIPES:
+        upstream = json.loads((recipe / "upstream.json").read_text(encoding="utf-8"))
+        for key in ("image", "build_image", "runtime_image", "companion_images"):
+            values = upstream.get(key) or []
+            for value in [values] if isinstance(values, str) else values:
+                yield recipe / "upstream.json", value
+
+
+@pytest.mark.parametrize("reference,registry", [
+    ("nginx:1.28-alpine@sha256:" + "a" * 64, "docker.io"),
+    ("swaggerapi/swagger-ui:v5.33.0", "docker.io"),
+    ("docker.swagger.io/swaggerapi/swagger-ui:v5.33.0", "docker.swagger.io"),
+    ("localhost:5000/demo", "localhost:5000"),
+    ("ods/swagger-ui:5.33.0-local-v1", "docker.io"),
+])
+def test_registry_follows_docker_reference_grammar(reference, registry):
+    assert _registry(reference) == registry
+
+
+def test_images_name_a_registry_that_serves_them():
+    references = list(_image_references())
+    assert len(references) > 200, "Image reference discovery unexpectedly found little"
+    offenders = sorted(f"{path.relative_to(ODS)}: {reference}" for path, reference in references
+                       if _registry(reference) not in IMAGE_REGISTRIES)
+    assert not offenders, ("Name the registry of record (for Docker Hub images, docker.io/...), "
+                           "not a vanity proxy host; see IMAGE_REGISTRIES:\n" + "\n".join(offenders))
+
+
+def test_thin_build_base_is_the_reviewed_upstream_image():
+    """A single-stage recipe build must start from exactly the image upstream.json records."""
+    checked = 0
+    for recipe in RECIPES:
+        upstream = json.loads((recipe / "upstream.json").read_text(encoding="utf-8"))
+        reviewed = {upstream.get(key) for key in ("image", "build_image", "runtime_image")}
+        for dockerfile in sorted(recipe.glob("Dockerfile*")):
+            bases = [base for base, _ in FROM_RE.findall(dockerfile.read_text(encoding="utf-8"))]
+            if len(bases) == 1:
+                assert bases[0] in reviewed, f"{dockerfile.relative_to(ODS)}: FROM {bases[0]}"
+                checked += 1
+    assert checked >= 70, "Thin-build discovery unexpectedly found little"

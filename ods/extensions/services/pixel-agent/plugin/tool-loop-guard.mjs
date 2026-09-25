@@ -17,11 +17,16 @@ import { isIP } from "node:net";
 import { isDeepStrictEqual } from "node:util";
 import { pythonSyntaxGuidance, escapedLineBreakDiagnosis } from './python-syntax-guidance.mjs';
 import { captureNativeWebSearchResult, projectNativeWebSearchResult, projectWebResult,
-  successfulTruncatedFetch, projectNativeFetchGuidance, TRUNCATED_FETCH_EXTRACTION_GUIDANCE } from "./web-result-projection.mjs";
+  successfulTruncatedFetch, projectNativeFetchGuidance, TRUNCATED_FETCH_EXTRACTION_GUIDANCE,
+  SEARCH_SOURCE_EVIDENCE_GUIDANCE, OMITTED_SEARCH_SNIPPETS_GUIDANCE } from "./web-result-projection.mjs";
+import { SEARCH_PACING_STREAK, SEARCH_PACING_REASON, searchTerms, nearDuplicateSearch, searchLeadUrls,
+  duplicateSearchReason, ownerResearchDate, staleSearchDate, staleSearchDateGuidance } from "./research-pacing.mjs";
 import { createCompletionAssurance } from "./completion-assurance.mjs";
 import { createExtensionCompletionGate } from "./extension-completion-gate.mjs";
 import { parseQuestions, questionsText, requestsChoiceQuestion, choiceQuestionFromText } from "./ask-user.mjs";
 import { createRunProgressBudget, failedToolOutcome, isLiteralEcho, progressLaneStopReason, RUN_PROGRESS_STOP_REASON } from "./run-progress-budget.mjs";
+import { composeProgressFinalization, createProgressFinalization, PROGRESS_FINALIZATION_INSTRUCTION } from "./progress-finalization.mjs";
+import { OWNER_VISIBLE_REPLY_INSTRUCTION, OWNER_VISIBLE_REPLY_REASON, ownerInteractiveTurn, silentReplyText } from "./owner-visible-reply.mjs";
 import { canonicalWorkspaceParams, extensionlessHtmlWrite, workspaceFileParent, nativeExecWorkdir, sandboxHostWorkspaceFailure, malformedRelativeWorkspacePath } from "./workspace-path-contract.mjs";
 import { routePlaygroundTool, requestsNewPlaygroundProject } from "./playground-projects.mjs";
 import { workspaceMutationFiles } from "./workspace-projects.mjs";
@@ -30,6 +35,7 @@ import { PREVIEW_INSPECTION_TOOL, requestsVisibilityInteraction, requestsBehavio
   boundInspectionPageErrors, pageErrorRepairInstruction, visibilityInspectionMatches, visibilityInspectionInstruction } from './preview-interaction-assurance.mjs';
 import { workspaceRevalidationCandidate, completedPreviewInspection, boundedPreviewVerification } from "./preview-revalidation.mjs";
 import { boundedPreviewDelivery } from './preview-delivery-recovery.mjs';
+import { extractRequestedLiterals, requestedTextCheck, requestedTextInstruction, requestedTextDeliveryNote } from './requested-literals.mjs';
 
 export const DEFAULT_WEB_TOOL_LIMITS = Object.freeze({
   search: 8,
@@ -48,6 +54,15 @@ const COACHING_REPEAT_INTERVAL = 8;
 const MAX_COMPARE_SWAP_REPAIR_CHARS = 32_768;
 const MAX_COMPARE_SWAP_REPAIRS_PER_PATH = 3;
 const MAX_TRACKED_WORKSPACE_FILE_BYTES = 4 * 1024 * 1024;
+// Derived-write detection bounds. Below the minimum, re-typing costs less
+// than a corrective round trip; larger sources are never read; only the most
+// recent files this run wrote, edited or read are compared.
+const MIN_DERIVED_CONTENT_BYTES = 256;
+const MAX_DERIVED_SOURCE_BYTES = 256 * 1024;
+const MAX_DERIVED_WRITE_BYTES = 1024 * 1024;
+const MAX_DERIVED_SOURCE_CANDIDATES = 64;
+const MAX_DERIVED_JSON_STRINGS = 256;
+const MAX_DERIVED_JSON_DEPTH = 4;
 // Read-only capabilities allowed before an ODS-owned continuation of an
 // unfinished extension decision. A prepare call requires its separate,
 // validated no-work rejection; no generic exec or workspace mutation qualifies.
@@ -169,6 +184,13 @@ export const PHANTOM_PROCESS_REASON =
 // Per run and per kind of corrective answer (see recordFreeCorrection): how
 // many answers are recorded without consuming the failure budget.
 export const FREE_CORRECTIONS_PER_KIND = 2;
+
+// Refusals for a write that re-types existing workspace files (see
+// derivedWriteMatch). Fixed text; only the appended matched paths vary.
+export const DERIVED_COPY_WRITE_REASON =
+  "Not written: this content re-types an existing workspace file. Copy existing files with one short exec command instead of re-typing them, for example cp SOURCE DESTINATION; it is byte-exact and much faster.";
+export const DERIVED_MAP_WRITE_REASON =
+  "Not written: string values in this JSON re-type existing workspace files. Generate a JSON map of file contents with one short exec command that reads the real files instead of re-typing them, for example python3 -c \"import json; json.dump({n: open(n, 'rb').read().decode('utf-8') for n in ['a.py', 'b.py']}, open('sources.json', 'w', encoding='utf-8'), ensure_ascii=False, indent=2)\" with workdir set to their directory; it is byte-exact and much faster.";
 
 export const VERIFICATION_PENDING_DELIVERY_PREFIX =
   "Pixel stopped before the verification process reached a terminal result, so success is unverified. The workspace is preserved; ask Pixel to continue the run or inspect the process.";
@@ -630,6 +652,130 @@ function normalizeWorkspaceFilePath(value) {
     value = value.slice("workspace/".length);
   }
   return value.replace(/^(?:\.\/)+/, "");
+}
+
+// A normalized workspace-relative file path, or undefined for absolute,
+// traversing, empty-component or otherwise unusual spellings.
+function derivedWorkspacePath(value) {
+  if (typeof value !== "string" || !value || value.length > 1024 ||
+      value.startsWith("/") || /[\\\0]/.test(value)) return undefined;
+  return value.split("/").every((part) => part && part !== "." && part !== "..")
+    ? value : undefined;
+}
+
+// The exact bytes of one regular workspace file, or undefined. Links are
+// never followed below the configured root: every directory component and
+// the file itself must be lstat-real, the file is opened with O_NOFOLLOW and
+// must still be the same single-link inode of the expected size. Anything
+// missing, linked, special, hard-linked, oversized or changing is skipped.
+function readDerivedSource(base, relative, size) {
+  if (!Number.isSafeInteger(size) || size < 0 || size > MAX_DERIVED_SOURCE_BYTES) return undefined;
+  let fd;
+  try {
+    const parts = relative.split("/");
+    let cursor = base;
+    for (const part of parts.slice(0, -1)) {
+      cursor = path.join(cursor, part);
+      const entry = fs.lstatSync(cursor);
+      if (entry.isSymbolicLink() || !entry.isDirectory()) return undefined;
+    }
+    const file = path.join(cursor, parts.at(-1));
+    const before = fs.lstatSync(file);
+    if (before.isSymbolicLink() || !before.isFile() || before.nlink !== 1 || before.size !== size) return undefined;
+    fd = fs.openSync(file, fs.constants.O_RDONLY | (fs.constants.O_NOFOLLOW ?? 0));
+    const opened = fs.fstatSync(fd);
+    if (!opened.isFile() || opened.dev !== before.dev || opened.ino !== before.ino || opened.size !== size) return undefined;
+    const bytes = Buffer.alloc(size + 1);
+    let length = 0;
+    while (length < bytes.length) {
+      const count = fs.readSync(fd, bytes, length, bytes.length - length, length);
+      if (count === 0) break;
+      length += count;
+    }
+    return length === size ? bytes.subarray(0, size) : undefined;
+  } catch {
+    return undefined;
+  } finally {
+    if (fd !== undefined) try { fs.closeSync(fd); } catch {}
+  }
+}
+
+// Does a write re-type existing workspace files? `copy`: the whole content
+// is one candidate file. `map`: the content is JSON (object or array) and at
+// least one string value is a whole candidate file, as in a sources.json that
+// maps filenames to their source text. Each comparison is byte-exact against
+// the file on disk now, never against remembered or read-result text, with
+// one tolerated difference: the file's single final newline, which re-typing
+// drops (tower1 round 058 dropped it from every sources.json value). No other
+// difference matches. Candidates are workspace-relative paths observed in
+// this run; the write target itself is never a candidate. A cheap lstat size
+// prefilter precedes any read, so the check can run on every write.
+export function derivedWriteMatch(root, writePath, content, candidates) {
+  if (typeof root !== "string" || !path.isAbsolute(root) || typeof content !== "string" ||
+      !Array.isArray(candidates) || candidates.length === 0) return undefined;
+  const size = Buffer.byteLength(content, "utf8");
+  if (size < MIN_DERIVED_CONTENT_BYTES || size > MAX_DERIVED_WRITE_BYTES) return undefined;
+  // Keyed by the size of the file each target can match.
+  const targets = new Map();
+  const addTarget = (kind, text) => {
+    const bytes = Buffer.from(text, "utf8");
+    if (bytes.length < MIN_DERIVED_CONTENT_BYTES || bytes.length > MAX_DERIVED_SOURCE_BYTES) return;
+    for (const [fileSize, withoutFinalNewline] of [[bytes.length, false], [bytes.length + 1, true]]) {
+      const sameSize = targets.get(fileSize) ?? [];
+      sameSize.push({kind, bytes, withoutFinalNewline});
+      targets.set(fileSize, sameSize);
+    }
+  };
+  addTarget("copy", content);
+  if (/^\s*[[{]/.test(content)) {
+    let parsed;
+    try { parsed = JSON.parse(content); } catch {}
+    let strings = 0;
+    const visit = (value, depth) => {
+      if (strings >= MAX_DERIVED_JSON_STRINGS || depth > MAX_DERIVED_JSON_DEPTH) return;
+      if (typeof value === "string") {
+        strings += 1;
+        addTarget("map", value);
+      } else if (value && typeof value === "object") {
+        for (const item of Array.isArray(value) ? value : Object.values(value)) visit(item, depth + 1);
+      }
+    };
+    if (parsed && typeof parsed === "object") visit(parsed, 0);
+  }
+  if (targets.size === 0) return undefined;
+  let base;
+  try {
+    // The configured root itself may be a platform alias (macOS /var); no
+    // link below it is followed.
+    base = fs.realpathSync(root);
+    if (!fs.statSync(base).isDirectory()) return undefined;
+  } catch {
+    return undefined;
+  }
+  const copies = [];
+  const maps = [];
+  const seen = new Set();
+  for (const candidate of candidates.slice(-MAX_DERIVED_SOURCE_CANDIDATES)) {
+    const relative = derivedWorkspacePath(candidate);
+    if (!relative || relative === writePath || seen.has(relative)) continue;
+    seen.add(relative);
+    let info;
+    try { info = fs.lstatSync(path.join(base, ...relative.split("/"))); } catch { continue; }
+    if (!info.isFile() || !targets.has(info.size)) continue;
+    const bytes = readDerivedSource(base, relative, info.size);
+    if (!bytes) continue;
+    for (const target of targets.get(info.size)) {
+      const matched = target.withoutFinalNewline
+        ? bytes[bytes.length - 1] === 0x0a && target.bytes.equals(bytes.subarray(0, -1))
+        : target.bytes.equals(bytes);
+      if (!matched) continue;
+      const matches = target.kind === "copy" ? copies : maps;
+      if (!matches.includes(relative)) matches.push(relative);
+    }
+  }
+  if (copies.length > 0) return {kind: "copy", files: copies};
+  if (maps.length > 0) return {kind: "map", files: maps};
+  return undefined;
 }
 
 function stripTrailingToolEnvelopeLeak(value) {
@@ -6688,13 +6834,52 @@ export function createToolLoopGuard({
   // result, so a model that keeps repeating the call still reaches the
   // unchanged consecutive/total failure fuses. A nested Tool Search execution
   // is charged through its outer tool_call receipt, whose ID differs, so it
-  // never receives the allowance.
+  // never receives the allowance. Returns whether this answer was free.
   function recordFreeCorrection(state, kind, callId, toolName) {
-    if (!state || typeof callId !== "string" || !callId || callId.startsWith("tool_search_code:")) return;
+    if (!state || typeof callId !== "string" || !callId || callId.startsWith("tool_search_code:")) return false;
     const used = state.freeCorrections.get(kind) ?? 0;
-    if (used >= FREE_CORRECTIONS_PER_KIND) return;
+    if (used >= FREE_CORRECTIONS_PER_KIND) return false;
     state.freeCorrections.set(kind, used + 1);
     state.progressBudget.observeResult({callId, tool: toolName, failed: false, discovery: true});
+    return true;
+  }
+
+  // Refusal text for a write that re-types files this run wrote, edited or
+  // read (see derivedWriteMatch), or undefined to let the write proceed.
+  // The refusal is a steer toward cp or a json.dump command, not a failed
+  // action, so it is never charged. Each run
+  // gets at most FREE_CORRECTIONS_PER_KIND of them, and at most one per
+  // destination path; after that the write proceeds, because refusing a
+  // model that re-types anyway would only cost another full re-typing. It
+  // is skipped where exec cannot follow it: owner exec exclusions, scoped
+  // single-file repairs, visual continuations, a new static site before its
+  // entry file exists, ODS-written Operations evidence and read-only team
+  // roles. Nested Tool Search executions and unidentified calls get no
+  // allowance and are never refused here.
+  function derivedWriteRefusal(state, selectedToolName, params, callId, toolName) {
+    if (selectedToolName !== "write" || typeof params?.content !== "string" ||
+        typeof callId !== "string" || !callId || callId.startsWith("tool_search_code:") ||
+        (state.freeCorrections.get("derived-write") ?? 0) >= FREE_CORRECTIONS_PER_KIND) return undefined;
+    const writePath = derivedWorkspacePath(normalizeWorkspaceFilePath(params.path));
+    const restriction = state.workspacePreviewRestrictions;
+    if (!writePath || state.derivedWriteRefusedPaths.has(writePath) ||
+        restriction?.exec || restriction?.mutation || restriction?.existingFile ||
+        state.workspaceVisualContinuationRequested || state.operationsWorkspaceContinuationRequested ||
+        state.managedTeamReadOnly ||
+        (state.workspacePreviewMode === "new-static" &&
+          ![...state.successfulWritePaths].some((value) => typeof value === "string" && value.endsWith("/index.html")))) {
+      return undefined;
+    }
+    const candidates = [...new Set([
+      ...state.successfulWritePaths, ...state.successfulEditPaths, ...state.successfulReadPaths,
+    ])];
+    const match = derivedWriteMatch(state.configuredWorkspaceRoot, writePath, params.content, candidates);
+    if (!match || !recordFreeCorrection(state, "derived-write", callId, toolName)) return undefined;
+    state.derivedWriteRefusedPaths.add(writePath);
+    const files = match.files.slice(0, 3).map((file) => JSON.stringify(file)).join(", ");
+    return match.kind === "copy"
+      ? `${DERIVED_COPY_WRITE_REASON} Existing file: ${files}.`
+      : `${DERIVED_MAP_WRITE_REASON} Repeated files: ${files}.`;
   }
 
   function pruneRuns() {
@@ -6792,11 +6977,13 @@ export function createToolLoopGuard({
         extensionReadOnlyRecovery: {statusCalls:0, completedStatusCalls:0, otherToolSeen:false},
         extensionDecisionRecovery: {prepareCalls:0, unsafeToolSeen:false, gateRevisionRequested:false},
         progressBudget: createRunProgressBudget(),
+        progressFinalization: createProgressFinalization(),
         progressAbortAttempted: false,
         search: 0,
         fetch: 0,
         total: 0,
         webLoopAborted: false,
+        researchStopped: false,
         webTerminals: new Map(),
         codingExhausted: false,
         codingTerminalBlocks: 0,
@@ -6813,6 +7000,14 @@ export function createToolLoopGuard({
         privateNetworkPrompt: false,
         clientCancelled: false,
         fetchedUrls: new Map(),
+        // Research pacing (research-pacing.mjs). Run state, so it survives
+        // transcript compaction: bound search receipts with their result
+        // URLs, searches with leads since the last page read, and the
+        // owner-stated date used to flag stale dated queries.
+        searchLedger: [],
+        unreadSearchStreak: 0,
+        searchPacingPaused: false,
+        ownerResearchDate: undefined,
         githubCanonicalUrl: undefined,
         githubCanonicalSatisfied: false,
         odsRoutingInitialized: false,
@@ -6918,6 +7113,8 @@ export function createToolLoopGuard({
         backgroundExecStarted: false,
         // Budget-free corrective answers used so far, by kind.
         freeCorrections: new Map(),
+        // Destinations whose re-typed write was already refused once.
+        derivedWriteRefusedPaths: new Set(),
         execOriginalByWrapped: new Map(),
         verificationOriginalByWrapped: new Map(),
         currentSessionId: undefined,
@@ -6982,15 +7179,44 @@ export function createToolLoopGuard({
     }
   }
 
+  // After the budget stops a response, ordinary research, coding and visual
+  // work gets one tool-free answer turn (progress-finalization.mjs). Receipt-
+  // based work (Operations, exact downloads, managed extension requests, team
+  // coordination) keeps the strict stop text: a model summary must not stand
+  // in for those host receipts.
+  function progressFinalizationEligible(state) {
+    return !state.clientCancelled && !state.recursiveDeleteDenied &&
+      !state.unrequestedOperationsAborted && !state.webLoopAborted && !state.ownerQuestions &&
+      !state.operationsRequired && !state.exactDownloadRequested && !state.extensionCompletionGate?.active &&
+      !state.extensionPendingHandoff && !state.managedTeamCoordinator;
+  }
+
+  function progressFinalization(state) {
+    const finalization = state.progressFinalization;
+    if (state.progressBudget.exhausted) finalization.arm(progressFinalizationEligible(state));
+    return finalization;
+  }
+
+  // Session history can contain an unrelated publication. Preserve it for
+  // current preview work, but do not attach it to a later research failure.
+  function progressStopPreview(state) {
+    return state.workspacePreview ?? (state.workspacePreviewRequired &&
+      !state.workspacePreviewForbidden ? state.workspaceLastVerifiedPreview : undefined);
+  }
+
   function stopExhaustedRun(state, runId) {
     if (!state?.progressBudget.exhausted || state.progressAbortAttempted) return;
     const sessionId = state.currentSessionId;
     if (!sessionId || sessionRuns.get(sessionId) !== runId) return;
     try { execControl?.signal?.(runId); }
     catch (error) { warn(`Pixel progress-limit execution signal failed: ${String(error)}`); }
+    // Tools stay blocked while the single finalization answer turn is pending;
+    // its tool boundary or the next model end performs this abort instead.
+    if (progressFinalization(state).abortDeferred) return;
     // Do not clear the session or its history. Abort only its active harness
     // run; deliveryVerificationForRun retains the host-authoritative artifacts.
-    // Only called at model_call_ended. Aborting from model-start/stream
+    // Called at model_call_ended, or at a finalization-turn tool boundary after
+    // that provider stream completed. Aborting from model-start/stream
     // construction can strand the provider prompt and its session write lock.
     // Tool hooks enforce the terminal budget while this boundary is pending.
     let observed = false;
@@ -7050,6 +7276,17 @@ export function createToolLoopGuard({
       if (!workspaceRevalidationCandidate(selected?.name, selected?.params)) {
         state.previewRevalidationCandidate = undefined;
       }
+    }
+    // Every tool stays blocked after the budget stops the response. Until the
+    // model has seen the finalization instruction, the refusal carries it; a
+    // tool call during the answer turn forfeits that turn and ends the run at
+    // this boundary (the provider stream has already completed).
+    if (state?.progressBudget.exhausted && progressFinalization(state).phase !== 'unavailable') {
+      if (state.progressFinalization.toolBoundary(state.operationsPromptRound) === 'instruct') {
+        return {block:true, blockReason:PROGRESS_FINALIZATION_INSTRUCTION};
+      }
+      stopExhaustedRun(state, runId);
+      return {block:true, blockReason:RUN_PROGRESS_STOP_REASON};
     }
     const malformedPath = malformedRelativeWorkspacePath(toolName, normalizedParams ?? event?.params,
       state?.configuredWorkspaceRoot, state?.playgroundOwnerIntent);
@@ -8636,6 +8873,38 @@ export function createToolLoopGuard({
         : undefined;
     }
 
+    // Research pacing. Both refusals run nothing and are recorded as free
+    // corrections, so they consume neither the search allowance nor the
+    // failure budget. Beyond that bound the search proceeds unchanged: pacing
+    // never becomes a new way to fail a run. Direct and Tool Search forms
+    // share this point; an allowed outer call leaves its nested call allowed.
+    // The recall precedes the allowance check: after compaction a repeated
+    // search is how lost leads show up, including once searches are spent.
+    if (selectedToolName === "web_search" && state) {
+      const searchCallId = context?.toolCallId ?? event?.toolCallId;
+      const freeLeft = (kind) => (state.freeCorrections.get(kind) ?? 0) < FREE_CORRECTIONS_PER_KIND;
+      // Recalled or paused leads are useful only while a page can be read.
+      const readsLeft = Math.min(effective.fetch - state.fetch, effective.total - state.total) > 0;
+      const searchesLeft = Math.min(effective.search - state.search, effective.total - state.total) > 0;
+      const terms = searchTerms(selectedParams?.query);
+      const earlier = state.searchLedger.find((entry) => !entry.recalled &&
+        nearDuplicateSearch(terms, entry.terms));
+      if (earlier && readsLeft && freeLeft("search-duplicate")) {
+        // Recall once per earlier search. A deliberate repeat then proceeds.
+        earlier.recalled = true;
+        recordFreeCorrection(state, "search-duplicate", searchCallId, toolName);
+        return { block: true, blockReason: duplicateSearchReason(earlier.query, earlier.urls) };
+      }
+      if (state.unreadSearchStreak >= SEARCH_PACING_STREAK && !state.searchPacingPaused &&
+          readsLeft && searchesLeft && freeLeft("search-pacing")) {
+        // Pause once per streak; a model that finds no fitting lead may
+        // search again immediately.
+        state.searchPacingPaused = true;
+        recordFreeCorrection(state, "search-pacing", searchCallId, toolName);
+        return { block: true, blockReason: SEARCH_PACING_REASON };
+      }
+    }
+
     // Search and page-reading allowances are independent. Their denial and
     // retry state survive compaction; progress through another permitted tool
     // neither consumes that denial allowance nor resets it. Total exhaustion
@@ -8661,6 +8930,18 @@ export function createToolLoopGuard({
         terminal.blocks = 1;
         terminal.round = state.operationsPromptRound;
         return { block: true, blockReason: reason };
+      }
+      // The research loop stops this response exactly as the progress budget
+      // does: no further tool runs, and this refusal carries the one-time
+      // tool-free answer instruction instead of an immediate abort. A tool
+      // call in that answer turn, or an ineligible run, still aborts.
+      if (state.progressFinalization.phase === "idle" && progressFinalizationEligible(state)) {
+        state.researchStopped = true;
+        state.progressBudget.stop();
+        warn(`Pixel stopped a repeated web-tool loop for run ${runId}; one tool-free answer turn remains`);
+        if (progressFinalization(state).toolBoundary(state.operationsPromptRound) === "instruct") {
+          return { block: true, blockReason: PROGRESS_FINALIZATION_INSTRUCTION };
+        }
       }
       let aborted = false;
       try {
@@ -8795,6 +9076,19 @@ export function createToolLoopGuard({
       }
     }
 
+    // Derived writes. Fleet, coding journey: on the laptop (Qwen3.5-9B, round
+    // 057) the model re-typed three source files into public/sources.json
+    // through write (5,033 output tokens, 410 s at ~12 tok/s) and one
+    // hand-escaped value no longer matched its file; on tower1 (round 058)
+    // every re-typed value lost its final newline. Both failed exactness. When
+    // a write repeats files this run already wrote or read, whole or as JSON
+    // string values, refuse it once with the command that copies them exactly.
+    // Every refusal above keeps precedence; direct and Tool Search forms share
+    // this point, and the answer is a free correction (see derivedWriteRefusal).
+    const derivedReason = derivedWriteRefusal(state, selectedToolName, selectedParams,
+      context?.toolCallId ?? event?.toolCallId, toolName);
+    if (derivedReason) return { block: true, blockReason: derivedReason };
+
     if (!WEB_TOOLS.has(toolName)) {
       if (selectedToolName === "exec" && execControl) {
         const params = { ...selectedParams };
@@ -8849,6 +9143,11 @@ export function createToolLoopGuard({
     const kind = toolName === "web_search" ? "search" : "fetch";
     state[kind] += 1;
     state.total += 1;
+    if (kind === "fetch") {
+      // Any page-reading attempt ends the unread-search streak.
+      state.unreadSearchStreak = 0;
+      state.searchPacingPaused = false;
+    }
     if (toolName === "web_fetch") {
       const fetchUrl = canonicalFetchUrl(event);
       const requestedChars = event?.params?.maxChars;
@@ -8895,6 +9194,7 @@ export function createToolLoopGuard({
       if (ownerIntent) state.githubExtensionRequest = /^\s*(?:\/goal\s+)?\/extensions?\s+(?:(?:install|inspect|research)\s+)?https:\/\/github\.com\//i.test(ownerIntent);
       if (capabilities !== undefined) state.preparationExecutionHost = capabilities.executionHost;
       if (ownerIntent) state.playgroundOwnerIntent = ownerIntent;
+      if (ownerIntent) state.ownerResearchDate = ownerResearchDate(ownerIntent);
       if (ownerIntent) state.ownerQuestionIntent=requestsChoiceQuestion(ownerIntent);
       if (teamRole) {state.managedTeamWorker=true;state.managedTeamReadOnly=teamRole!=='Builder';state.managedTeamCoordinator=teamRole==='Coordinator';state.ownerQuestionIntent=teamQuestionIntent;}
       if (capabilities !== undefined) {
@@ -8967,6 +9267,8 @@ export function createToolLoopGuard({
           state.workspacePreviewRequired && (requestsVisibilityInteraction(ownerLaneText(ownerIntent)) ||
             (inheritedVisibility?.sessionId === sessionId && inheritedVisibility.sessionKey === state.currentSessionKey &&
               inheritedVisibility.ownerIntent === ownerIntent));
+        // Checked only against a successful publication; never gates publishing.
+        state.requestedLiterals = extractRequestedLiterals(ownerIntent);
         state.workspacePreviewMode = state.workspacePreviewRequired
           ? (trustedSessionPreview ? "continuation" : workspacePreviewMode(event?.messages, event?.prompt))
           : undefined;
@@ -9176,6 +9478,7 @@ export function createToolLoopGuard({
     }
     state.operationsPromptRound += 1;
     state.progressBudget.beginModelRound();
+    if (state.progressBudget.exhausted) progressFinalization(state).modelCallStarted();
   }
 
   function observeModelEnd(_event, context, agentId = "pixel") {
@@ -9715,6 +10018,10 @@ export function createToolLoopGuard({
         state.workspacePreviewDirectory = preview.relativeDirectory;
         state.workspacePreviewModelAuthored = workspacePreviewAuthorshipMatches(state, preview);
         state.workspacePreview = preview;
+        // Bound to this snapshot's bytes; checked before tracked content clears.
+        state.workspaceRequestedTextCheck = requestedTextCheck(state.requestedLiterals, preview, {
+          receipt: previewEvent.result?.details, trackedContent: state.successfulWriteContentByPath,
+          workspaceRoot: state.configuredWorkspaceRoot});
         state.previewRevalidationCandidate = Object.freeze({preview:Object.freeze({...preview}),
           sessionId:state.currentSessionId,sessionKey:state.currentSessionKey,workspaceRoot:state.configuredWorkspaceRoot});
         state.previewRevalidationCompletedGeneration = state.previewVerificationGeneration;
@@ -10452,6 +10759,8 @@ export function createToolLoopGuard({
     const prerequisite = visualContinuationPrerequisite(state);
     if (prerequisite) return prerequisite;
     if (state.workspacePreview) {
+      const requestedText = requestedTextInstruction(state.workspacePreview, state.workspaceRequestedTextCheck);
+      if (requestedText) return {stage: 'workspace-preview-requested-text', instruction: requestedText};
       if (workspacePreviewReadbackComplete(state)) {
         if (state.workspaceVisibilityInteractionRequired &&
             !workspaceVisibilityInspectionPassed(state) &&
@@ -10527,6 +10836,9 @@ export function createToolLoopGuard({
       state.progressBudget.observeResult({callId: toolCallId, tool: message.toolName,
         failed: true, lane:progressLane});
     }
+    // Transcript copy only: OpenClaw applies tool_result_persist to the saved
+    // session, not to the live context of this run. The finalization
+    // instruction therefore travels as a before_tool_call refusal.
     if (state?.progressBudget.exhausted) {
       return {message: {...message, content: [{type: 'text', text: RUN_PROGRESS_STOP_REASON}]}};
     }
@@ -10575,6 +10887,23 @@ export function createToolLoopGuard({
                 : 'Do not call web_search again in this response; its allowance is exhausted. Do not invent source URLs.')
             : 'Finish with collected evidence or otherwise-authorized tools; do not claim unread sources were verified.');
       })() : undefined;
+    // Research pacing ledger: only a bound, successful search receipt is
+    // recorded. It keeps result URLs (never titles or excerpts) so a repeated
+    // search after compaction can be answered from this run's own evidence.
+    let staleDateGuidance;
+    if (researchBudgetGuidance) {
+      const receipt = compactNativeWebResult ? pending.capturedNativeWebSearchResult
+        : pending.capturedToolSearchEnvelope?.result;
+      const query = pending.selectedParams?.query;
+      const urls = searchLeadUrls(receipt?.details?.results);
+      if (typeof query === 'string' && query.trim()) {
+        state.searchLedger.push({query, terms: searchTerms(query), urls, recalled: false});
+        if (state.searchLedger.length > 32) state.searchLedger.shift();
+      }
+      if (urls.length > 0) state.unreadSearchStreak += 1;
+      const named = staleSearchDate(query, state.ownerResearchDate);
+      if (named) staleDateGuidance = staleSearchDateGuidance(named, state.ownerResearchDate);
+    }
     const nativeFailure = pending?.nativeUnittestFailure;
     const compactNativeVerification = nativeFailure && pending.transport === "exec" &&
       message.role === "toolResult" && message.toolName === "exec" &&
@@ -10710,6 +11039,9 @@ export function createToolLoopGuard({
       ) {
         return undefined;
       }
+      // A requested-text miss needs a republish, so it precedes inspection.
+      const requestedText = requestedTextInstruction(state.workspacePreview, state.workspaceRequestedTextCheck);
+      if (requestedText) return `[ODS Pixel next step] ${requestedText}`;
       if (workspacePreviewReadbackComplete(state)) {
         if (state.workspaceVisibilityInteractionRequired &&
             !workspaceVisibilityInspectionPassed(state)) {
@@ -10799,6 +11131,16 @@ export function createToolLoopGuard({
       state.coachingDelivered.set(slot, {text, at: state.persistedResultCount});
       return true;
     };
+    // The fixed evidence and projection notes are identical on every search
+    // result. Keep them on the first and then per the coaching interval; the
+    // per-call budget line below still accompanies every search result.
+    if (researchBudgetGuidance) {
+      for (const [slot, text] of [['search-evidence', SEARCH_SOURCE_EVIDENCE_GUIDANCE],
+        ['search-omitted', OMITTED_SEARCH_SNIPPETS_GUIDANCE]]) {
+        const index = content.findIndex(block => block?.type === 'text' && block.text === text);
+        if (index >= 0 && !coachingDue(slot, text)) content.splice(index, 1);
+      }
+    }
     if (executionGuidance && !pending.pythonSyntaxGuidance && !content.some(block =>
         block?.type === 'text' && /\[ODS Pixel execution\]/.test(block.text)))
       content.push({type:'text',text:executionGuidance});
@@ -10807,6 +11149,7 @@ export function createToolLoopGuard({
     }
     if (sandboxPathCorrection) content.push({type:'text',text:sandboxPathCorrection});
     if (researchBudgetGuidance) content.push({type:'text',text:researchBudgetGuidance});
+    if (staleDateGuidance) content.push({type:'text',text:staleDateGuidance});
     if (pending?.pythonSyntaxGuidance && executionGuidance && !content.some(block => block?.type === 'text' &&
         /\[ODS Pixel (?:repair|Python syntax|execution)\]/.test(block.text)))
       content.push({type:'text',text:executionGuidance});
@@ -10925,7 +11268,24 @@ export function createToolLoopGuard({
       state.ownerQuestions=choiceQuestionFromText(event?.lastAssistantMessage);
     }
     if (state?.ownerQuestions) return {action:'finalize', reason:'Waiting for the owner clarification answer.'};
+    if (state?.progressBudget.exhausted && !state.clientCancelled && !state.recursiveDeleteDenied && !state.webLoopAborted) {
+      // The answer turn's final text is captured once and never revised here:
+      // no further model pass is requested after the budget stopped the run.
+      const preview = progressStopPreview(state);
+      progressFinalization(state).accept(event?.lastAssistantMessage, {
+        localUrlsForbidden: Boolean(state.workspacePreviewRequired || state.workspacePreviewAttempted),
+        allowedUrls: preview?.url ? [preview.url] : [],
+      });
+    }
     if (state?.recursiveDeleteDenied || state?.progressBudget.exhausted || state?.clientCancelled || state?.webLoopAborted) return undefined;
+    // A silent sentinel is never an answer to an owner-authored chat message.
+    // One revision pass; the harness still refuses it after side effects.
+    if (state?.ownerIntentObserved && !state.managedTeamWorker && !state.silentOwnerReplyRetried &&
+        ownerInteractiveTurn(context, agentId) && silentReplyText(event?.lastAssistantMessage)) {
+      state.silentOwnerReplyRetried = true;
+      return {action: 'revise', reason: OWNER_VISIBLE_REPLY_REASON, retry: {
+        instruction: OWNER_VISIBLE_REPLY_INSTRUCTION, idempotencyKey: 'ods-owner-visible-reply', maxAttempts: 1}};
+    }
     const extensionStopped = state?.progressBudget.laneExhausted('extension');
     const workspaceStopped = state?.progressBudget.laneExhausted('workspace');
     const continuation =
@@ -11065,10 +11425,12 @@ export function createToolLoopGuard({
       const checkIncomplete = checkStatus === "failed" || checkStatus === "pending";
       const checkText = checkStatus === "failed" ? VERIFICATION_FAILED_DELIVERY_PREFIX
         : checkStatus === "pending" ? VERIFICATION_PENDING_DELIVERY_PREFIX : "";
+      const requestedTextMissing = requestedTextDeliveryNote(state.workspacePreview, state.workspaceRequestedTextCheck);
       return {
-        status: checkIncomplete ? checkStatus : interactionUnverified ? "failed" : "passed",
+        status: checkIncomplete ? checkStatus : interactionUnverified || requestedTextMissing ? "failed" : "passed",
         text:
           (checkText ? `${checkText}\n\n` : "") +
+          (requestedTextMissing ? `${requestedTextMissing}\n\n` : "") +
           (interactionUnverified ? "The requested show/hide interaction has not passed browser inspection. The published preview is available, but that behavior remains unverified.\n\n" : "") +
           (state.workspaceVisibilityInteractionRequired && !interactionUnverified
             ? "Browser inspection passed for the submitted show/hide checks only; this does not verify all requested behavior.\n\n" : "") +
@@ -11306,13 +11668,23 @@ export function createToolLoopGuard({
       return {status:state.completionAssurance.terminalStatus, text:state.completionAssurance.terminal};
     }
     if (state?.progressBudget.exhausted) {
-      // Session history can contain an unrelated publication. Preserve it for
-      // current preview work, but do not attach it to a later research failure.
-      const preview = state.workspacePreview ?? (state.workspacePreviewRequired &&
-        !state.workspacePreviewForbidden ? state.workspaceLastVerifiedPreview : undefined);
+      const preview = progressStopPreview(state);
+      const receipt = preview ? {preview: {schemaVersion: 1, kind: 'ods-pixel-workspace-preview', ...preview}} : {};
+      // The request is still incomplete ('failed'); only the finalization
+      // turn's validated answer replaces the canned stop text, followed by
+      // host facts that the model cannot alter.
+      const answer = !state.clientCancelled ? state.progressFinalization.answer : undefined;
+      if (answer) {
+        return {status: 'failed', text: composeProgressFinalization(answer, {preview,
+          previewExpected: Boolean(state.workspacePreviewRequired && !state.workspacePreviewForbidden),
+          verificationStatus: state.latestVerificationStatus, researchLimit: state.researchStopped,
+          unverifiedLinks: state.completionAssurance.unverifiedCitations(answer)}), ...receipt};
+      }
+      // Without an answer, a research-loop stop keeps its specific text.
+      if (state.researchStopped) return {status: 'failed', text: WEB_LOOP_DELIVERY_REASON, ...receipt};
       return {status: 'failed', text: RUN_PROGRESS_STOP_REASON + (preview
         ? `\n\n[Open last published preview](${preview.url})\n\nThis is the last verified publication, not proof that all requested work completed.` : ''),
-        ...(preview ? {preview: {schemaVersion: 1, kind: 'ods-pixel-workspace-preview', ...preview}} : {})};
+        ...receipt};
     }
     // An acknowledged harness abort can end the model without a final token.
     // Preserve existing artifact/evidence delivery; for an otherwise empty
