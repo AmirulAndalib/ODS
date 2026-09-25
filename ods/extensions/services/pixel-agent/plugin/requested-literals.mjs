@@ -296,16 +296,6 @@ const withoutComments = (source, kind) => kind === 'style'
 const VOID_ELEMENTS = new Set(['area','base','br','col','embed','hr','img','input','link','meta','param','source','track','wbr']);
 const TEXT_ATTRIBUTE = /^(?:aria-label|title|alt|placeholder|value|label|data-[\w-]+)$/i;
 
-// A heading's accessible name as authored: its aria-label, else its text with
-// whitespace collapsed (no quote, dash or case folding). aria-labelledby, or a
-// name the inspection locator cannot carry, leaves it unknown.
-const MAX_HEADING_NAME_CHARS = 120;
-function headingName(element, text) {
-  if (element.labelledBy) return undefined;
-  const name = (element.label ?? text).replace(/[\t\n\f\r ]+/g, ' ').trim();
-  return name && Array.from(name).length <= MAX_HEADING_NAME_CHARS && !/[\p{C}\u2028\u2029]/u.test(name) ? name : undefined;
-}
-
 // A bounded static reading of authored HTML: element and text-node strings,
 // titles, h1s and labelling attributes. Inline scripts and styles are opaque.
 function readHtml(source, corpus) {
@@ -331,8 +321,7 @@ function readHtml(source, corpus) {
       if (element.name === 'title') corpus.titles.push(...values);
       if (element.name === 'h1') corpus.h1s.push(...values);
       if (/^h[1-6]$/.test(element.name) && values.length && corpus.headings.length <= MAX_HEADINGS) {
-        corpus.headings.push({level: Number(element.name[1]), family: element.family, forms: values,
-          name: headingName(element, joined.slice(element.joined))});
+        corpus.headings.push({level: Number(element.name[1]), family: element.family, forms: values});
       }
     }
   };
@@ -346,11 +335,9 @@ function readHtml(source, corpus) {
       if (depth >= 0) close(depth);
       continue;
     }
-    let classes = '', label;
-    const labelledBy = /(?:^|\s)aria-labelledby(?=[\s=/]|$)/i.test(match[3]);
+    let classes = '';
     for (const attribute of match[3].matchAll(/([^\s=/"'>]+)\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s"'>]+))/g)) {
       if (/^class$/i.test(attribute[1])) classes = attribute[2] ?? attribute[3] ?? attribute[4] ?? '';
-      if (/^aria-label$/i.test(attribute[1])) label = decodeEntities(attribute[2] ?? attribute[3] ?? attribute[4] ?? '');
       if (!TEXT_ATTRIBUTE.test(attribute[1])) continue;
       const value = decodeEntities(attribute[2] ?? attribute[3] ?? attribute[4] ?? '');
       corpus.attributes.push(value);
@@ -366,7 +353,7 @@ function readHtml(source, corpus) {
     if (!VOID_ELEMENTS.has(name) && !/\/\s*$/.test(match[3]) && stack.length < 1024) {
       // Sibling card headings share their tag and class list.
       const family = `${name}.${classes.split(/\s+/).filter(Boolean).sort().join('.')}`;
-      stack.push({name, joined: joined.length, spaced: spaced.length, family, label, labelledBy});
+      stack.push({name, joined: joined.length, spaced: spaced.length, family});
     }
   }
   text(html.slice(at));
@@ -389,7 +376,7 @@ function textCorpus(files) {
     titles: corpus.titles, h1s: corpus.h1s,
     // Every hN element in document order, with its level and relaxed forms.
     headings: () => form('headings', () => corpus.headings.length > MAX_HEADINGS ? []
-      : corpus.headings.map(({level, family, forms, name}) => ({level, family, forms, name, keys: forms.map(relaxed)}))),
+      : corpus.headings.map(({level, family, forms}) => ({level, family, forms, keys: forms.map(relaxed)}))),
     opaque: exact => form(`opaque:${exact}`, () => corpus.opaque.map(exact ? canonicalText : folded)),
     visible: exact => form(`visible:${exact}`, () => [...corpus.visible, ...corpus.attributes].map(exact ? canonicalText : folded)),
     elements: () => form('elements', () => new Set(corpus.elements.map(relaxed))),
@@ -566,19 +553,104 @@ export function requestedTextCheck(literals, preview, {receipt, trackedContent, 
   }
 }
 
-// The exact accessible name of the one heading in the published snapshot whose
-// text is the owner's phrase (ignoring case, quotes, dashes and edge
-// punctuation), from the same digest-bound bytes as requestedTextCheck. It
-// names an inspection locator; it verifies nothing. Absent, duplicated,
-// script-rendered or unbound headings yield undefined.
-export function publishedHeadingName(text, preview, {receipt, trackedContent, workspaceRoot} = {}) {
+// A bounded static outline of the published entry page for choosing one stable
+// inspection locator: each element's tag, id, classes and parent, headings'
+// authored accessible names, the class names the published scripts add,
+// remove or toggle, and the one heading whose text is the owner's phrase
+// (headingIndex). Read from the same digest-bound bytes as requestedTextCheck.
+// It names locators; it verifies nothing. Unbound or oversized pages yield
+// undefined.
+const MAX_OUTLINE_ELEMENTS = 4000, MAX_OUTLINE_NAME_CHARS = 120, MAX_TOGGLED_CLASSES = 64;
+const CSS_IDENTIFIER = /^-?[A-Za-z_][\w-]*$/;
+function htmlOutline(source) {
+  const html = source.replace(/<!--[\s\S]*?(?:-->|$)/g, '');
+  const tag = /<(\/?)([A-Za-z][A-Za-z0-9-]*)((?:[^>"']|"[^"]*"|'[^']*')*)>/g;
+  const elements = [], stack = [], scripts = [];
+  let at = 0, match;
+  const text = raw => {
+    const open = stack.filter(item => item.text !== undefined);
+    if (open.length) { const value = decodeEntities(raw); for (const item of open) item.text += value; }
+  };
+  const close = depth => {
+    while (stack.length > depth) {
+      const item = stack.pop();
+      if (item.text === undefined) continue;
+      // Accessible name as authored: aria-label, else the collapsed text.
+      // aria-labelledby, or a name a locator cannot carry, leaves it unknown.
+      const element = elements[item.index], label = item.label?.trim() ? item.label : item.text;
+      const name = label.replace(/[\t\n\f\r ]+/g, ' ').trim();
+      element.text = canonicalText(item.text);
+      if (!item.labelledBy && name && Array.from(name).length <= MAX_OUTLINE_NAME_CHARS && !/[\p{C}\u2028\u2029]/u.test(name)) element.name = name;
+    }
+  };
+  while ((match = tag.exec(html))) {
+    text(html.slice(at, match.index));
+    at = tag.lastIndex;
+    const name = match[2].toLowerCase();
+    if (match[1]) {
+      const depth = stack.map(item => item.name).lastIndexOf(name);
+      if (depth >= 0) close(depth);
+      continue;
+    }
+    if (elements.length >= MAX_OUTLINE_ELEMENTS) return undefined;
+    const attributes = new Map();
+    for (const attribute of match[3].matchAll(/([^\s=/"'>]+)\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s"'>]+))/g)) {
+      const key = attribute[1].toLowerCase();
+      if (!attributes.has(key)) attributes.set(key, decodeEntities(attribute[2] ?? attribute[3] ?? attribute[4] ?? ''));
+    }
+    const index = elements.push({tag: name, parent: stack.at(-1)?.index ?? -1,
+      ...(attributes.has('id') ? {id: attributes.get('id')} : {}),
+      classes: (attributes.get('class') ?? '').split(/[\t\n\f\r ]+/).filter(Boolean)}) - 1;
+    if (name === 'script' || name === 'style') {
+      const end = html.slice(at).search(new RegExp(`</${name}\\s*>`, 'i'));
+      if (name === 'script') scripts.push(end < 0 ? html.slice(at) : html.slice(at, at + end));
+      at = end < 0 ? html.length : at + end;
+      tag.lastIndex = at;
+      continue;
+    }
+    if (!VOID_ELEMENTS.has(name) && !/\/\s*$/.test(match[3]) && stack.length < 1024) {
+      const heading = /^h[1-6]$/.test(name);
+      if (heading) elements[index].heading = true;
+      stack.push({name, index, ...(heading ? {text: '', label: attributes.get('aria-label'),
+        labelledBy: attributes.has('aria-labelledby')} : {})});
+    }
+  }
+  text(html.slice(at));
+  close(0);
+  return {elements, scripts};
+}
+
+// Class names a published script adds, removes, toggles or replaces by literal.
+function toggledClasses(sources) {
+  const found = new Set();
+  for (const source of sources) {
+    for (const call of withoutComments(source, 'script').matchAll(
+      /\bclassList\s*\.\s*(?:add|remove|toggle|replace)\s*\(([^)]{0,300})\)|\.(?:addClass|removeClass|toggleClass)\s*\(([^)]{0,300})\)/g)) {
+      for (const quoted of (call[1] ?? call[2]).matchAll(/(["'`])([^"'`]{1,200})\1/g)) {
+        for (const value of quoted[2].split(/\s+/)) {
+          if (CSS_IDENTIFIER.test(value) && found.size < MAX_TOGGLED_CLASSES) found.add(value);
+        }
+      }
+    }
+  }
+  return [...found];
+}
+
+export function publishedElementOutline(phrase, preview, {receipt, trackedContent, workspaceRoot} = {}) {
   try {
-    const key = relaxed(text);
-    if (!key || !preview || !/^[a-f0-9]{64}$/.test(preview.sha256 ?? '') || !Number.isSafeInteger(preview.files) ||
+    if (!preview || !/^[a-f0-9]{64}$/.test(preview.sha256 ?? '') || !Number.isSafeInteger(preview.files) ||
         preview.files < 1 || preview.files > 128 || typeof preview.relativeDirectory !== 'string') return undefined;
     const files = trackedSnapshot(preview, trackedContent) ?? workspaceSnapshot(preview, receipt, workspaceRoot);
-    const matches = files ? textCorpus(files).headings().filter(heading => heading.keys.includes(key)) : [];
-    return matches.length === 1 ? matches[0].name : undefined;
+    const entry = files?.find(file => file.path === 'index.html');
+    const outline = entry && htmlOutline(entry.text);
+    if (!outline) return undefined;
+    const key = relaxed(phrase ?? '');
+    const headings = key ? outline.elements.flatMap((element, index) =>
+      element.heading && relaxed(element.text) === key ? [index] : []) : [];
+    const stateClasses = toggledClasses([...outline.scripts, ...files.filter(file => /\.m?js$/i.test(file.path)).map(file => file.text)]);
+    return Object.freeze({
+      elements: Object.freeze(outline.elements.map(({text, ...element}) => Object.freeze({...element, classes: Object.freeze(element.classes)}))),
+      stateClasses: Object.freeze(stateClasses), ...(headings.length === 1 ? {headingIndex: headings[0]} : {})});
   } catch {
     return undefined;
   }

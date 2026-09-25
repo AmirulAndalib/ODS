@@ -42,7 +42,7 @@ import { PREVIEW_INSPECTION_TOOL, requestsVisibilityInteraction, requestsBehavio
 import { workspaceRevalidationCandidate, workspaceReadOnlyCall, settledRevalidationReceipt, boundedPreviewVerification } from "./preview-revalidation.mjs";
 import { boundedPreviewDelivery } from './preview-delivery-recovery.mjs';
 import { extractRequestedLiterals, requestedTextCheck, requestedTextInstruction, requestedTextRevisionInstruction,
-  requestedTextDeliveryNote, publishedHeadingName } from './requested-literals.mjs';
+  requestedTextDeliveryNote, publishedElementOutline } from './requested-literals.mjs';
 
 export const DEFAULT_WEB_TOOL_LIMITS = Object.freeze({
   search: 8,
@@ -6993,8 +6993,8 @@ export function createToolLoopGuard({
     if (bound.some(({priorVisibilityInspection: prior}) => prior?.siteId === params.siteId && prior.sha256 === params.sha256 &&
         prior.sessionId === state.currentSessionId && prior.sessionKey === state.currentSessionKey)) return undefined;
     const intent = state.workspaceTransitionIntent, target = state.workspaceTransitionTarget;
-    const heading = target?.siteId === params.siteId && target.sha256 === params.sha256 ? target.heading : undefined;
-    return Object.freeze({...(intent?.target ? {target: intent.target} : {}), ...(heading ? {heading} : {}),
+    const outline = target?.siteId === params.siteId && target.sha256 === params.sha256 ? target.outline : undefined;
+    return Object.freeze({...(intent?.target ? {target: intent.target} : {}), ...(outline ? {outline} : {}),
       ...(intent?.control ? {control: intent.control} : {}), initiallyHidden: intent?.initiallyHidden !== false});
   }
 
@@ -10247,12 +10247,14 @@ export function createToolLoopGuard({
         state.workspaceRequestedTextCheck = requestedTextCheck(state.requestedLiterals, preview, {
           receipt: previewEvent.result?.details, trackedContent: state.successfulWriteContentByPath,
           workspaceRoot: state.configuredWorkspaceRoot});
-        // The owner-named affected element's exact heading in these same bytes:
-        // a locator for corrective inspection steps, never evidence.
-        const transitionTarget = state.workspaceTransitionIntent?.target;
-        state.workspaceTransitionTarget = transitionTarget ? Object.freeze({siteId: preview.siteId, sha256: preview.sha256,
-          heading: publishedHeadingName(transitionTarget, preview, {receipt: previewEvent.result?.details,
-            trackedContent: state.successfulWriteContentByPath, workspaceRoot: state.configuredWorkspaceRoot})}) : undefined;
+        // An outline of these same bytes (ids, classes, the owner-named
+        // heading) to choose one stable locator for corrective inspection
+        // steps; never evidence.
+        const transitionOutline = state.workspaceTransitionIntent ? publishedElementOutline(
+          state.workspaceTransitionIntent.target, preview, {receipt: previewEvent.result?.details,
+            trackedContent: state.successfulWriteContentByPath, workspaceRoot: state.configuredWorkspaceRoot}) : undefined;
+        state.workspaceTransitionTarget = transitionOutline
+          ? Object.freeze({siteId: preview.siteId, sha256: preview.sha256, outline: transitionOutline}) : undefined;
         state.previewRevalidationCandidate = Object.freeze({preview:Object.freeze({...preview}),
           sessionId:state.currentSessionId,sessionKey:state.currentSessionKey,workspaceRoot:state.configuredWorkspaceRoot});
         state.previewRevalidationCompletedGeneration = state.previewVerificationGeneration;

@@ -3,6 +3,7 @@ import net from 'node:net';
 import {execFile} from 'node:child_process';
 import {createHash} from 'node:crypto';
 import {isDeepStrictEqual} from 'node:util';
+import {chooseTransitionTarget} from './inspection-target.mjs';
 
 export const INSPECTION_KIND = 'ods-pixel-preview-inspection';
 export const INSPECTION_SCOPE = 'Only the listed CSS layout visibility assertions and click dispatches were tested; not pixel paint, occlusion, clipping, a full accessibility audit, or overall functionality.';
@@ -53,52 +54,63 @@ function transitionCoverageFeedback(request, result) {
     'If the owner requested show/hide behavior, inspect the actual affected element with assert-hidden(target), click(control), assert-visible(target), or the reverse. Use the same target locator in both assertions; a heading or button assertion cannot substitute for the affected element. Keep the existing verified publication unless a file repair is needed.';
 }
 // The owner asked for a show/hide change and these passing steps never held
-// one element at opposite visibility around a click (laptop round 100: button
-// visible, click, a post-click class visible; the answer then claimed the card
-// was verified). OpenClaw 2026.6.33 drops before_agent_finalize revisions after
-// a plugin tool call, so this result is the last point that can steer the
-// model: it is incomplete, never "passed", and carries ready-to-send steps.
-// The control is the model's own first click locator (else the owner's quoted
-// control name); the target is the heading the owner named, read from the
-// published bytes (else the model's own post-click assertion, else the owner's
-// phrase as a heading name). The requirement comes from the run guard, bound
-// to this exact call; without it the result is unchanged.
+// one locator at opposite visibility around a click. Laptop round 100 asserted
+// the button, clicked it, then asserted ".event-card.sold-out.revealed"; tower2
+// round 102 asserted ".sold-out-card.hidden" hidden, clicked, then
+// ".sold-out-card:not(.hidden)" visible, locators that may name different
+// elements. Both answers then claimed the card was verified. OpenClaw 2026.6.33
+// drops before_agent_finalize revisions after a plugin tool call, so this
+// result is the last point that can steer the model: it is incomplete, never
+// "passed", and carries ready-to-send steps. The control is the model's own
+// first click locator (else the owner's quoted control name). The target is one
+// stable locator (inspection-target.mjs): the model's own locator with its
+// state qualifiers removed, as the published element's id when it has one,
+// checked against the published outline; else the owner-named heading. The
+// requirement comes from the run guard, bound to this exact call; without it
+// the result is unchanged.
 export const TRANSITION_UNTESTED = 'transition_untested';
 export function transitionCorrection(request, requirement) {
   const clickAt = request.steps.findIndex(step => step.action === 'click');
   const control = clickAt >= 0 ? request.steps[clickAt].locator
     : requirement?.control ? {role: requirement.control.role, name: requirement.control.name, exact: true} : undefined;
-  const ownAfter = clickAt >= 0 ? request.steps.slice(clickAt + 1)
-    .filter(step => step.action !== 'click' && !isDeepStrictEqual(step.locator, control)).at(-1)?.locator : undefined;
-  const [target, basis] = requirement?.heading ? [{role: 'heading', name: requirement.heading, exact: true}, 'published']
-    : ownAfter ? [ownAfter, 'own']
-      : requirement?.target ? [{role: 'heading', name: requirement.target, exact: true}, 'owner'] : [undefined, 'none'];
+  const chosen = chooseTransitionTarget(request, {control, outline: requirement?.outline, phrase: requirement?.target});
   const [first, last] = requirement?.initiallyHidden === false ? ['assert-visible', 'assert-hidden'] : ['assert-hidden', 'assert-visible'];
   let args;
-  if (control && target) {
+  if (control && chosen) {
     try {
       args = {siteId: request.siteId, sha256: request.sha256, viewport: request.viewport,
-        steps: [{action: first, locator: target}, {action: 'click', locator: control}, {action: last, locator: target}]};
+        steps: [{action: first, locator: chosen.locator}, {action: 'click', locator: control}, {action: last, locator: chosen.locator}]};
       normalizeWorkspacePreviewInspectionParams(args);
     } catch { args = undefined; }
   }
-  return {args, basis, first, last, target: requirement?.target};
+  const before = clickAt < 0 ? [] : request.steps.slice(0, clickAt).filter(step => !isDeepStrictEqual(step.locator, control));
+  return {args, basis: chosen?.basis, members: chosen?.members ?? [], first, last, target: requirement?.target,
+    click: clickAt >= 0, assertedBefore: before.length > 0};
 }
+const locatorText = locator => locator.selector !== undefined ? JSON.stringify(locator.selector) : `${locator.role} ${JSON.stringify(locator.name)}`;
 function transitionIncompleteFeedback(request, requirement) {
-  const {args, basis, first, last, target} = transitionCorrection(request, requirement);
-  const lead = 'Preview inspection INCOMPLETE - not verified. The owner requested a show/hide change, but these steps never asserted ' +
-    'one element with opposite visibility before and after a click, so the requested interaction was not tested. ' +
-    `Missing: ${first} of the affected element before the click and ${last} of that same element after it. ` +
-    'The listed steps ran, but a click with a one-sided or unrelated assertion proves nothing about the change.';
+  const {args, basis, members, first, last, target, click, assertedBefore} = transitionCorrection(request, requirement);
+  const why = [
+    `Preview inspection INCOMPLETE - not verified. The owner requested a show/hide change, but no single locator was asserted ${first.slice(7)} before a click and ${last.slice(7)} after it, so the requested change was not tested.`,
+    !click ? 'These steps contain no click.' : !assertedBefore ? 'Before the click, your steps asserted no affected element.' : '',
+    members.length > 1 ? `Your assertions used different locators (${members.map(locatorText).join(', ')}); a locator that includes the state it checks can match a different element before and after the click, so they do not show one element changing.` : '',
+  ].filter(Boolean).join(' ');
   const keep = 'Do not change the site only for this check, and do not say the interaction works until an inspection with these steps passes.';
-  if (!args) return `${lead} Next step: find the affected element and its control in your source, then call pixel_ods_workspace_preview_inspect ` +
-    `again on the same snapshot with steps ${first}(target), click(control), ${last}(target), using the same target locator in both assertions. ${keep}`;
-  const about = basis === 'published'
-    ? `The target is the heading ${JSON.stringify(args.steps[0].locator.name)} of the requested ${JSON.stringify(target)} element, read from the published source; if that heading is not inside the element that hides, use a unique CSS selector such as an id of that element for both target steps instead.`
-    : basis === 'own'
-      ? 'The target is your own post-click locator; if it matches only after the click (for example a state class), use a stable unique CSS selector such as an id of the affected element for both target steps instead.'
-      : `The target is a heading named ${JSON.stringify(target)} from the owner's request; if your heading text differs, copy it exactly from your source, or use a unique CSS selector such as an id of the affected element for both target steps.`;
-  return `${lead} Next step: call pixel_ods_workspace_preview_inspect again (through tool_call if that is how you called it) with exactly these args: ${JSON.stringify(args)} ${about} ${keep}`;
+  if (!args) return `${why} Next step: find the affected element and its control in your source, then call pixel_ods_workspace_preview_inspect ` +
+    `again on the same snapshot with steps ${first}(target), click(control), ${last}(target), using one unchanging target locator in both assertions, such as an id. ${keep}`;
+  const locator = args.steps[0].locator;
+  const own = members.length ? `your ${members.length > 1 ? 'locators' : 'locator'} ${members.map(locatorText).join(' and ')}` : undefined;
+  const owned = target ? `; it contains the requested ${JSON.stringify(target)} heading` : '';
+  const about = basis === 'id'
+    ? `The target ${locatorText(locator)} is the id, in the published source, of the element ${own} name${members.length > 1 ? '' : 's'} with state qualifiers removed${owned}.`
+    : basis === 'model'
+      ? `The target ${locatorText(locator)} is ${own} with state qualifiers removed; it matches exactly one element in the published source${owned}.`
+      : basis === 'unverified'
+        ? `The target ${locatorText(locator)} is ${own} with state qualifiers removed; if it does not match exactly one element, use a unique id of the affected element for both target steps instead.`
+        : basis === 'heading'
+          ? `The target is the heading ${JSON.stringify(locator.name ?? locator.selector)} of the requested ${JSON.stringify(target)} element, read from the published source; if that heading is not inside the element that hides, use a unique CSS selector such as an id of that element for both target steps instead.`
+          : `The target is a heading named ${JSON.stringify(target)} from the owner's request; if your heading text differs, copy it exactly from your source, or use a unique CSS selector such as an id of the affected element for both target steps.`;
+  return `${why} Next step: call pixel_ods_workspace_preview_inspect again (through tool_call if that is how you called it) with exactly these args: ${JSON.stringify(args)} ${about} Keep this click step and use the same target locator in both assertions. ${keep}`;
 }
 
 // Page exception text is untrusted author output. Quote it as data and give
