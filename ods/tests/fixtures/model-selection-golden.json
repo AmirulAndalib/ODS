@@ -604,6 +604,28 @@
     "runtime_profile": null,
     "selector_estimate_gib": 49.3
   },
+  "nv-a100-40gb-ram128-non-pixel": {
+    "cache_types": "f16/f16",
+    "context_length": 131072,
+    "corrected_estimate_gib": 23.83,
+    "fits": true,
+    "fits_at_hermes": true,
+    "pick": "qwen3.6-35b-a3b-ud-q4",
+    "policy": "context-aware-curated-fit-v2",
+    "runtime_profile": null,
+    "selector_estimate_gib": 23.83
+  },
+  "nv-a100-40gb-ram128-pixel": {
+    "cache_types": "f16/f16",
+    "context_length": 131072,
+    "corrected_estimate_gib": 23.83,
+    "fits": true,
+    "fits_at_hermes": true,
+    "pick": "qwen3.6-35b-a3b-ud-q4",
+    "policy": "context-aware-curated-fit-v2",
+    "runtime_profile": null,
+    "selector_estimate_gib": 23.83
+  },
   "nv-unified-ram119": {
     "cache_types": "f16/f16",
     "context_length": 131072,

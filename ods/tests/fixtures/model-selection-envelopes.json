@@ -373,6 +373,36 @@
       "fleet_hosts": []
     },
     {
+      "id": "nv-a100-40gb-ram128-pixel",
+      "label": "NVIDIA A100 40 GB (40,536 MiB), RAM 128",
+      "platform": "linux",
+      "host_kind": "pixel",
+      "backend": "nvidia",
+      "memory_type": "discrete",
+      "vram_mb": 40536,
+      "ram_gb": 128,
+      "tier": "4",
+      "host_arch": "amd64",
+      "ceiling": 0,
+      "hermes_raise": true,
+      "fleet_hosts": []
+    },
+    {
+      "id": "nv-a100-40gb-ram128-non-pixel",
+      "label": "NVIDIA A100 40 GB (40,536 MiB), RAM 128",
+      "platform": "linux",
+      "host_kind": "non-pixel",
+      "backend": "nvidia",
+      "memory_type": "discrete",
+      "vram_mb": 40536,
+      "ram_gb": 128,
+      "tier": "4",
+      "host_arch": "amd64",
+      "ceiling": "tier-map",
+      "hermes_raise": true,
+      "fleet_hosts": []
+    },
+    {
       "id": "nv-48gb-ram128-pixel",
       "label": "NVIDIA 48 GB, RAM 128",
       "platform": "linux",

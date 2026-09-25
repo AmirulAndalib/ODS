@@ -1,14 +1,14 @@
 # Model selection before and after the curated-fit selector
 
 `scripts/simulate-model-selection.py` runs `scripts/select-model.py` from an
-ODS tree over the 63 hardware envelopes in
+ODS tree over the 65 hardware envelopes in
 `tests/fixtures/model-selection-envelopes.json`, exactly as the Linux and
 macOS installers call it. Each pick is then re-checked with the memory
 estimator and catalog layouts of the tree the harness runs from, so an older
 selector's picks get a real fit column (`corrected GiB`, `fits`, `fits @64K`).
 
-- `before-origin-main-180a5f09.md`: the selector and catalog at origin/main
-  180a5f09, estimated with this change's estimator.
+- `before-origin-main-7a328347.md`: the selector and catalog at origin/main
+  7a328347 (after #6712), estimated with this change's estimator.
 - `after.md`: this change. `tests/fixtures/model-selection-golden.json` pins
   the same picks, and `tests/test-model-selection-matrix.py` checks them.
 

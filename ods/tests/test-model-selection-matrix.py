@@ -80,7 +80,7 @@ def _envelopes() -> list[dict]:
 
 def test_fixture_covers_every_envelope_once():
     envelopes = _envelopes()
-    assert len(envelopes) == 63
+    assert len(envelopes) == 65
     assert len({envelope["id"] for envelope in envelopes}) == len(envelopes)
     fleet = {envelope["id"] for envelope in envelopes if envelope["fleet_hosts"]}
     assert set(FLEET_DEFAULTS) <= fleet

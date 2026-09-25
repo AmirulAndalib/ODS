@@ -2587,7 +2587,7 @@
         "unified": 90,
         "cpu": 0,
         "min_capacity_gib": {
-          "discrete": 40
+          "discrete": 36
         }
       },
       "quantization": "UD-Q4_K_M",
