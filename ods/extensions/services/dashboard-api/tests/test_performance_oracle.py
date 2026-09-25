@@ -1727,7 +1727,7 @@ def test_pre_download_ranker_accounts_for_long_context_kv_on_4gb_gpu(data_dir, t
     assert by_id["phi4-mini-q4"]["estimatedRequired"] > by_id["phi4-mini-q4"]["vramRequired"]
 
 
-def test_qwen35_2b_fits_4gb_but_is_not_recommended_after_fleet_failures(
+def test_qwen35_2b_is_the_4gb_recommendation_despite_fleet_failures(
     data_dir,
     tmp_path,
     monkeypatch,
@@ -1751,7 +1751,10 @@ def test_qwen35_2b_fits_4gb_but_is_not_recommended_after_fleet_failures(
     assert model["vramRequired"] == 3
     assert model["estimatedRequired"] <= 4
     assert model["fitsVram"] is True
-    assert model["recommended"] is False
+    # Nothing else installable fits a 4 GB card at the 64K Hermes floor
+    # (phi-4-mini only reaches 8K there), so the 2B is recommended; its
+    # fleet verdicts still say where it falls short.
+    assert model["recommended"] is True
     compatibility = model["appCompatibility"]
     assert compatibility["hermesTalk"]["status"] == "verified"
     assert compatibility["openaiChat"]["status"] == "unsupported_until_revalidated"
@@ -1816,7 +1819,7 @@ def test_windows_amd_host_runtime_uses_install_ram_when_gpu_probe_is_unavailable
         "AMD_INFERENCE_RUNTIME=lemonade\n"
         "AMD_INFERENCE_LOCATION=host\n"
         "SYSTEM_RAM_GB=128\n"
-        "MODEL_RECOMMENDATION_POLICY=context-aware-largest-capable-general-v1+unified-memory-coder-next-a3b-v1\n",
+        "MODEL_RECOMMENDATION_POLICY=context-aware-curated-fit-v2+unified-memory-coder-next-a3b-v1\n",
         encoding="utf-8",
     )
     catalog = [{
@@ -2205,3 +2208,76 @@ def test_published_exact_matches_gguf_stem_identity(data_dir):
     assert perf["source"] == "published_exact"
     assert perf["tokensPerSec"] == 43.7
     assert perf["sourceUrl"] == "https://example.test/stem-bench"
+
+
+def _selection_envelopes():
+    fixture = Path(__file__).resolve().parents[4] / "tests" / "fixtures" / "model-selection-envelopes.json"
+    return [
+        envelope for envelope in json.loads(fixture.read_text(encoding="utf-8"))["envelopes"]
+        if envelope["ceiling"] == 0
+    ]
+
+
+def _installer_selector():
+    import importlib.util
+
+    path = Path(__file__).resolve().parents[4] / "scripts" / "select-model.py"
+    spec = importlib.util.spec_from_file_location("ods_select_model_oracle_parity", path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def test_dashboard_ranker_matches_the_installer_on_every_envelope(monkeypatch):
+    """The dashboard recommends what scripts/select-model.py ranks first.
+
+    Envelopes with a tier size ceiling are installer-only (the dashboard has
+    none), and the installer's architecture substitutions (Spark, Strix Halo,
+    unified-memory coder-next) are applied after this shared ranking.
+    """
+    import performance_oracle as oracle
+
+    selector = _installer_selector()
+    installer_catalog = selector.load_catalog(
+        Path(__file__).resolve().parents[4] / "config" / "model-library.json"
+    )
+    dashboard_catalog = [
+        entry for entry in (normalize_catalog_entry(raw) for raw in _official_model_catalog())
+        if entry is not None and str(entry.get("catalog_source") or "ods") in {"ods", "curated"}
+    ]
+    mismatches = []
+    for envelope in _selection_envelopes():
+        monkeypatch.setattr(oracle.platform, "machine", lambda arch=envelope["host_arch"]: arch)
+        capacity, _ = selector.usable_memory_gb(
+            envelope["backend"], envelope["memory_type"], envelope["vram_mb"], envelope["ram_gb"]
+        )
+        installer = selector.rank_models(
+            installer_catalog, capacity, "qwen", True, envelope["backend"],
+            envelope["memory_type"], envelope["vram_mb"], envelope["ram_gb"],
+            envelope["host_arch"], min_context=65536,
+        )
+        gpu = GPUInfo(
+            name="test", memory_used_mb=0,
+            memory_total_mb=envelope["vram_mb"] or envelope["ram_gb"] * 1024,
+            memory_percent=0, utilization_percent=0, temperature_c=30,
+            gpu_backend=envelope["backend"], memory_type=envelope["memory_type"],
+        )
+        if envelope["backend"] == "cpu":
+            gpu = GPUInfo(
+                name="cpu", memory_used_mb=0, memory_total_mb=0, memory_percent=0,
+                utilization_percent=0, temperature_c=30, gpu_backend="cpu",
+            )
+        dashboard = rank_pre_download_models(
+            dashboard_catalog, gpu, "qwen", True, limit=1, system_ram_gb=envelope["ram_gb"],
+        )
+        got = [
+            (model["id"], model["context_length"], (model.get("_runtime_profile") or {}).get("id"))
+            for model in dashboard[:1]
+        ]
+        want = [
+            (model["id"], model["context_length"], (model.get("_runtime_profile") or {}).get("id"))
+            for model in installer[:1]
+        ]
+        if got != want:
+            mismatches.append((envelope["id"], want, got))
+    assert not mismatches, mismatches

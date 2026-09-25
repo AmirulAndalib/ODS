@@ -750,7 +750,9 @@ def test_nemotron3_nano_4b_is_recommended_after_six_host_validation():
     assert model["gguf_sha256"] == "be5d9a656a51922f24f1f09a759cebb694e1f5d9728bf0ef9f8c972c5a0b5ef2"
     assert model["size_bytes"] == 2837072864
     assert model["vram_required_gb"] <= 5
-    assert model["context_length"] == 262144
+    # 64K operating default (the Apple 8 GB pick); the model supports 256K.
+    assert model["context_length"] == HERMES_CONTEXT_FLOOR
+    assert model["max_context_length"] == 262144
     assert model.get("install_recommendation") is True
     compatibility = model["app_compatibility"]
     assert compatibility["openai_chat"]["status"] == "verified"
@@ -778,8 +780,11 @@ def test_ministral3_8b_is_recommended_after_six_host_validation():
     )
     assert model["gguf_sha256"] == "33e7a72cf5e6e2cfc2f2847075acc013d68bba023e35310cef86b5cf8fdca761"
     assert model["size_bytes"] == 5198911904
-    assert model["vram_required_gb"] == 7
-    assert model["context_length"] == 262144
+    # Dense attention on all 34 layers: 136 KiB of f16 KV per token, so the
+    # 64K operating default needs about 13.8 GiB (256K would need 38.5).
+    assert model["vram_required_gb"] == 14
+    assert model["context_length"] == HERMES_CONTEXT_FLOOR
+    assert model["max_context_length"] == 262144
     profiles = {item["id"]: item for item in model["runtime_profiles"]}
     cpu_profile = profiles["cpu-16k-agent-memory"]
     assert cpu_profile["backend"] == "cpu"
@@ -887,7 +892,9 @@ def test_qwen3_4b_long_context_replacements_are_release_candidates():
     expected = {
         "qwen3.5-4b-q4": {
             "sha": "00fe7986ff5f6b463e62455821146049db6f9313603938a70800d1fb69ef11a4",
-            "context": 262144,
+            # 64K operating default; 256K native (max_context_length).
+            "context": 65536,
+            "max_context": 262144,
             "size_bytes": 2740937888,
             "url": "https://huggingface.co/unsloth/Qwen3.5-4B-GGUF/",
         },
@@ -911,6 +918,8 @@ def test_qwen3_4b_long_context_replacements_are_release_candidates():
         assert model["gguf_url"].startswith(expected_model["url"])
         if "size_bytes" in expected_model:
             assert model["size_bytes"] == expected_model["size_bytes"]
+        if "max_context" in expected_model:
+            assert model["max_context_length"] == expected_model["max_context"]
         if model_id != "qwen3.5-4b-q4":
             assert model.get("install_recommendation") is False
         if model_id == "qwen3-4b-128k-q4":

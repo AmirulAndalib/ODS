@@ -255,12 +255,12 @@ LLM_MODEL="" GGUF_FILE="" MODEL_RECOMMENDATION_POLICY=""
 load_selector_env "$_selector_env"
 assert_eq "SELECTOR_LLM_MODEL" "qwen3-coder-next" "$LLM_MODEL"
 assert_eq "SELECTOR_GGUF_FILE" "qwen3-coder-next-Q4_K_M.gguf" "$GGUF_FILE"
-assert_eq "SELECTOR_POLICY" "context-aware-largest-capable-general-v1" "$MODEL_RECOMMENDATION_POLICY"
+assert_eq "SELECTOR_POLICY" "context-aware-curated-fit-v2" "$MODEL_RECOMMENDATION_POLICY"
 echo ""
 
-# Qwen 3.6 27B is a fleet A/B candidate (install_recommendation=false). It
-# would outrank Qwen 3.5 27B on file size here, so the installable filter is
-# what keeps the 24-32GB default unchanged. Cover both the tier-3 size ceiling
+# Qwen 3.6 27B is a fleet A/B candidate (install_recommendation=false). The
+# curated priority and the installable filter keep the 24-32GB default
+# unchanged. Cover both the tier-3 size ceiling
 # (non-Pixel hosts) and the uncapped Pixel-default path.
 echo "Catalog selector (24-32GB discrete GPUs keep Qwen 3.5 27B; Qwen 3.6 27B stays a candidate):"
 for _vram_mb in 24576 32607; do
@@ -283,7 +283,9 @@ for _vram_mb in 24576 32607; do
             _case="${_backend} ${_vram_mb}MB max-size ${_max_size_mb}"
             assert_eq "SELECTOR_LLM_MODEL ($_case)" "qwen3.5-27b" "$LLM_MODEL"
             assert_eq "SELECTOR_GGUF_FILE ($_case)" "Qwen3.5-27B-Q4_K_M.gguf" "$GGUF_FILE"
-            assert_eq "SELECTOR_CONTEXT ($_case)" "32768" "$MAX_CONTEXT"
+            # The catalog's operating default is 64K: the 27B is selected at
+            # the context the Hermes floor used to raise it to (tower1/tower3).
+            assert_eq "SELECTOR_CONTEXT ($_case)" "65536" "$MAX_CONTEXT"
             case ";$MODEL_RECOMMENDED_ALTERNATIVES" in
                 *";qwen3.6-27b-ud-q4-k-xl:"*)
                     echo "  FAIL: SELECTOR_ALTERNATIVES ($_case) offers the Qwen 3.6 27B candidate"
@@ -314,7 +316,7 @@ LLM_MODEL="" GGUF_FILE="" MODEL_RECOMMENDATION_POLICY=""
 load_selector_env "$_selector_env"
 assert_eq "SELECTOR_LLM_MODEL" "qwen3.6-35b-a3b" "$LLM_MODEL"
 assert_eq "SELECTOR_GGUF_FILE" "Qwen3.6-35B-A3B-UD-Q4_K_M.gguf" "$GGUF_FILE"
-assert_eq "SELECTOR_POLICY" "context-aware-largest-capable-general-v1+spark-aarch64-nv-ultra-a3b-v1" "$MODEL_RECOMMENDATION_POLICY"
+assert_eq "SELECTOR_POLICY" "context-aware-curated-fit-v2+spark-aarch64-nv-ultra-a3b-v1" "$MODEL_RECOMMENDATION_POLICY"
 echo ""
 
 # Strix Halo (SH_LARGE, AMD Ryzen AI MAX+ 395, 124 GB unified) hit the same
@@ -336,7 +338,7 @@ LLM_MODEL="" GGUF_FILE="" MODEL_RECOMMENDATION_POLICY=""
 load_selector_env "$_selector_env"
 assert_eq "SELECTOR_LLM_MODEL" "qwen3.6-35b-a3b" "$LLM_MODEL"
 assert_eq "SELECTOR_GGUF_FILE" "Qwen3.6-35B-A3B-UD-Q4_K_M.gguf" "$GGUF_FILE"
-assert_eq "SELECTOR_POLICY" "context-aware-largest-capable-general-v1+unified-memory-coder-next-a3b-v1" "$MODEL_RECOMMENDATION_POLICY"
+assert_eq "SELECTOR_POLICY" "context-aware-curated-fit-v2+unified-memory-coder-next-a3b-v1" "$MODEL_RECOMMENDATION_POLICY"
 echo ""
 
 echo "Catalog selector (16GB Apple unified qwen keeps ranked fit):"
@@ -356,10 +358,10 @@ load_selector_env "$_selector_env"
 assert_eq "SELECTOR_LLM_MODEL" "qwen3.5-9b" "$LLM_MODEL"
 assert_eq "SELECTOR_GGUF_FILE" "Qwen3.5-9B-Q4_K_M.gguf" "$GGUF_FILE"
 assert_eq "SELECTOR_SOURCE" "catalog_fit_pre_download" "$MODEL_RECOMMENDATION_SOURCE"
-assert_eq "SELECTOR_POLICY" "context-aware-largest-capable-general-v1" "$MODEL_RECOMMENDATION_POLICY"
+assert_eq "SELECTOR_POLICY" "context-aware-curated-fit-v2" "$MODEL_RECOMMENDATION_POLICY"
 echo ""
 
-echo "Catalog selector (32GB Apple unified qwen keeps ranked fit):"
+echo "Catalog selector (32GB Apple unified picks the Pixel-verified 9B at 64K, not phi-4 at 16K):"
 _selector_env="$(python3 "$SCRIPT_DIR/scripts/select-model.py" \
     --catalog "$SCRIPT_DIR/config/model-library.json" \
     --backend metal \
@@ -373,10 +375,10 @@ _selector_env="$(python3 "$SCRIPT_DIR/scripts/select-model.py" \
     --env)"
 LLM_MODEL="" GGUF_FILE="" MODEL_RECOMMENDATION_SOURCE="" MODEL_RECOMMENDATION_POLICY=""
 load_selector_env "$_selector_env"
-assert_eq "SELECTOR_LLM_MODEL" "phi-4" "$LLM_MODEL"
-assert_eq "SELECTOR_GGUF_FILE" "phi-4-Q4_K_M.gguf" "$GGUF_FILE"
+assert_eq "SELECTOR_LLM_MODEL" "qwen3.5-9b" "$LLM_MODEL"
+assert_eq "SELECTOR_GGUF_FILE" "Qwen3.5-9B-Q4_K_M.gguf" "$GGUF_FILE"
 assert_eq "SELECTOR_SOURCE" "catalog_fit_pre_download" "$MODEL_RECOMMENDATION_SOURCE"
-assert_eq "SELECTOR_POLICY" "context-aware-largest-capable-general-v1" "$MODEL_RECOMMENDATION_POLICY"
+assert_eq "SELECTOR_POLICY" "context-aware-curated-fit-v2" "$MODEL_RECOMMENDATION_POLICY"
 echo ""
 
 echo "Catalog selector (--max-size-mb bounds tier 2 on 48GB Apple unified — issue #1881):"
@@ -402,7 +404,7 @@ case "$MODEL_RECOMMENDATION_REASON" in
 esac
 echo ""
 
-echo "Catalog selector (--max-size-mb absent still auto-upgrades — back-compat):"
+echo "Catalog selector (--max-size-mb absent still auto-upgrades; 48GB Apple gets the 35B-A3B MoE):"
 _selector_env="$(python3 "$SCRIPT_DIR/scripts/select-model.py" \
     --catalog "$SCRIPT_DIR/config/model-library.json" \
     --backend apple \
@@ -416,7 +418,7 @@ _selector_env="$(python3 "$SCRIPT_DIR/scripts/select-model.py" \
     --env)"
 LLM_MODEL="" GGUF_FILE=""
 load_selector_env "$_selector_env"
-assert_eq "SELECTOR_LLM_MODEL" "qwen3.5-27b" "$LLM_MODEL"
+assert_eq "SELECTOR_LLM_MODEL" "qwen3.6-35b-a3b" "$LLM_MODEL"
 echo ""
 
 echo "Catalog selector (tiny --max-size-mb falls back to smallest fitting model, not smallest overall):"
@@ -454,7 +456,7 @@ load_selector_env "$_selector_env"
 assert_eq "SELECTOR_LLM_MODEL" "qwen3.6-35b-a3b" "$LLM_MODEL"
 assert_eq "SELECTOR_GGUF_FILE" "Qwen3.6-35B-A3B-UD-Q4_K_M.gguf" "$GGUF_FILE"
 assert_eq "SELECTOR_SOURCE" "catalog_fit_pre_download" "$MODEL_RECOMMENDATION_SOURCE"
-assert_eq "SELECTOR_POLICY" "context-aware-largest-capable-general-v1" "$MODEL_RECOMMENDATION_POLICY"
+assert_eq "SELECTOR_POLICY" "context-aware-curated-fit-v2" "$MODEL_RECOMMENDATION_POLICY"
 echo ""
 
 echo "Catalog selector (8GB NVIDIA qwen uses the live-proven 64K Q8-KV interactive profile):"
