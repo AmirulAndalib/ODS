@@ -388,6 +388,21 @@ export function requestedTextInstruction(preview, check) {
     : undefined;
 }
 
+// The one bounded revision for a snapshot that still lacks requested text:
+// fixed text around a JSON list of the missing literals (each listed once).
+export const REQUESTED_TEXT_REVISION_INSTRUCTION = [
+  'Requested text is still missing from the published page: ',
+  '. Add the exact text as requested (for example, as the card heading if the owner described it as a card title, ' +
+  'or as the page title or h1 if the owner named them), republish with pixel_ods_workspace_preview, ' +
+  'and keep everything else unchanged.',
+];
+
+export function requestedTextRevisionInstruction(preview, check) {
+  return boundMisses(preview, check)
+    ? REQUESTED_TEXT_REVISION_INSTRUCTION.join(JSON.stringify([...new Set(check.missing.map(miss => miss.text))]))
+    : undefined;
+}
+
 export function requestedTextDeliveryNote(preview, check) {
   return boundMisses(preview, check)
     ? `The published page does not contain text the owner requested: ${missingList(check)}. The preview is available, but that requirement is not met.`

@@ -38,7 +38,8 @@ import { PREVIEW_INSPECTION_TOOL, requestsVisibilityInteraction, requestsBehavio
   boundInspectionPageErrors, pageErrorRepairInstruction, visibilityInspectionMatches, visibilityInspectionInstruction } from './preview-interaction-assurance.mjs';
 import { workspaceRevalidationCandidate, workspaceReadOnlyCall, settledRevalidationReceipt, boundedPreviewVerification } from "./preview-revalidation.mjs";
 import { boundedPreviewDelivery } from './preview-delivery-recovery.mjs';
-import { extractRequestedLiterals, requestedTextCheck, requestedTextInstruction, requestedTextDeliveryNote } from './requested-literals.mjs';
+import { extractRequestedLiterals, requestedTextCheck, requestedTextInstruction, requestedTextRevisionInstruction,
+  requestedTextDeliveryNote } from './requested-literals.mjs';
 
 export const DEFAULT_WEB_TOOL_LIMITS = Object.freeze({
   search: 8,
@@ -10816,6 +10817,19 @@ export function createToolLoopGuard({
     };
   }
 
+  // One bounded revision per run for a published snapshot that lacks
+  // owner-requested text. The pinned harness refuses a finalization revision
+  // after potential side effects, and publishing always is one (tower1 round
+  // 067). So after the model has seen the publication note, the fixed
+  // instruction goes on its next successful tool result for that same
+  // snapshot; finalization requests it only when that never happened.
+  function takeRequestedTextRevision(state) {
+    const instruction = requestedTextRevisionInstruction(state.workspacePreview, state.workspaceRequestedTextCheck);
+    if (!instruction || state.requestedTextRevisionSpent || state.clientCancelled) return undefined;
+    state.requestedTextRevisionSpent = true;
+    return instruction;
+  }
+
   function trustedWorkspacePreviewContinuation(state) {
     if (
       !state?.workspacePreviewRequired ||
@@ -10830,8 +10844,13 @@ export function createToolLoopGuard({
     const prerequisite = visualContinuationPrerequisite(state);
     if (prerequisite) return prerequisite;
     if (state.workspacePreview) {
-      const requestedText = requestedTextInstruction(state.workspacePreview, state.workspaceRequestedTextCheck);
-      if (requestedText) return {stage: 'workspace-preview-requested-text', instruction: requestedText};
+      if (requestedTextInstruction(state.workspacePreview, state.workspaceRequestedTextCheck)) {
+        const instruction = takeRequestedTextRevision(state);
+        // Once spent, the honest failure delivery stands; no further pass.
+        return instruction ? {stage: 'workspace-preview-requested-text', instruction}
+          : {stage: 'workspace-preview-requested-text',
+            finalize: 'Owner-requested text is still missing after the bounded revision.'};
+      }
       if (workspacePreviewReadbackComplete(state)) {
         if (state.workspaceVisibilityInteractionRequired &&
             !workspaceVisibilityInspectionPassed(state) &&
@@ -11115,7 +11134,18 @@ export function createToolLoopGuard({
       }
       // A requested-text miss needs a republish, so it precedes inspection.
       const requestedText = requestedTextInstruction(state.workspacePreview, state.workspaceRequestedTextCheck);
-      if (requestedText) return `[ODS Pixel next step] ${requestedText}`;
+      if (requestedText) {
+        // The publication receipt carries the note. A later successful result
+        // for the same unrepaired snapshot (tower1: an inspection) carries the
+        // one bounded revision instead of the deduplicated note.
+        const publication = (pending?.selectedToolName ?? message.toolName) === WORKSPACE_PREVIEW_TOOL ||
+          Boolean(validatedToolSearchEnvelope(message.details, WORKSPACE_PREVIEW_TOOL, "pixel-ods"));
+        const revision = !publication && state.requestedTextNoted === state.workspacePreview.sha256
+          ? takeRequestedTextRevision(state) : undefined;
+        if (revision) return `[ODS Pixel next step] ${revision}`;
+        state.requestedTextNoted = state.workspacePreview.sha256;
+        return `[ODS Pixel next step] ${requestedText}`;
+      }
       if (workspacePreviewReadbackComplete(state)) {
         if (state.workspaceVisibilityInteractionRequired &&
             !workspaceVisibilityInspectionPassed(state)) {
@@ -11482,6 +11512,7 @@ export function createToolLoopGuard({
         state.extensionDecisionRecovery.gateRevisionRequested = decision?.action === 'revise';
       return decision;
     }
+    if (continuation.finalize) return {action: 'finalize', reason: continuation.finalize};
     return {
       action: "revise",
       reason: "Pixel has not completed every owner-requested verified step.",

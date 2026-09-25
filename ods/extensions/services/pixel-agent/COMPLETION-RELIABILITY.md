@@ -74,6 +74,30 @@ tool limit stops the revision pass, the answer from its tool-free answer turn
 (below) is newer and supersedes this armed delivery.
 `tests/partial_citation_delivery.test.mjs` replays the tower1 fleet case.
 
+## Owner-requested text
+
+`requested-literals.mjs` checks each published snapshot for exact text the
+owner asked for (a cued quotation or a counted list of names). A miss never
+blocks publication: the publication result carries a note, and delivery stays
+`failed` with the preview kept and a fixed statement of the missing text.
+
+Before that failure, the model gets one bounded revision per response. Its
+fixed instruction names the missing text as a JSON list and asks the model to
+add it exactly as requested (for example, as the card heading when the owner
+described a card title), republish with `pixel_ods_workspace_preview`, and keep
+everything else unchanged. The pinned harness refuses a `before_agent_finalize`
+revision after potential side effects, and a publication is one (tower1 round
+067: `before_agent_finalize requested revision after potential side effects;
+finalizing`). So the instruction goes on the model's next successful tool
+result for that same unrepaired snapshot, after the publication note, such as
+an inspection of it. Only when no such result occurs does finalization request
+it as a revision (idempotency key `pixel-ods-workspace-preview-requested-text`,
+one attempt). A republish that contains the text is judged normally; otherwise
+the unchanged failure delivery stands and no further revision is requested.
+Nothing is revised after owner cancellation or a tool-limit stop, and the
+revision grants no tool allowance. `tests/requested_text_revision.test.mjs`
+replays the tower1 case.
+
 ## Saved project delivery
 
 A model can successfully write an HTML project and then stop without calling
