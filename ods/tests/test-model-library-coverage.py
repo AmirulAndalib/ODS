@@ -337,11 +337,13 @@ def test_windows_8gb_revalidation_models_have_64k_compressed_kv_profiles():
     catalog = json.loads(CATALOG.read_text(encoding="utf-8"))
     by_id = {model["id"]: model for model in catalog["models"]}
 
+    # The Qwen3.5 4B gate is 8 GB: it is the 8 GB-card pick below the 9B
+    # profile's 15 GB gate, and its checkpoint/cache caps bound host RAM.
     expected = {
-        "qwen3-4b-instruct-2507-q4": ("nvidia-8gb-64k-q4-kv", "q4_0", 7.2),
-        "qwen3.5-4b-q4": ("nvidia-8gb-64k-q4-kv", "q4_0", 7.2),
+        "qwen3-4b-instruct-2507-q4": ("nvidia-8gb-64k-q4-kv", "q4_0", 7.2, 31),
+        "qwen3.5-4b-q4": ("nvidia-8gb-64k-q4-kv", "q4_0", 7.2, 8),
     }
-    for model_id, (profile_id, cache_type, required_gb) in expected.items():
+    for model_id, (profile_id, cache_type, required_gb, ram_min_gb) in expected.items():
         model = by_id[model_id]
         profiles = {profile["id"]: profile for profile in model["runtime_profiles"]}
         profile = profiles[profile_id]
@@ -351,7 +353,7 @@ def test_windows_8gb_revalidation_models_have_64k_compressed_kv_profiles():
         assert profile["memory_type"] == "discrete"
         assert profile["vram_min_gb"] == 7.5
         assert profile["vram_max_gb"] == 8.5
-        assert profile["system_ram_min_gb"] == 31
+        assert profile["system_ram_min_gb"] == ram_min_gb
         assert profile["context_length"] == HERMES_CONTEXT_FLOOR
         assert profile["estimated_required_gb"] == required_gb
         assert profile["env"]["LLAMA_PARALLEL"] == "1"

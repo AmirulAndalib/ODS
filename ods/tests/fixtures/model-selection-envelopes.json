@@ -969,8 +969,10 @@
     }
   ],
   "reference_architecture": {
-    "_comment": "Architecture for picks that carry no reviewed layout in the catalog (stale defaults the PR demotes). Only the simulation harness's corrected-estimate column reads this; selection never does. Values are from each model's config.json on Hugging Face (revision noted); weights are the catalog size (size_bytes, else size_mb in MiB).",
+    "_comment": "Architecture for picks that carry no reviewed layout in the catalog (stale defaults the PR demotes). Only the simulation harness's corrected-estimate column reads this; selection never does. Values are from each model's config.json on Hugging Face (revision noted); size_bytes is the LFS size of the catalog GGUF (its sha256 matches gguf_sha256) at the gguf_source revision.",
     "phi4-mini-q4": {
+      "size_bytes": 2491874272,
+      "gguf_source": "unsloth/Phi-4-mini-instruct-GGUF@78eb92a46fc37e6b524df991ed9aca9bc6aa7b80",
       "block_count": 32,
       "attention_head_count_kv": 8,
       "attention_key_length": 128,
@@ -979,6 +981,8 @@
       "source": "microsoft/Phi-4-mini-instruct@cfbefacb99257ffa30c83adab238a50856ac3083"
     },
     "phi4-q4": {
+      "size_bytes": 9053114816,
+      "gguf_source": "bartowski/phi-4-GGUF@19cd65f97c2f1712a81c506611d3f9c94b16a1e1",
       "block_count": 40,
       "attention_head_count_kv": 10,
       "attention_key_length": 128,
@@ -987,6 +991,8 @@
       "source": "microsoft/phi-4@2db69c1c3e91a05d2c64a3185acfbaf36f744e25"
     },
     "deepseek-r1-7b-q4": {
+      "size_bytes": 4683073248,
+      "gguf_source": "unsloth/DeepSeek-R1-Distill-Qwen-7B-GGUF@097680e4eed7a83b3df6b0bb5e5134099cadf1b0",
       "block_count": 28,
       "attention_head_count_kv": 4,
       "attention_key_length": 128,
@@ -995,6 +1001,8 @@
       "source": "deepseek-ai/DeepSeek-R1-Distill-Qwen-7B@916b56a44061fd5cd7d6a8fb632557ed4f724f60"
     },
     "deepseek-r1-70b-q4": {
+      "size_bytes": 42520396448,
+      "gguf_source": "unsloth/DeepSeek-R1-Distill-Llama-70B-GGUF@732dd974083ea5877d7b6d788b36fe7c2e5eab36",
       "block_count": 80,
       "attention_head_count_kv": 8,
       "attention_key_length": 128,
@@ -1003,6 +1011,8 @@
       "source": "deepseek-ai/DeepSeek-R1-Distill-Llama-70B@b1c0b44b4369b597ad119a196caf79a9c40e141e"
     },
     "qwen3-30b-a3b-q4": {
+      "size_bytes": 18556686912,
+      "gguf_source": "unsloth/Qwen3-30B-A3B-GGUF@d5b1d57bd0b504ac62ae6c725904e96ef228dc74",
       "block_count": 48,
       "attention_head_count_kv": 4,
       "attention_key_length": 128,
@@ -1011,6 +1021,8 @@
       "source": "Qwen/Qwen3-30B-A3B@ad44e777bcd18fa416d9da3bd8f70d33ebb85d39"
     },
     "qwen3.5-35b-a3b-q4": {
+      "size_bytes": 22016023168,
+      "gguf_source": "unsloth/Qwen3.5-35B-A3B-GGUF@bc014a17be43adabd7066b7a86075ff935c6a4e2",
       "block_count": 40,
       "attention_layer_count": 10,
       "attention_head_count_kv": 2,

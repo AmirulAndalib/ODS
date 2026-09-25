@@ -65,7 +65,11 @@ try {
     if ((Get-CatalogModelEstimatedContextKvGB -Model $phi) -ne 15.62) {
         throw "Phi4 full-context KV allocation was underestimated"
     }
-    @{ models = @($phi) } | ConvertTo-Json -Depth 20 | Set-Content -LiteralPath (Join-Path $configDir "model-library.json")
+    # phi4-mini is no longer an install recommendation; a copy that is still
+    # exercises the architecture-driven context step-down.
+    $phiCandidate = $phi.PSObject.Copy()
+    $phiCandidate.install_recommendation = $true
+    @{ models = @($phiCandidate) } | ConvertTo-Json -Depth 20 | Set-Content -LiteralPath (Join-Path $configDir "model-library.json")
     foreach ($backend in @("nvidia", "amd", "sycl")) {
         foreach ($case in @(@(4, 8192), @(8, 32768), @(16, 65536), @(24, 128000))) {
             $gpu.Backend = $backend

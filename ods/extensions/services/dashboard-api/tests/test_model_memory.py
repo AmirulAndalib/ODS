@@ -109,7 +109,12 @@ class TestArchitectureAwareKvCache:
         from models import GPUInfo
 
         selector = _load_select_model()
-        raw = next(item for item in _catalog_entries() if item["id"] == "phi4-mini-q4")
+        # phi4-mini is no longer an install recommendation; a copy that is
+        # still exercises the architecture-driven context step-down.
+        raw = {
+            **next(item for item in _catalog_entries() if item["id"] == "phi4-mini-q4"),
+            "install_recommendation": True,
+        }
         arch = "arm64" if backend == "apple" else "amd64"
         monkeypatch.setattr(oracle.platform, "machine", lambda: arch)
         kind = "unified" if backend == "apple" else "discrete"

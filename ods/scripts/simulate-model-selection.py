@@ -144,7 +144,10 @@ class Simulator:
         if not model:
             return None
         if not architecture_metadata_complete(model) and model_id in self.reference:
-            reference = {k: v for k, v in self.reference[model_id].items() if k != "source"}
+            reference = {
+                k: v for k, v in self.reference[model_id].items()
+                if k not in {"source", "gguf_source"}
+            }
             model = {**model, **reference}
         return model if architecture_metadata_complete(model) else None
 

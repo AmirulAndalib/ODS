@@ -258,33 +258,37 @@ def main() -> int:
     assert payload["alternatives"][0]["runtime_profile"] == "nvidia-8gb-64k-q8-kv"
     assert payload["alternatives"][0]["context_length"] == 65536
 
-    result = run_selector(
-        CATALOG,
-        "--ram-gb",
-        "13",
-        max_size_mb=0,
-        agent_ready_only=False,
-    )
-    assert result.returncode == 0, result.stderr
-    payload = json.loads(result.stdout)
-    assert payload["selected"]["id"] not in {
-        "qwen3.5-9b-q4",
-        "qwen3.5-4b-q4",
-        "ministral-3-8b-instruct-q4",
-    }
+    # Below the 9B profile's 15 GB RAM gate an 8 GB card gets the 4B at 64K
+    # through its Q4-KV profile (RAM gate 8 GB), not the 32K DeepSeek-R1 7B
+    # the old size score fell back to. Neither is Pixel-verified.
+    for ram_gb in ("13", "12"):
+        result = run_selector(
+            CATALOG,
+            "--ram-gb",
+            ram_gb,
+            max_size_mb=0,
+            agent_ready_only=False,
+        )
+        assert result.returncode == 0, result.stderr
+        payload = json.loads(result.stdout)
+        assert payload["selected"]["id"] == "qwen3.5-4b-q4", (ram_gb, payload["selected"]["id"])
+        assert payload["alternatives"][0]["runtime_profile"] == "nvidia-8gb-64k-q4-kv"
+        assert payload["alternatives"][0]["context_length"] == 65536
 
-    result = run_selector(
-        CATALOG,
-        "--ram-gb",
-        "13",
-        "--env",
-        max_size_mb=0,
-        agent_ready_only=False,
-    )
-    assert result.returncode == 0, result.stderr
-    constrained_env = selector_env(result.stdout)
-    assert constrained_env["PIXEL_AGENT_MODEL_READY"] == "false"
-    assert not constrained_env.get("MODEL_RUNTIME_PROFILE")
+        result = run_selector(
+            CATALOG,
+            "--ram-gb",
+            ram_gb,
+            "--env",
+            max_size_mb=0,
+            agent_ready_only=False,
+        )
+        assert result.returncode == 0, result.stderr
+        constrained_env = selector_env(result.stdout)
+        assert constrained_env["PIXEL_AGENT_MODEL_READY"] == "false"
+        assert constrained_env["MODEL_RUNTIME_PROFILE"] == "nvidia-8gb-64k-q4-kv"
+        assert constrained_env["LLAMA_ARG_CACHE_TYPE_K"] == "q4_0"
+        assert constrained_env["LLAMA_ARG_CTX_CHECKPOINTS"] == "8"
 
     helper = ROOT / "installers" / "lib" / "wsl-memory.sh"
     helper_path = helper.as_posix()
