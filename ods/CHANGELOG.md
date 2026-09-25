@@ -25,6 +25,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   card or authenticated dashboard flow; default direct Hermes access is unchanged.
 
 ### Changed
+- Perplexica now runs upstream release v1.12.2, published under its new name
+  Vane (`itzcrazykns1337/vane:slim-v1.12.2`, digest-pinned). The UI shows the
+  Vane name; ODS keeps the `perplexica` service, port and volumes, so settings
+  and chat history carry over. Speed and Balanced searches now rank SearXNG
+  results with the configured embedding model. The slim release image has no
+  Chromium, so Quality mode and the `scrape_url` tool cannot read pages.
 - llama-server on the NVIDIA and CPU images (llama.cpp b9014) now uses lossless
   n-gram speculative decoding (`--spec-type ngram-mod`) unless the model's
   runtime profile sets its own `LLAMA_ARG_SPEC_TYPE`. On an RTX 5090 with
