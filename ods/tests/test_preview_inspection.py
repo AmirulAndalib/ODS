@@ -1512,6 +1512,8 @@ class BrowserTests(unittest.TestCase):
             '<input type=radio aria-labelledby="lbl2" hidden><span id=lbl2 hidden>Seat <b>A</b></span>'
             '<div role="button" hidden><img alt="Star"> Favourite</div>'
             '<h5 hidden title="Tooltip heading"></h5><template><h2>Template</h2></template>'
+            '<button hidden><svg width="8" height="8"><title>Dismiss</title></svg></button>'
+            '<button hidden><span aria-hidden="true">✕</span> Close panel</button>'
         )
         queries = [
             ("heading", "Dawn Jazz"), ("heading", "Midnight Sold-Out Concert"), ("heading", "Late Show"),
@@ -1524,7 +1526,8 @@ class BrowserTests(unittest.TestCase):
             ("combobox", "City Bergen"), ("combobox", "City"), ("heading", "Tonight only"),
             ("heading", "Tonight"), ("radio", "Seat A"), ("button", "Star Favourite"),
             ("heading", "Tooltip heading"), ("heading", "Template"), ("heading", "midnight sold-out concert"),
-            ("heading", "Midnight  Sold-Out   Concert"),
+            ("heading", "Midnight  Sold-Out   Concert"), ("button", "Dismiss"), ("button", "✕ Close panel"),
+            ("button", "Close panel"),
         ]
         with sync_playwright() as p:
             browser = p.chromium.launch(headless=True, args=["--no-sandbox", "--disable-dev-shm-usage"])
