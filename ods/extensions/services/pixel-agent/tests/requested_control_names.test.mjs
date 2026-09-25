@@ -28,6 +28,14 @@ const FIXTURE = new URL('../../../../tests/fixtures/preview-controls/tower2-r100
 const FILES = Object.fromEntries(['index.html', 'script.js', 'styles.css']
   .map(name => [name, fs.readFileSync(new URL(name, FIXTURE), 'utf8')]));
 const REPAIRED = {...FILES, 'script.js': FILES['script.js'].replace(TOWER2.repair.remove, '')};
+// The repaired page with only the button's markup changed: correct, accessible
+// buttons whose hidden decorations (an aria-hidden icon or chevron, a hidden
+// alternate label, a display:none badge) are no part of the accessible name.
+const VARIANTS = Object.keys(TOWER2.variants.markup);
+function variantFiles(name) {
+  assert.equal(REPAIRED['index.html'].split(TOWER2.variants.button).length, 2);
+  return {...REPAIRED, 'index.html': REPAIRED['index.html'].replace(TOWER2.variants.button, () => TOWER2.variants.markup[name])};
+}
 const RECEIPT = TOWER2.publicationReceipt;
 const DIRECTORY = RECEIPT.relativeDirectory;
 const [ROLE_CALL, CSS_CALL] = TOWER2.calls;
@@ -128,6 +136,21 @@ test('fixture pages: a replaced name is flagged, a correct or icon button with t
   const mismatch = requestedControlNameCheck(NAMES, preview, evidence(preview, TOWER2.controls.mismatch));
   assert.match(requestedControlNameInstruction(preview, mismatch, sources),
     /is named "Reveal the sold-out concert" by its aria-label attribute in the HTML, which replaces its text/);
+});
+
+test('a correct control whose hidden decorations are no part of its name is not a missing name', () => {
+  // The capsule names a rendered control as Chromium and the fleet's default
+  // getByRole do; before that, these read "🎫 Show sold out", "Show sold
+  // out▾", "Show sold out Hide sold out" and "Show sold out (1)".
+  for (const name of VARIANTS) {
+    const preview = snapshot(variantFiles(name));
+    assert.deepEqual(TOWER2.controls[name].items.at(-1), {role: 'button', name: 'Show sold out', visible: true, source: 'content'});
+    assert.deepEqual(plain(requestedControlNameCheck(NAMES, preview, evidence(preview, TOWER2.controls[name])).missing), [], name);
+  }
+  // A link whose arrow is aria-hidden.
+  const preview = snapshot({'index.html': TOWER2.pages['arrow-link']});
+  const link = extractRequestedControlNames('Add a link named exactly "All events".');
+  assert.deepEqual(plain(requestedControlNameCheck(link, preview, evidence(preview, TOWER2.controls['arrow-link'])).missing), []);
 });
 
 test('only a complete list bound to this snapshot proves a missing name', () => {
@@ -328,6 +351,41 @@ test('tower2 round 100: removing the script override, republishing and inspectin
   assert.equal(outcome.status, 'passed', outcome.text);
   assert.doesNotMatch(outcome.text, /has no button named/);
   assert.equal(outcome.preview.sha256, republished.receipt.sha256);
+});
+
+// The CSS plan's passed receipt with the click addressed by the exact role
+// and name instead: the model's own exact-name check, which passes on these
+// pages in the capsule (test_preview_inspection.py). On the icon variant it
+// matches nothing, as recorded in round 100's first call: Chromium's own name
+// keeps the space after the aria-hidden icon.
+const ROLE_PASS_CALL = {arguments: ROLE_CALL.arguments, receipt: {...structuredClone(CSS_CALL.receipt),
+  steps: CSS_CALL.receipt.steps.map((step, index) => ({...step, locator: ROLE_CALL.arguments.steps[index].locator}))}};
+const CONTROL_NAME_REPAIR = /no button has that accessible name|\[ODS Pixel next step\] The owner requested a button/;
+
+test('round 100 with a correct button that carries hidden decorations: no name repair, and delivery passes', async t => {
+  for (const name of VARIANTS) {
+    await t.test(name, async st => {
+      const f = fixture(st), files = variantFiles(name);
+      f.write(files, 'write');
+      const {receipt} = f.publish(files, 'publish');
+      const role = await f.inspect(name === 'aria-hidden-icon' ? ROLE_CALL : ROLE_PASS_CALL, TOWER2.controls[name], receipt,
+        'inspect-role');
+      assert.doesNotMatch(role, CONTROL_NAME_REPAIR, role);
+      assert.doesNotMatch(role, /whose text is "Show sold out" has the accessible name/, role);
+      if (name !== 'aria-hidden-icon') assert.match(role, /^Preview inspection passed\. These steps tested opposite visibility states/);
+      const css = await f.inspect(CSS_CALL, TOWER2.controls[name], receipt, 'inspect-css');
+      assert.match(css, /^Preview inspection passed\. These steps tested opposite visibility states/);
+      assert.doesNotMatch(css, CONTROL_NAME_REPAIR, css);
+      // The first passed show/hide inspection says to give the final result.
+      assert.ok((name === 'aria-hidden-icon' ? css : role).includes(`[ODS Pixel next step] ${WORKSPACE_PREVIEW_COMPLETE_REASON}`),
+        `${role}
+${css}`);
+      assert.equal(f.finalize(TOWER2.finalAnswer), undefined);
+      const outcome = f.delivered();
+      assert.equal(outcome.status, 'passed', outcome.text);
+      assert.equal(outcome.preview.sha256, receipt.sha256);
+    });
+  }
 });
 
 test('an inspection without load-time names (older capsule) changes no verdict and asks for no more checks', async t => {

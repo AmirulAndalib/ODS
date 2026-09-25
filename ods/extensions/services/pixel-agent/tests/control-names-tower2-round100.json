@@ -1,5 +1,5 @@
 {
- "evidence": "ODS main b060c6ae qualification r049 round 100, tower2 (Qwen3-Coder-Next), website-create. script.js set aria-label 'Show the sold out midnight concert card' on the 'Show sold out' button at load; the model's exact-name click matched nothing, it passed with a CSS selector, answered verified, and the fleet's getByRole('button', {name: 'Show sold out', exact: true}) click failed. Snapshot files: ods/tests/fixtures/preview-controls/tower2-r100. 'controls' were captured by this change's capsule (CONTROL_NAMES) from the same bytes, the repaired bytes (the setAttribute line removed) and three small pages; test_preview_inspection.py replays them in Chromium. Receipts are the session's persisted inspection details without the transcript's added ok flag.",
+ "evidence": "ODS main b060c6ae qualification r049 round 100, tower2 (Qwen3-Coder-Next), website-create. script.js set aria-label 'Show the sold out midnight concert card' on the 'Show sold out' button at load; the model's exact-name click matched nothing, it passed with a CSS selector, answered verified, and the fleet's getByRole('button', {name: 'Show sold out', exact: true}) click failed. Snapshot files: ods/tests/fixtures/preview-controls/tower2-r100. 'controls' were captured by this change's capsule (CONTROL_NAMES) from the same bytes, the repaired bytes (the setAttribute line removed), four variants of the repaired page that differ only in the button's markup (an aria-hidden icon or chevron, a hidden alternate label, a display:none badge) and four small pages; test_preview_inspection.py replays them in Chromium. Receipts are the session's persisted inspection details without the transcript's added ok flag.",
  "prompt": "Create a polished responsive static event website in a new workspace directory fleet-qualification-effea25da14b. Actually write files and publish a verified Pixel workspace preview. Page title and one h1 must be exactly \"Night Garden FLEET-a4064548a8\". Include three event cards: Dawn jazz, River lantern walk, and Midnight sold-out concert. Initially hide the entire Midnight sold-out concert card. Provide an accessible button named exactly \"Show sold out\" that reveals that card when clicked. Mobile width 375px must not overflow horizontally. Use semantic HTML, attractive CSS, working JavaScript, no external libraries, no localStorage dependency. Include the preview URL in your final response. Do the work now.",
  "publicationReceipt": {
   "boundary": "Create-only static-site snapshot from the configured Pixel workspace to a dedicated loopback preview origin; no arbitrary host path, network destination, server process, overwrite, or execution authority.",
@@ -313,10 +313,20 @@
   "path": "script.js",
   "remove": "    showSoldOutBtn.setAttribute('aria-label', 'Show the sold out midnight concert card');\n"
  },
+ "variants": {
+  "button": "<button class=\"show-more-btn\" id=\"show-sold-out-btn\" type=\"button\" aria-label=\"Show sold out\">Show sold out</button>",
+  "markup": {
+   "aria-hidden-icon": "<button class=\"show-more-btn\" id=\"show-sold-out-btn\" type=\"button\"><span aria-hidden=\"true\">🎫</span> Show sold out</button>",
+   "aria-hidden-chevron": "<button class=\"show-more-btn\" id=\"show-sold-out-btn\" type=\"button\">Show sold out<span aria-hidden=\"true\">▾</span></button>",
+   "hidden-alternate-label": "<button class=\"show-more-btn\" id=\"show-sold-out-btn\" type=\"button\"><span class=\"label-show\">Show sold out</span> <span class=\"label-hide\" hidden>Hide sold out</span></button>",
+   "display-none-child": "<button class=\"show-more-btn\" id=\"show-sold-out-btn\" type=\"button\">Show sold out <span class=\"sold-out-count\" style=\"display: none\">(1)</span></button>"
+  }
+ },
  "pages": {
   "correct": "<!doctype html><title>Night Garden</title><h1>Night Garden</h1><article class=\"event-card\" id=\"midnight-concert\" hidden><h2>Midnight Sold-Out Concert</h2></article><button type=\"button\" id=\"show-sold-out-btn\" onclick=\"document.getElementById('midnight-concert').hidden=false\">Show sold out</button>",
   "icon": "<!doctype html><title>Night Garden</title><h1>Night Garden</h1><article class=\"event-card\" id=\"midnight-concert\" hidden><h2>Midnight Sold-Out Concert</h2></article><button type=\"button\" id=\"show-sold-out-btn\" aria-label=\"Show sold out\" onclick=\"document.getElementById('midnight-concert').hidden=false\"><svg aria-hidden=\"true\" width=\"16\" height=\"16\" viewBox=\"0 0 16 16\"><path d=\"M1 8h14M8 1v14\" stroke=\"currentColor\"/></svg></button>",
-  "mismatch": "<!doctype html><title>Night Garden</title><h1>Night Garden</h1><article class=\"event-card\" id=\"midnight-concert\" hidden><h2>Midnight Sold-Out Concert</h2></article><button type=\"button\" id=\"show-sold-out-btn\" aria-label=\"Reveal the sold-out concert\" onclick=\"document.getElementById('midnight-concert').hidden=false\">Show sold out</button>"
+  "mismatch": "<!doctype html><title>Night Garden</title><h1>Night Garden</h1><article class=\"event-card\" id=\"midnight-concert\" hidden><h2>Midnight Sold-Out Concert</h2></article><button type=\"button\" id=\"show-sold-out-btn\" aria-label=\"Reveal the sold-out concert\" onclick=\"document.getElementById('midnight-concert').hidden=false\">Show sold out</button>",
+  "arrow-link": "<!doctype html><title>Night Garden</title><h1>Night Garden</h1><article class=\"event-card\" id=\"midnight-concert\" hidden><h2>Midnight Sold-Out Concert</h2></article><button type=\"button\" id=\"show-sold-out-btn\" onclick=\"document.getElementById('midnight-concert').hidden=false\">Show sold out</button> <a href=\"#events\">All events <span aria-hidden=\"true\">→</span></a>"
  },
  "controls": {
   "tower2": {
@@ -366,6 +376,98 @@
     }
    ]
   },
+  "aria-hidden-icon": {
+   "count": 3,
+   "items": [
+    {
+     "role": "link",
+     "name": "Get Tickets",
+     "visible": true,
+     "source": "content"
+    },
+    {
+     "role": "link",
+     "name": "Get Tickets",
+     "visible": true,
+     "source": "content"
+    },
+    {
+     "role": "button",
+     "name": "Show sold out",
+     "visible": true,
+     "source": "content"
+    }
+   ]
+  },
+  "aria-hidden-chevron": {
+   "count": 3,
+   "items": [
+    {
+     "role": "link",
+     "name": "Get Tickets",
+     "visible": true,
+     "source": "content"
+    },
+    {
+     "role": "link",
+     "name": "Get Tickets",
+     "visible": true,
+     "source": "content"
+    },
+    {
+     "role": "button",
+     "name": "Show sold out",
+     "visible": true,
+     "source": "content"
+    }
+   ]
+  },
+  "hidden-alternate-label": {
+   "count": 3,
+   "items": [
+    {
+     "role": "link",
+     "name": "Get Tickets",
+     "visible": true,
+     "source": "content"
+    },
+    {
+     "role": "link",
+     "name": "Get Tickets",
+     "visible": true,
+     "source": "content"
+    },
+    {
+     "role": "button",
+     "name": "Show sold out",
+     "visible": true,
+     "source": "content"
+    }
+   ]
+  },
+  "display-none-child": {
+   "count": 3,
+   "items": [
+    {
+     "role": "link",
+     "name": "Get Tickets",
+     "visible": true,
+     "source": "content"
+    },
+    {
+     "role": "link",
+     "name": "Get Tickets",
+     "visible": true,
+     "source": "content"
+    },
+    {
+     "role": "button",
+     "name": "Show sold out",
+     "visible": true,
+     "source": "content"
+    }
+   ]
+  },
   "correct": {
    "count": 1,
    "items": [
@@ -397,6 +499,23 @@
      "visible": true,
      "source": "aria-label",
      "text": "Show sold out"
+    }
+   ]
+  },
+  "arrow-link": {
+   "count": 2,
+   "items": [
+    {
+     "role": "button",
+     "name": "Show sold out",
+     "visible": true,
+     "source": "content"
+    },
+    {
+     "role": "link",
+     "name": "All events",
+     "visible": true,
+     "source": "content"
     }
    ]
   }

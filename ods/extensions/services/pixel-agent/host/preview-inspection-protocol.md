@@ -181,12 +181,21 @@ capsule evaluates one read-only function in the isolated world. It walks the
 document (and open shadow roots) with the same Playwright-compatible role and
 name rules as the hidden-inclusive matcher and records every element whose
 role is `button` or `link`, hidden ones included, in document order: its role,
-its computed accessible name, whether it is exposed (rendered with a box by
-display, visibility and content-visibility, and outside `aria-hidden`; opacity,
-which entrance animations change at load, is ignored), what supplied the name
-(`aria-labelledby`, `aria-label`, `content`, or `other` such as `title`,
-`value` or a `<label>`), and its own content text when that differs from the
-name. Names and text are author-controlled: whitespace is collapsed, control,
+its computed accessible name, whether it is exposed (in the accessibility tree
+and rendered with a box; opacity, which entrance animations change at load, is
+ignored), what supplied the name (`aria-labelledby`, `aria-label`, `content`,
+or `other` such as `title`, `value` or a `<label>`), and its own content text
+when that differs from the name. A control in the accessibility tree is named
+as Chromium and the fleet's default `getByRole(role, {name, exact: true})` name
+it: descendants the tree leaves out (Playwright's hidden-for-ARIA rules:
+`display: none`, a non-visible `visibility`, `content-visibility`,
+`aria-hidden="true"` on the element or an ancestor) contribute nothing, so an
+`aria-hidden` icon or chevron, a hidden alternate label or a `display: none`
+badge is no part of the name, unless it is reached through an
+`aria-labelledby`, `<label>` or SVG `<title>` reference that is itself hidden.
+A control that is itself hidden keeps the hidden-inclusive name that
+`getByRole(..., {includeHidden: true})` matches. The own text follows the same
+rule. Names and text are author-controlled: whitespace is collapsed, control,
 format, private-use, surrogate, unassigned and line or paragraph separator code
 points become spaces, and each is cut to 120 characters (119 plus `…`).
 
@@ -265,9 +274,13 @@ Set `ODS_PREVIEW_BROWSER_TESTS=1` only for the fixture Chromium suite; it also
 checks the hidden-inclusive role/name matcher against Playwright's own
 `includeHidden` engine, and replays the fleet round 069 page
 (`tests/fixtures/preview-palette/tower1-r069`) and its amber repair, and the
-fleet round 100 page (`tests/fixtures/preview-controls/tower2-r100`), its repair
-and three small pages for load-time control names, checked against Playwright's
-`getByRole` names. Set
+fleet round 100 page (`tests/fixtures/preview-controls/tower2-r100`), its repair,
+four variants of the repaired page whose button carries hidden decorations, and
+four small pages for load-time control names, and a page of hidden-descendant,
+`aria-labelledby`, `<label>`, SVG `<title>` and hidden-control cases. Each
+reported name is checked per element against Playwright's own name: the default
+`getByRole` engine for a control in the accessibility tree, `includeHidden` for
+a hidden one. Set
 `ODS_INSPECTION_TEST_IMAGE=sha256:<candidate>` for real isolated-container
 smoke, observed hidden-flex regression, hung-script, and cancellation cleanup.
 These test-only variables never select a production image or grant authority.

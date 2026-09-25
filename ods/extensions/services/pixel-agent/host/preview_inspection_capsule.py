@@ -67,7 +67,8 @@ SELECTOR_COUNT = r"""function(selector) {
 # isolated world, so page script cannot replace the DOM or style APIs it reads.
 # Chromium's own rendered matches are passed in and kept, so a rendered element
 # is matched exactly as before; the union is de-duplicated by identity. The
-# role and name rules are shared with CONTROL_NAMES below.
+# role and name rules are shared with CONTROL_NAMES below, which alone also
+# uses their includeHidden:false mode (`rendered`).
 ACCESSIBLE_NAME_RULES = r"""  const VALID = new Set(('alert alertdialog application article banner blockquote button caption cell checkbox code ' +
     'columnheader combobox complementary contentinfo definition deletion dialog directory document emphasis feed figure ' +
     'form generic grid gridcell group heading img insertion link list listbox listitem log main mark marquee math meter ' +
@@ -162,9 +163,48 @@ ACCESSIBLE_NAME_RULES = r"""  const VALID = new Set(('alert alertdialog applicat
     const text = parts.map(t => t.text).join('');
     return pseudo && (s.display || 'inline') !== 'inline' ? ' ' + text + ' ' : text;
   };
+  // Playwright's isElementHiddenForAria: what the accessibility tree and a
+  // default getByRole leave out (script and style content, display:none or
+  // a non-visible visibility, content-visibility, aria-hidden="true" on the
+  // element or an ancestor, unslotted shadow-host children).
+  const parentOf = e => e.parentElement || (e.parentNode && e.parentNode.nodeType === 11 && e.parentNode.host) || null;
+  const outsideTree = new Map();
+  const excluded = e => {
+    if (!outsideTree.has(e)) {
+      const s = style(e), parent = parentOf(e);
+      outsideTree.set(e, Boolean(e.parentElement && e.parentElement.shadowRoot && !e.assignedSlot) || !s ||
+        s.display === 'none' || (e.getAttribute('aria-hidden') || '').toLowerCase() === 'true' || Boolean(parent && excluded(parent)));
+    }
+    return outsideTree.get(e);
+  };
+  const textShown = node => {
+    const range = node.ownerDocument.createRange();
+    range.selectNode(node);
+    const box = range.getBoundingClientRect();
+    return box.width > 0 && box.height > 0;
+  };
+  const hiddenForAria = e => {
+    const t = tag(e), s = style(e);
+    if (IGNORED.has(t)) return true;
+    if (s && s.display === 'contents' && t !== 'slot') {
+      for (let child = e.firstChild; child; child = child.nextSibling) {
+        if (child.nodeType === 1 && !hiddenForAria(child)) return false;
+        if (child.nodeType === 3 && textShown(child)) return false;
+      }
+      return true;
+    }
+    if (!(t === 'option' && e.closest('select')) && t !== 'slot' && s && (!e.checkVisibility() || s.visibility !== 'visible'))
+      return true;
+    return excluded(e);
+  };
+  // Options: `rendered` computes Playwright's includeHidden:false name, which
+  // skips hidden descendants unless they are reached through an aria-labelledby,
+  // <label> or SVG <title> reference that is itself hidden; without it (the
+  // hidden-inclusive matcher, a hidden control) nothing is skipped.
+  const reference = (o, e, kind) => o.rendered ? {rendered: true, [kind]: hiddenForAria(e)} : {};
   const labels = e => { try { return [...(e.labels || [])]; } catch { return []; } };
-  const fromLabels = (list, o) =>
-    list.map(label => alternative(label, {visited: o.visited, label: true})).filter(Boolean).join(' ');
+  const fromLabels = (list, o) => list.map(label =>
+    alternative(label, {visited: o.visited, label: true, ...reference(o, label, 'hiddenLabel')})).filter(Boolean).join(' ');
   const inner = (e, o) => {
     const out = [cssContent(e, '::before') || ''], own = cssContent(e);
     const visit = node => {
@@ -188,10 +228,12 @@ ACCESSIBLE_NAME_RULES = r"""  const VALID = new Set(('alert alertdialog applicat
     const visited = o.visited, t = tag(e);
     if (visited.has(e)) return '';
     if (IGNORED.has(t)) { visited.add(e); return ''; }
+    if (o.rendered && !o.hiddenLabelledBy && !o.hiddenLabel && hiddenForAria(e)) { visited.add(e); return ''; }
     const child = {...o, target: o.target === 'self' ? 'descendant' : o.target};
     const labelledBy = e.hasAttribute('aria-labelledby') ? idRefs(e, 'aria-labelledby') : [];
     if (!o.labelledBy) {
-      const text = labelledBy.map(ref => alternative(ref, {visited, labelledBy: true})).join(' ');
+      const text = labelledBy.map(ref =>
+        alternative(ref, {visited, labelledBy: true, ...reference(o, ref, 'hiddenLabelledBy')})).join(' ');
       if (text) return text;
     }
     const r = roleOf(e) || '';
@@ -240,6 +282,13 @@ ACCESSIBLE_NAME_RULES = r"""  const VALID = new Set(('alert alertdialog applicat
         const alt = e.getAttribute('alt') || '';
         return alt.trim() ? alt : e.getAttribute('title') || '';
       }
+      if (t === 'svg' || e.ownerSVGElement) {
+        visited.add(e);
+        for (let title = e.firstElementChild; title; title = title.nextElementSibling) {
+          if (tag(title) === 'title' && title.ownerSVGElement)
+            return alternative(title, {...child, labelledBy: true, ...reference(o, title, 'hiddenLabelledBy')});
+        }
+      }
     }
     if (CONTENT.has(r) || (o.target === 'descendant' && DESCENDANT.has(r)) || o.labelledBy || o.label ||
         (t === 'summary' && r !== 'presentation' && r !== 'none')) {
@@ -280,26 +329,32 @@ MAX_RENDERED_MATCHES = 32
 # (fleet round 100: setAttribute('aria-label', ...) on load), so the capsule
 # reports the computed name, whether the element is exposed, what supplied the
 # name, and the element's own content text when that differs from the name.
-# Exposed means rendered with a box (display, visibility, content-visibility)
-# and outside aria-hidden. Opacity is ignored: entrance animations change it
-# at load, and it hides nothing from assistive technology or role locators.
-# Read-only, in the isolated world; evidence only, never a step or a status.
+# A control in the accessibility tree gets the name Chromium and a default
+# getByRole(role, {name, exact: true}) use: hidden descendants (an aria-hidden
+# icon, a hidden alternate label, a display:none badge) do not contribute. A
+# control that is itself hidden keeps the hidden-inclusive name that
+# getByRole(..., {includeHidden: true}) matches. Exposed means in the
+# accessibility tree and rendered with a box. Opacity is ignored: entrance
+# animations change it at load, and it hides nothing from assistive technology
+# or role locators. Read-only, in the isolated world; evidence only, never a
+# step or a status.
 CONTROL_NAMES = "function(limit) {\n" + ACCESSIBLE_NAME_RULES + r"""  const CONTROLS = new Set(['button', 'link']);
-  const rendered = e => e.checkVisibility({checkVisibilityCSS:true,contentVisibilityAuto:true}) &&
-    [...e.getClientRects()].some(r => r.width > 0 && r.height > 0) && !e.closest('[aria-hidden="true"]');
+  const boxed = e => e.checkVisibility({checkVisibilityCSS:true,contentVisibilityAuto:true}) &&
+    [...e.getClientRects()].some(r => r.width > 0 && r.height > 0);
   const items = [];
   let count = 0;
   const walk = root => {
     for (const e of root.querySelectorAll('*')) {
       const role = roleOf(e);
       if (CONTROLS.has(role) && count++ < limit) {
-        const name = normal(flat(alternative(e, {visited: new Set(), target: 'self'})));
-        const text = normal(flat(inner(e, {visited: new Set([e]), target: 'descendant'})));
-        const labelledBy = e.hasAttribute('aria-labelledby') &&
-          idRefs(e, 'aria-labelledby').map(ref => alternative(ref, {visited: new Set(), labelledBy: true})).join(' ');
+        const rendered = !hiddenForAria(e);
+        const name = normal(flat(alternative(e, {visited: new Set(), target: 'self', rendered})));
+        const text = normal(flat(inner(e, {visited: new Set([e]), target: 'descendant', rendered})));
+        const labelledBy = e.hasAttribute('aria-labelledby') && idRefs(e, 'aria-labelledby').map(ref =>
+          alternative(ref, {visited: new Set(), labelledBy: true, ...reference({rendered}, ref, 'hiddenLabelledBy')})).join(' ');
         const source = labelledBy ? 'aria-labelledby' : (e.getAttribute('aria-label') || '').trim() ? 'aria-label'
           : name && name === text ? 'content' : 'other';
-        items.push({role, name, text, source, visible: rendered(e)});
+        items.push({role, name, text, source, visible: rendered && boxed(e)});
       }
       if (e.shadowRoot) walk(e.shadowRoot);
     }

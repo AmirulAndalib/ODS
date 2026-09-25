@@ -239,7 +239,11 @@ selector, that inspection passed, and the fleet's
 
 Every inspection receipt now carries the load-time names of the page's buttons
 and links (`controls`, see `host/preview-inspection-protocol.md`), captured
-before any step, hidden ones included. The latest receipt bound to the current
+before any step, hidden ones included. A rendered control is named as the
+fleet's default `getByRole(role, {name, exact: true})` names it, so hidden
+descendants (an `aria-hidden` icon or chevron, a hidden alternate label, a
+`display: none` badge) never turn a correct name into a missing one; a hidden
+control keeps its hidden-inclusive name. The latest receipt bound to the current
 snapshot decides, whether its steps passed or failed; "named exactly" compares
 case-sensitively after whitespace and typographic normalization, "named"
 without "exactly" ignores case. A name counts as missing only when the receipt
@@ -270,7 +274,9 @@ and name. Finalization requests one bounded revision
 a fixed statement of the missing name. `tests/requested_control_names.test.mjs`
 replays round 100 with the recorded snapshot bytes
 (`ods/tests/fixtures/preview-controls/tower2-r100`), the model's two recorded
-inspection plans and the names this capsule reports for those bytes.
+inspection plans and the names this capsule reports for those bytes, and four
+variants of the repaired page whose correct button carries hidden decorations:
+no name repair, and delivery passes.
 
 ## Saved project delivery
 
