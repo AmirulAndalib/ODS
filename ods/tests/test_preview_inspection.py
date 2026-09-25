@@ -803,6 +803,17 @@ TOWER2_R100_CSS_PLAN = [step("assert-hidden", "#midnight-concert"), step("click"
                         step("assert-visible", "#midnight-concert")]
 
 
+def fixture_server(files):
+    """A Playwright route handler serving a fixture site's files by name."""
+    types = {"html": "text/html", "js": "application/javascript", "css": "text/css"}
+
+    def serve(route):
+        path = route.request.url.rsplit("/", 1)[1] or "index.html"
+        route.fulfill(body=files[path], content_type=types[path.rsplit(".", 1)[1]])
+
+    return serve
+
+
 class NamedBrowser(ScriptedBrowser):
     """ScriptedBrowser whose isolated world answers CONTROL_NAMES."""
 
@@ -1650,13 +1661,7 @@ class BrowserTests(unittest.TestCase):
                 for name, files in self.control_pages():
                     with self.subTest(page=name):
                         page = browser.new_page()
-                        types = {"html": "text/html", "js": "application/javascript", "css": "text/css"}
-
-                        def serve(route, files=files):
-                            path = route.request.url.rsplit("/", 1)[1] or "index.html"
-                            route.fulfill(body=files[path], content_type=types[path.rsplit(".", 1)[1]])
-
-                        page.route("http://fixture.test/**", serve)
+                        page.route("http://fixture.test/**", fixture_server(files))
                         page.goto("http://fixture.test/")
                         page.wait_for_timeout(100)
                         for item in CONTROL_REPLAY["controls"][name]["items"]:
