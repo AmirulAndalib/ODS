@@ -6,7 +6,7 @@ import os from 'node:os';
 import path from 'node:path';
 import {createToolLoopGuard, WORKSPACE_PREVIEW_COMPLETE_REASON} from '../plugin/tool-loop-guard.mjs';
 import {extractRequestedLiterals, missingRequestedText, requestedTextCheck, requestedTextInstruction,
-  requestedTextDeliveryNote, MAX_REQUESTED_LITERALS} from '../plugin/requested-literals.mjs';
+  requestedTextRevisionInstruction, requestedTextDeliveryNote, MAX_REQUESTED_LITERALS} from '../plugin/requested-literals.mjs';
 
 // Owner prompts from ODS main qualification r049 (tower2 round 058).
 const FLEET_CREATE = 'Create a polished responsive static event website in a new workspace directory fleet-qualification-4704eac67f72. Actually write files and publish a verified Pixel workspace preview. Page title and one h1 must be exactly "Night Garden FLEET-068aa1af7e". Include three event cards: Dawn jazz, River lantern walk, and Midnight sold-out concert. Initially hide the entire Midnight sold-out concert card. Provide an accessible button named exactly "Show sold out" that reveals that card when clicked. Mobile width 375px must not overflow horizontally. Use semantic HTML, attractive CSS, working JavaScript, no external libraries, no localStorage dependency. Include the preview URL in your final response. Do the work now.';
@@ -275,10 +275,12 @@ test('a renamed card is reported in the publication result, gates the claim once
   const retry = guard.beforeAgentFinalize({}, context)?.retry;
   assert.equal(retry?.idempotencyKey, 'pixel-ods-workspace-preview-requested-text');
   assert.equal(retry?.maxAttempts, 1);
-  assert.equal(retry?.instruction, instruction.replace('[ODS Pixel next step] ', ''));
-  // Identical coaching is not repeated on the next results (coachingDue).
+  assert.equal(retry?.instruction, requestedTextRevisionInstruction(preview, {siteId: preview.siteId, sha256: preview.sha256,
+    missing: [{text: 'Dawn jazz'}]}));
+  // Identical coaching is not repeated on the next results (coachingDue), and
+  // the finalization request already spent this run's one revision.
   call(guard, 'read', {path: `${DIRECTORY}/index.html`}, 'read', {content: [{type: 'text', text: eventPage()}]});
-  assert.ok(!text(persist(guard, 'read', 'read', {content: [{type: 'text', text: eventPage()}]})).includes('Requested text not found'));
+  assert.doesNotMatch(text(persist(guard, 'read', 'read', {content: [{type: 'text', text: eventPage()}]})), /Requested text/);
   const repaired = publishSite(guard, {'index.html': eventPage({dawn: 'Dawn jazz'}), 'script.js': SCRIPT}, 'republish');
   assert.notEqual(repaired.sha256, preview.sha256);
   const republished = persist(guard, 'pixel_ods_workspace_preview', 'republish', {content: [{type: 'text', text: 'published'}], details: repaired});
