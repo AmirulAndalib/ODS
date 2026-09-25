@@ -358,9 +358,22 @@ def linux_cleanup(*, source, owner_uid, remove=False):
     """
     if os.geteuid() != 0 or sys.platform != "linux":
         raise ValueError("linux-root-required")
+    # Cleanup may run from an older stable candidate against a newer installed
+    # generation. Recognize only the complete fixed document helper set; this
+    # does not enable or install those helpers in the stable runtime.
+    runtime_files = RUNTIME_FILES
+    document_names = (
+        "preview_inspection_document.py",
+        "preview_inspection_lease.py",
+        "preview_inspection_leases.py",
+    )
+    if any(os.path.lexists(Path(source) / name) for name in document_names):
+        for name in document_names:
+            source_bytes(Path(source) / name, owner_uid)
+        runtime_files += ("preview_inspection_leases.py",)
     expected = {
         PROGRAM_ROOT / name: source_bytes(Path(source) / name, owner_uid)
-        for name in RUNTIME_FILES
+        for name in runtime_files
     }
     expected[UNIT] = source_bytes(Path(source) / UNIT.name, owner_uid)
     present = []

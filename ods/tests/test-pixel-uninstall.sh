@@ -1044,6 +1044,69 @@ for fault in changed missing symlink writable hardlink; do
     fi
 done
 
+# A later producer added three source helpers to the v10 contract. Freeze its
+# exact ordered inventory here so stable cleanup can retire it without enabling
+# that producer's runtime features. The ordinary fixture above covers old v10.
+write_document_inspection_contract_fixture() {
+    write_inspection_contract_fixture
+    python3 - "$INSTALL_DIR" "$HOME_DIR/.config/ods/pixel-managed.json" <<'PY'
+import hashlib, json, pathlib, sys
+root, marker = map(pathlib.Path, sys.argv[1:])
+host = root / 'extensions/services/pixel-agent/host'
+documents = ('preview_inspection_document.py', 'preview_inspection_lease.py', 'preview_inspection_leases.py')
+for name in documents:
+    (host / name).write_text('# frozen later-generation fixture: ' + name + '\n')
+    (host / name).chmod(0o600)
+paths = [
+    root / 'data/pixel/onboarding.json', root / 'data/pixel/operations-policy.json',
+    root / 'data/pixel/extension-catalog.json', host / 'extension_search.py',
+    host / 'extension_manager.py', root / 'data/pixel/extension-manager.service',
+    root / 'bin/ods-pixel-approve', host / 'artifact_promoter.py',
+    root / 'data/pixel/artifact-promoter.service', host / 'pixel-ops-broker-ods.conf',
+    host / 'workspace_preview.py', root / 'data/pixel/workspace-preview.service',
+    host / 'system_observe.py', host / 'unix_peer.py',
+]
+paths += [host / name for name in (
+    'preview_inspection.py', 'preview_inspection_protocol.py', 'preview_inspection_capsule.py',
+    *documents, 'Dockerfile.inspection', 'preview-inspection.requirements.lock',
+    'pixel-preview-inspection.service')]
+digest = hashlib.sha256(b'ods-pixel-contract-v10\0')
+for path in paths:
+    body = path.read_bytes()
+    digest.update(len(body).to_bytes(8, 'big'))
+    digest.update(body)
+value = json.loads(marker.read_text())
+value['contract_sha256'] = digest.hexdigest()
+marker.write_text(json.dumps(value) + '\n')
+PY
+}
+
+write_document_inspection_contract_fixture
+if ods_pixel_uninstall_managed "$INSTALL_DIR" "$HOME_DIR"; then
+    pass "complete later document generation remains removable by stable cleanup"
+else
+    fail "complete later document generation was stranded by stable cleanup"
+fi
+for fault in changed missing symlink writable hardlink; do
+    write_document_inspection_contract_fixture
+    document_source="$INSTALL_DIR/extensions/services/pixel-agent/host/preview_inspection_leases.py"
+    case "$fault" in
+        changed) printf '\n# changed\n' >>"$document_source" ;;
+        missing) rm -- "$document_source" ;;
+        symlink) mv "$document_source" "$document_source.saved"; ln -s "$document_source.saved" "$document_source" ;;
+        writable) chmod 0666 "$document_source" ;;
+        hardlink) ln "$document_source" "$document_source.link" ;;
+    esac
+    if ods_pixel_uninstall_managed "$INSTALL_DIR" "$HOME_DIR"; then
+        fail "later document generation accepted $fault source"
+    elif [[ ! -s "$SYSTEMCTL_LOG" && -e "$SYSTEMD_DIR/pixel-ingress.service" \
+        && -e "$HOME_DIR/.config/ods/pixel-managed.json" ]]; then
+        pass "later document generation rejects $fault source before mutation"
+    else
+        fail "later document generation $fault rejection mutated installed state"
+    fi
+done
+
 write_interrupted_ops_receipt_fixture
 if ods_pixel_uninstall_managed "$INSTALL_DIR" "$HOME_DIR"; then
     if [[ ! -e "$SYSTEMD_DIR/pixel-ops-broker.service" \
