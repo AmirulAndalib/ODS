@@ -74,6 +74,55 @@ tool limit stops the revision pass, the answer from its tool-free answer turn
 (below) is newer and supersedes this armed delivery.
 `tests/partial_citation_delivery.test.mjs` replays the tower1 fleet case.
 
+## Perplexica research
+
+`pixel_ods_research` sends a research brief to the owner's installed
+Perplexica (Vane) service. In speed and balanced mode Perplexica answers from
+search-result snippets without reading any page. On the fleet journeys only 1
+of the 25 links in its answers came from its own returned sources, and 18 of
+the 25 were dead (`findings/perplexica-fast-search.md`). The tool is therefore
+orientation only:
+
+- It is offered only while Perplexica answers `GET /api/config` with a chat
+  model and an embedding model selected. The check is cached for 60 seconds,
+  refreshed in the background when a run builds its tools, and never delays a
+  run. A refused connection during a call hides the tool from the next run.
+  The configuration body also holds provider API keys, so only the four model
+  identities are kept from it. The tool is deferred behind Tool Search: offering
+  or hiding it changes the Tool Search catalog, not the system prompt or the
+  directly visible tools.
+- The model sees Perplexica's answer, and each returned source with its title
+  and a capped search snippet (300 characters for cited sources, 160 for the
+  first eight uncited ones, 3,500 in total, at most 20 sources, cited sources
+  kept first). The whole result fits the agent's configured
+  `contextLimits.toolResultMaxChars` minus a margin, between 3,400 and 10,000
+  characters. `details` carries only each source's index and URL.
+- Every `http(s)` link in the answer that is not among the returned sources,
+  including private addresses, is replaced with
+  `[link not in Perplexica sources]` before the model sees it. Source matching
+  ignores http/https, a leading `www.` and one trailing slash. Links written
+  without a scheme are not checked, and the result says so.
+- The brief is at most 1,000 characters. URLs, IP literals, `host:port`,
+  `localhost` and local-only names such as `.internal` are removed before it is
+  sent, because Vane's `scrape_url` action opens addresses from its container
+  without validation. A brief that was only addresses is refused.
+- One call uses one search and one page-reading unit, and needs two units of the
+  total web allowance. A response may call it once; a repeat, like an unusable
+  brief, is refused before it runs and uses no allowance. The call does not
+  end an unread-search streak. The default wait is 120 seconds
+  (`PIXEL_ODS_RESEARCH_TIMEOUT_MS`).
+- Nothing it returns is a page read: its answer and sources never produce a
+  read receipt, so citing them after a source-read request still needs
+  `web_fetch` or `pixel_ods_web_extract`, or the host citation check. Its
+  returned sources count only toward the weaker "research returned sources"
+  check, in the direct and Tool Search forms alike.
+
+`tests/perplexica_research.test.mjs` replays the measured answers
+(`tests/fixtures/perplexica-answers.mjs`: 24 of 25 speed and balanced links and
+37 of 37 quality links are replaced). `tests/perplexica_availability.test.mjs`
+covers the probe and the not-installed case, and
+`tests/perplexica_research_budget.test.mjs` the allowance and the read rule.
+
 ## Owner-requested text
 
 `requested-literals.mjs` checks each published snapshot for exact text the
