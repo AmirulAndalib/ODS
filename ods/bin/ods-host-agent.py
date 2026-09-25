@@ -7403,7 +7403,7 @@ _OUTPUT_CONTROL_RE = re.compile(r'[\x00-\x08\x0b-\x1f]')
 # camelCase) is one of these (HF_TOKEN, clientSecret, DB_PASSWORD, Cookie) ...
 _CREDENTIAL_NAME_WORDS = frozenset({
     'token', 'secret', 'password', 'passwd', 'passphrase', 'credential', 'credentials',
-    'authorization', 'cookie', 'apikey', 'salt', 'pepper'})
+    'authorization', 'bearer', 'cookie', 'apikey', 'salt', 'pepper'})
 _CREDENTIAL_NAME_ENDINGS = ('token', 'secret', 'password', 'passwd', 'apikey', 'secretkey',
                             'privatekey', 'accesskey', 'masterkey')
 _CREDENTIAL_NAME_STARTS = ('secret', 'password', 'passwd')
@@ -7438,11 +7438,16 @@ _ENV_STYLE_NAME_RE = re.compile(r'[A-Z][A-Z0-9]*(?:_[A-Z0-9]+)+')
 # (-Dspring.datasource.password, model_list[0].litellm_params.api_key), and
 # _credential_name_kind drops that prefix. One start per run keeps this linear.
 # Only the name and separator are matched here, so a name that is not a
-# credential never hides the one after it.
+# credential never hides the one after it: in "INFO: token = value" and
+# "INFO:root:token = value" the match for INFO or root ends before "token".
 _CREDENTIAL_ASSIGNMENT_RE = re.compile(
     r'''(?<![A-Za-z0-9_.-])(?P<name>[A-Za-z0-9_.-]+)'''
-    r'''(?:\\?["'])?[ \t]*[:=](?![:=])[ \t]*(?:(?i:bearer|basic|token|digest)[ \t]+)?'''
-    r'''|(?<![A-Za-z0-9_-])--(?P<flag>[A-Za-z][A-Za-z0-9_-]*)(?:=|[ \t]+)(?!-)''')
+    r'''(?:\\?["'])?[ \t]*[:=](?![:=])[ \t]*'''
+    r'''|(?<![A-Za-z0-9_-])-*--(?P<flag>[A-Za-z][A-Za-z0-9_-]*)(?:=|[ \t]+)(?!-)''')
+# The scheme word of "Authorization: Bearer value" or "Authorization: token
+# value", skipped only after a credential name. A word followed by its own
+# separator ("app.auth:token : value") is the next name, not a scheme.
+_AUTH_SCHEME_RE = re.compile(r'(?i:bearer|basic|token|digest)[ \t]+(?![ \t:=])')
 # A quoted value ("...", '...', \"...\" inside a JSON string, or the first
 # item of a JSON list); a bare value; or, when a value follows a quote that is
 # never closed, the whole non-space run.
@@ -7452,13 +7457,14 @@ _CREDENTIAL_VALUE_RE = re.compile(
     r'''|(?=\[?\\?["'][^\s"'\\,;)\]}])\S+''')
 # A Cookie header (Cookie: a=1; b=2) carries several cookies: all of them.
 _COOKIE_HEADER_VALUE_RE = re.compile(r'''(?!\[)[^\s;,"'\\`]+(?:;[ \t]*[^\s;,"'\\`]+)*''')
-_CREDENTIAL_NAME_PREFIX_RE = re.compile(r'^(?:-D(?=[a-z]))?[-.0-9]*')
+_CREDENTIAL_NAME_PREFIX_RE = re.compile(r'^[-.0-9]*(?:(?<=-)D(?=[a-z]))?')
 # A tokenizer's special token (<|im_end|>, </s>) as the value of a token name.
 _SPECIAL_TOKEN_RE = re.compile(r'<[^\s<>]{1,40}>')
 _PLACEHOLDER_VALUES = frozenset({
     'none', 'null', 'nil', 'true', 'false', 'undefined', 'yes', 'no', 'on', 'off', 'unset',
     'bearer', 'basic', 'digest', _REDACTED.lower()})
-_BEARER_VALUE_RE = re.compile(r'''(?i)\b(bearer[ \t]+)([^\s"',;]+)''')
+# Bearer <token>, and bearer = <token> or bearer: <token> in a log line.
+_BEARER_VALUE_RE = re.compile(r'''(?i)\b(bearer(?:[ \t]*[:=][ \t]*|[ \t]+))([^\s"',;]+)''')
 # The scheme is bounded so a long run of letters and dots stays linear. It is
 # not anchored, so foo_postgres:// and 1postgres:// still match.
 _URL_USERINFO_RE = re.compile(r'''([a-zA-Z][a-zA-Z0-9+.-]{0,31}://)[^/\s@"'<>]+@''')
@@ -7511,17 +7517,24 @@ def _credential_name_kind(name: str) -> str | None:
 def _redact_credential_assignments(text: str) -> str:
     parts, cursor = [], 0
     for match in _CREDENTIAL_ASSIGNMENT_RE.finditer(text):
-        if match.start() < cursor:
-            continue  # Inside a value already redacted.
+        if match.end() < cursor:
+            continue  # Name and separator inside a value already redacted.
+        # A name that starts inside the value just redacted but whose separator
+        # comes after it still gets its value redacted: "app.auth:token : value"
+        # redacts "token" as the value of app.auth, then the value of token.
         name = match.group('name') or match.group('flag')
         kind = _credential_name_kind(name)
-        value = _CREDENTIAL_VALUE_RE.match(text, match.end()) if kind else None
+        if not kind:
+            continue
+        scheme = _AUTH_SCHEME_RE.match(text, match.end())
+        start = scheme.end() if scheme else match.end()
+        value = _CREDENTIAL_VALUE_RE.match(text, start)
         if value is None:
             continue
         quote = value.group('quote') or ''
         if (not quote and (match.group('name') or '').lower() in ('cookie', 'set-cookie')
                 and ':' in text[match.end('name'):match.end()]):
-            value = _COOKIE_HEADER_VALUE_RE.match(text, match.end()) or value
+            value = _COOKIE_HEADER_VALUE_RE.match(text, start) or value
         bare = value.group('quoted') if quote else value.group()
         if (not bare.strip(' \t"\'\\') or bare.lower() in _PLACEHOLDER_VALUES
                 or re.fullmatch(r'\$\{?[A-Za-z_][A-Za-z0-9_]*\}?', bare)

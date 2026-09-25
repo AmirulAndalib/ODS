@@ -125,6 +125,20 @@ EVERY_PATH_CASES = [
     ("escaped-json-name", '{\\"api_key\\": \\"hunter2hunter2\\"}', "hunter2hunter2"),
     ("unclosed-quote", 'DB_PASSWORD="hunter2hunter2', "hunter2hunter2"),
     ("unclosed-escaped-quote", 'DB_PASSWORD=\\"hunter2hunter2', "hunter2hunter2"),
+    # Second review: a log prefix ending in a separator (INFO:, root:) used to
+    # take "token " as an auth scheme, so the token name never matched.
+    ("logger-level-token", "INFO:     token = hunter2hunter2", "hunter2hunter2"),
+    ("logger-name-token", "INFO:root:token = hunter2hunter2", "hunter2hunter2"),
+    ("compose-prefix-token", "app | INFO: token = hunter2hunter2", "hunter2hunter2"),
+    ("error-prefix-token", "error: token = hunter2hunter2", "hunter2hunter2"),
+    ("tab-before-separator", "INFO: token\t= hunter2hunter2", "hunter2hunter2"),
+    ("credential-logger-token", "DEBUG:app.auth:token : hunter2hunter2", "hunter2hunter2"),
+    ("credential-logger-password", "DEBUG:app.auth:password : hunter2hunter2", "hunter2hunter2"),
+    ("bearer-assignment", "worker | WARNING: bearer = hunter2hunter2", "hunter2hunter2"),
+    ("flag-extra-dash", "---password hunter2hunter2", "hunter2hunter2"),
+    ("jvm-property-extra-dash", "--Dapi_key=hunter2hunter2", "hunter2hunter2"),
+    # New: main missed this one everywhere.
+    ("token-name-after-credential", "password: token : hunter2hunter2", "hunter2hunter2"),
 ]
 REDACTED_CASES += EVERY_PATH_CASES
 
@@ -173,6 +187,10 @@ KEPT_CASES = [
     "Authorization: Bearer",
     "Cookie:",
     'missing "DB_PASSWORD=" line in .env',
+    "INFO:     token = 151645",
+    "INFO:root:token count = 512",
+    "bearerFormat: JWT",
+    "token_type: bearer",
 ]
 
 
@@ -208,6 +226,22 @@ def test_names_and_structure_stay_readable():
         '{"msg":"export DB_PASSWORD=\\"[REDACTED]\\""}')
     assert _mod._redact_credential_text('DB_PASSWORD="hunter2') == "DB_PASSWORD=[REDACTED]"
     assert _mod._redact_credential_text("api_key=, model=qwen") == "api_key=, model=qwen"
+
+
+def test_auth_scheme_is_skipped_only_after_a_credential_name():
+    # After Authorization the scheme word stays and the value after it goes.
+    assert _mod._redact_credential_text(f"Authorization: token {GITHUB_TOKEN}") == "Authorization: token [REDACTED]"
+    assert _mod._redact_credential_text(f"Authorization: token {HEX}") == "Authorization: token [REDACTED]"
+    assert _mod._redact_credential_text(f"Authorization: Bearer {HEX}") == "Authorization: Bearer [REDACTED]"
+    assert _mod._redact_credential_text(f"api_key: token {HEX}") == "api_key: token [REDACTED]"
+    # After a log prefix, "token" is the name and keeps its own separator.
+    assert _mod._redact_credential_text("INFO:     token = hunter2") == "INFO:     token = [REDACTED]"
+    assert _mod._redact_credential_text("INFO:root:token = hunter2") == "INFO:root:token = [REDACTED]"
+    # A word followed by a separator is the next name, never a scheme, even
+    # right after a credential name: both values go.
+    assert _mod._redact_credential_text("DEBUG:app.auth:token : hunter2") == "DEBUG:app.auth:[REDACTED] : [REDACTED]"
+    assert _mod._redact_credential_text("password: token : hunter2") == "password: [REDACTED] : [REDACTED]"
+    assert _mod._redact_credential_text("WARNING: bearer = hunter2") == "WARNING: bearer = [REDACTED]"
 
 
 def test_known_values_and_control_characters():
