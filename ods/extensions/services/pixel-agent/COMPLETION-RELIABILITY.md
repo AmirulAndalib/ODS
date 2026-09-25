@@ -140,16 +140,35 @@ cannot forfeit it. Any other further model call still does.
 The owner receives that answer followed by host facts the model cannot alter:
 the tool-limit note, a failed or pending test result, cited links that were
 never read (when the owner asked for sources to be opened), and the last
-verified preview or an explicit statement that none was verified. The outcome
-stays `failed`; a research-loop stop also notes that the web research
-allowance was used up. A tool call in the answer turn aborts the run at that
-tool boundary; an empty, silent, promise-only, tool-like or oversized answer, a
+verified preview (with any owner-requested text the published page lacks) or an
+explicit statement that none was verified. The outcome stays `failed`; a
+research-loop stop also notes that the web research allowance was used up.
+
+Plugins cannot remove tools from a single model call, so some models still
+call a tool in the answer turn. That call is refused and the run is aborted at
+that tool boundary, as before. When the same assistant message also carries
+substantive answer text, that text is kept as a partial answer (tower3 r8):
+`before_message_write` observes the message, and it is matched to the refused
+call by tool-call ID, never by timing. OpenClaw writes the message before it
+dispatches the message's calls; the reverse order is handled too. The text
+must pass every check a tool-free answer passes and, with narration such as
+"Let me search once more" set aside, still hold at least 160 letters or digits
+across at least two other lines or sentences. Because the aborted run never
+reaches `before_agent_finalize`, its cited pages get the same bounded host
+verification there, and `/pixel-ods/verification` waits for it. The delivery
+adds a host fact that the requested calls were refused and did not run.
+
+An empty, silent, promise-only, tool-like, narration-only or oversized answer, a
 further model call, owner cancellation, or an unverified localhost URL in a
 visual task all fall back to the original stop text (the research-loop stop
-text for that path). Operations, exact
-downloads, managed extension requests and team coordination keep the strict
-stop text. The instruction is constant text at the end of the conversation,
-never system-prompt content.
+text for that path). Unless the owner cancelled, that text is followed by the
+host's list of pages read successfully in the response (tower2 round 061):
+current-run `web_fetch` and targeted-extraction read receipts plus host
+citation verifications, deduplicated, at most eight with a count of the rest,
+each with its page-reported title reduced to plain words when one is known.
+Only the list varies. Operations, exact downloads, managed extension requests
+and team coordination keep the strict stop text, with no list. The instruction
+is constant text at the end of the conversation, never system-prompt content.
 
 ## Silent owner replies
 
@@ -162,8 +181,8 @@ ended without a visible answer"). OpenClaw already retries an empty final reply
 once before this hook runs; heartbeat, cron and team turns keep `NO_REPLY`
 semantics, and the harness still refuses a revision after side effects.
 
-`tests/progress_finalization.test.mjs`, `tests/owner_visible_reply.test.mjs`
-and the real-harness fixtures `tests/runtime_progress_finalization.integration.mjs`
+`tests/progress_finalization.test.mjs`, `tests/partial_finalization.test.mjs`,
+`tests/owner_visible_reply.test.mjs` and the real-harness fixtures `tests/runtime_progress_finalization.integration.mjs`
 and `tests/runtime_owner_visible_reply.integration.mjs` cover both paths.
 
 ## Search availability

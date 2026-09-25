@@ -6,7 +6,10 @@
 // the single tool-free turn: it answers ('answer') or tries a tool ('tool').
 // 'compaction' reports near-window usage on the answer, so OpenClaw runs a real
 // threshold auto-compaction whose summarization call uses the run's model
-// stream (tower3, 2026-09-25): the answer must survive it.
+// stream (tower3, 2026-09-25): the answer must survive it. 'partial' streams a
+// substantive answer and then a tool call in that turn (tower3 r8): the call is
+// refused, the run ends at that boundary, and the text is delivered as a
+// partial answer, observed through before_message_write.
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {createServer} from 'node:http';
@@ -18,7 +21,7 @@ import {join} from 'node:path';
 import {setTimeout as delay} from 'node:timers/promises';
 import {createIngressServer} from '../host/pixel_ingress.mjs';
 import {RUN_PROGRESS_STOP_REASON} from '../plugin/run-progress-budget.mjs';
-import {PROGRESS_FINALIZATION_INSTRUCTION,PROGRESS_FINALIZATION_NOTE} from '../plugin/progress-finalization.mjs';
+import {PROGRESS_FINALIZATION_INSTRUCTION,PROGRESS_FINALIZATION_NOTE,PROGRESS_FINALIZATION_REFUSED_CALLS_NOTE} from '../plugin/progress-finalization.mjs';
 const pkg=process.env.OPENCLAW_PACKAGE;
 // ODS installs OpenClaw with its completion-recovery repair
 // (host/openclaw-completion-recovery.json); upstream discards a response that
@@ -34,8 +37,11 @@ function completionRecoveryRepaired(dir) {
 const repairedRuntime=Boolean(pkg) && completionRecoveryRepaired(pkg);
 const ANSWER='```json\n{"name":"RTX 5070","vramGB":12,"boardPowerW":250,"retail":null}\n```\n\n' +
   'The NVIDIA page returned 12 GB and 250 W. Retail price and benchmark results are unverified because later fetches failed.';
+const PARTIAL='From the pages returned before the limit:\n\n- RTX 5070: 12 GB of VRAM and 250 W board power, according to the NVIDIA page.\n' +
+  '- US retail price: not verified, because every retailer fetch failed.\n' +
+  '- Benchmark comparison: not verified, because no benchmark page was read.\n\nLet me try one more source for the price:';
 
-for (const finalTurn of ['answer','tool','direct','compaction']) test(`real harness graceful finalization: final turn ${finalTurn}`,
+for (const finalTurn of ['answer','tool','direct','compaction','partial']) test(`real harness graceful finalization: final turn ${finalTurn}`,
   {skip:!pkg ? true : finalTurn==='compaction' && !repairedRuntime
     ? 'needs the ODS completion-recovery repair (host/openclaw_tool_recovery.py --completion-recovery)' : false,
   timeout:90000}, async () => {
@@ -58,12 +64,13 @@ for (const finalTurn of ['answer','tool','direct','compaction']) test(`real harn
     const tools=request.messages.filter(message=>message.role==='tool');
     seen.push(tools.at(-1)?.content ?? null);
     const round=rounds++;
-    const delta=round!==answerRound || finalTurn==='tool'
-      ? {role:'assistant',tool_calls:[{index:0,id:`fetch-${round}`,type:'function',
-        function:{name:'fixture_fetch',arguments:JSON.stringify({url:`https://example.org/source-${round}`})}}]}
-      : {role:'assistant',content:ANSWER};
+    const call={tool_calls:[{index:0,id:`fetch-${round}`,type:'function',
+      function:{name:'fixture_fetch',arguments:JSON.stringify({url:`https://example.org/source-${round}`})}}]};
+    const deltas=round!==answerRound || finalTurn==='tool' ? [{role:'assistant',...call}]
+      : finalTurn==='partial' ? [{role:'assistant',content:PARTIAL},call] : [{role:'assistant',content:ANSWER}];
+    const delta=deltas.at(-1);
     res.writeHead(200,{'Content-Type':'text/event-stream'});
-    res.write('data: '+JSON.stringify({id:'fixture',object:'chat.completion.chunk',choices:[{index:0,delta,finish_reason:null}]})+'\n\n');
+    for (const part of deltas) res.write('data: '+JSON.stringify({id:'fixture',object:'chat.completion.chunk',choices:[{index:0,delta:part,finish_reason:null}]})+'\n\n');
     const usage=finalTurn==='compaction' && !delta.tool_calls ? {usage:{prompt_tokens:31000,completion_tokens:60,total_tokens:31060}} : {};
     res.end('data: '+JSON.stringify({id:'fixture',object:'chat.completion.chunk',
       choices:[{index:0,delta:{},finish_reason:delta.tool_calls?'tool_calls':'stop'}],...usage})+'\n\ndata: [DONE]\n\n');
@@ -88,8 +95,9 @@ for (const finalTurn of ['answer','tool','direct','compaction']) test(`real harn
     export default {id:'finalization-fixture',register(api){
       api.registerHttpRoute({path:'/pixel-ods/verification',auth:'gateway',match:'exact',handler:async(req,res)=>{
         let body='';for await(const part of req)body+=part;
+        const runId=JSON.parse(body).runId;await guard.settleDelivery(runId);
         res.writeHead(200,{'Content-Type':'application/json'});
-        res.end(JSON.stringify(guard.deliveryVerificationForRun(JSON.parse(body).runId)));return true;
+        res.end(JSON.stringify(guard.deliveryVerificationForRun(runId)));return true;
       }});
       api.on('before_prompt_build',(e,c)=>guard.observeRun(c,'pixel',e));
       api.on('model_call_started',(e,c)=>guard.observeModelCall(e,c));
@@ -99,6 +107,8 @@ for (const finalTurn of ['answer','tool','direct','compaction']) test(`real harn
       api.on('before_tool_call',(e,c)=>{const d=guard.beforeToolCall(e,c);record({before:e.toolName,block:d?.blockReason?.slice(0,40)??null});return d;});
       api.on('after_tool_call',(e,c)=>guard.afterToolCall(e,c));
       api.on('tool_result_persist',(e,c)=>guard.toolResultPersist(e,c));
+      api.on('before_message_write',(e,c)=>{if(e.message?.role==='assistant')record({write:(e.message.content??[]).filter(b=>b?.type==='toolCall').length,
+        text:(e.message.content??[]).some(b=>b?.type==='text'&&b.text),sessionKey:Boolean(c?.sessionKey)});return guard.observeAssistantMessage(e,c);});
       api.on('before_agent_finalize',(e,c)=>{const d=guard.beforeAgentFinalize(e,c);
         record({finalize:e.lastAssistantMessage?.slice(0,20)??null,decision:d?.action??null});return d;});
       api.on('reply_payload_sending',e=>guard.replyPayloadSending(e));
@@ -154,7 +164,15 @@ for (const finalTurn of ['answer','tool','direct','compaction']) test(`real harn
       assert.ok(summaries>=1,'OpenClaw ran a real compaction summarization call after the answer\n'+trace);
       assert.ok(events.some(x=>x.compaction==='start'&&x.sessionKey),trace);
     }
-    if(finalTurn!=='tool'){
+    if(finalTurn==='partial'){
+      assert.ok(delivered.startsWith(PARTIAL),trace);
+      assert.ok(delivered.includes(`${PROGRESS_FINALIZATION_NOTE}\n\n${PROGRESS_FINALIZATION_REFUSED_CALLS_NOTE}`),trace);
+      assert.ok(!delivered.includes(RUN_PROGRESS_STOP_REASON),trace);
+      assert.ok(events.some(x=>x.write===1&&x.text&&x.sessionKey),'the answer turn message reached before_message_write\n'+trace);
+      assert.ok(events.some(x=>x.before==='fixture_fetch'&&x.block===RUN_PROGRESS_STOP_REASON.slice(0,40)),'its call is refused\n'+trace);
+      assert.equal(events.filter(x=>x.execute).length,4,'the refused call never ran\n'+trace);
+      assert.deepEqual(events.filter(x=>'abort' in x).map(x=>x.abort),[true],'aborted once at the tool boundary\n'+trace);
+    } else if(finalTurn!=='tool'){
       assert.ok(delivered.startsWith(ANSWER),trace);
       assert.ok(delivered.includes(PROGRESS_FINALIZATION_NOTE),trace);
       assert.ok(!delivered.includes(RUN_PROGRESS_STOP_REASON),trace);

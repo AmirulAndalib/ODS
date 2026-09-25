@@ -27,7 +27,8 @@ import { HOST_CITATION_LIMITS } from './citation-verification.mjs';
 import { createExtensionCompletionGate } from "./extension-completion-gate.mjs";
 import { parseQuestions, questionsText, requestsChoiceQuestion, choiceQuestionFromText } from "./ask-user.mjs";
 import { createRunProgressBudget, failedToolOutcome, isLiteralEcho, progressLaneStopReason, RUN_PROGRESS_STOP_REASON } from "./run-progress-budget.mjs";
-import { composeProgressFinalization, createProgressFinalization, PROGRESS_FINALIZATION_INSTRUCTION } from "./progress-finalization.mjs";
+import { assistantMessageText, composeProgressFinalization, composeReadPages, createProgressFinalization, partialFinalizationAnswer,
+  PROGRESS_FINALIZATION_INSTRUCTION } from "./progress-finalization.mjs";
 import { OWNER_VISIBLE_REPLY_INSTRUCTION, OWNER_VISIBLE_REPLY_REASON, ownerInteractiveTurn, silentReplyText } from "./owner-visible-reply.mjs";
 import { canonicalWorkspaceParams, extensionlessHtmlWrite, workspaceFileParent, nativeExecWorkdir, sandboxHostWorkspaceFailure, malformedRelativeWorkspacePath } from "./workspace-path-contract.mjs";
 import { routePlaygroundTool, requestsNewPlaygroundProject } from "./playground-projects.mjs";
@@ -7298,12 +7299,15 @@ export function createToolLoopGuard({
     const state = runId ? stateFor(runId) : undefined;
     // Every tool stays blocked after the budget stops the response. Until the
     // model has seen the finalization instruction, the refusal carries it; a
-    // tool call during the answer turn forfeits that turn and ends the run at
-    // this boundary (the provider stream has already completed).
+    // tool call during the answer turn ends the run at this boundary (the
+    // provider stream has already completed), keeping only substantive text
+    // from that same message as a partial answer (observeAssistantMessage).
     if (state?.progressBudget.exhausted && progressFinalization(state).phase !== 'unavailable') {
-      if (state.progressFinalization.toolBoundary(state.operationsPromptRound) === 'instruct') {
+      const callId = context?.toolCallId ?? event?.toolCallId;
+      if (state.progressFinalization.toolBoundary(state.operationsPromptRound, callId) === 'instruct') {
         return {block:true, blockReason:PROGRESS_FINALIZATION_INSTRUCTION};
       }
+      if (state.progressFinalization.partial) verifyPartialAnswer(state, runId, agentId);
       stopExhaustedRun(state, runId);
       return {block:true, blockReason:RUN_PROGRESS_STOP_REASON};
     }
@@ -8958,7 +8962,7 @@ export function createToolLoopGuard({
         state.researchStopped = true;
         state.progressBudget.stop();
         warn(`Pixel stopped a repeated web-tool loop for run ${runId}; one tool-free answer turn remains`);
-        if (progressFinalization(state).toolBoundary(state.operationsPromptRound) === "instruct") {
+        if (progressFinalization(state).toolBoundary(state.operationsPromptRound, context?.toolCallId ?? event?.toolCallId) === "instruct") {
           return { block: true, blockReason: PROGRESS_FINALIZATION_INSTRUCTION };
         }
       }
@@ -9488,14 +9492,18 @@ export function createToolLoopGuard({
   // starts together, and closes when they end or after_compaction reports none.
   const MAX_COMPACTION_MODEL_CALLS = 2;
 
-  function compactionRunState(context) {
-    const sessionKey = context?.sessionKey;
+  // The run that currently owns the session with this key, if any.
+  function activeSessionRun(sessionKey) {
     if (typeof sessionKey !== "string" || !sessionKey) return undefined;
     for (const [runId, state] of runs) {
       if (state.currentSessionKey === sessionKey && state.currentSessionId &&
-          sessionRuns.get(state.currentSessionId) === runId) return state;
+          sessionRuns.get(state.currentSessionId) === runId) return { runId, state };
     }
     return undefined;
+  }
+
+  function compactionRunState(context) {
+    return activeSessionRun(context?.sessionKey)?.state;
   }
 
   function observeCompaction(context, phase) {
@@ -11337,8 +11345,9 @@ export function createToolLoopGuard({
     if (!state || state.clientCancelled || state.webLoopAborted || state.recursiveDeleteDenied || state.ownerQuestions ||
         state.privateNetworkExhausted || state.privateNetworkRequestDenied || state.workspacePreviewRestrictions?.web ||
         state.extensionCompletionGate?.active ||
-        // After a tool-limit stop only a still-pending answer turn is judged.
-        (state.progressBudget.exhausted && !['pending', 'instructed', 'turn'].includes(progressFinalization(state).phase))) {
+        // After a tool-limit stop only a still-pending answer turn, or the
+        // partial answer kept from it, is judged.
+        (state.progressBudget.exhausted && !['pending', 'instructed', 'turn', 'partial'].includes(progressFinalization(state).phase))) {
       return undefined;
     }
     const answer = event?.lastAssistantMessage;
@@ -11379,6 +11388,51 @@ export function createToolLoopGuard({
       info(`Pixel host-verified ${outcome.verified.length}/${urls.length} cited page(s) for run ${runId} in ${outcome.elapsedMs} ms`);
     }
     return outcome;
+  }
+
+  // A partial answer ends the run by abort, so before_agent_finalize never
+  // judges it: its cited pages are verified here instead, once, and delivery
+  // (settleDelivery) waits for that bounded check.
+  function verifyPartialAnswer(state, runId, agentId = 'pixel') {
+    const answer = state?.progressFinalization.partial ? state.progressFinalization.answer : undefined;
+    if (!answer || state.partialAnswerVerification) return;
+    state.partialAnswerVerification = Promise.resolve()
+      .then(() => verifyCitedPages({lastAssistantMessage: answer}, {agentId, runId}, agentId))
+      .catch(error => { warn(`Pixel partial-answer citation check failed for run ${runId}: ${String(error)}`); });
+  }
+
+  async function settleDelivery(runId) {
+    const pending = typeof runId === 'string' ? runs.get(runId)?.partialAnswerVerification : undefined;
+    if (pending) await pending;
+  }
+
+  // before_message_write (synchronous, transcript order). After a tool-limit
+  // stop, the answer turn's message may carry answer text together with tool
+  // calls; progress-finalization.mjs keeps that text as a partial answer only
+  // for the message whose call IDs reach the tool boundary in the turn.
+  function observeAssistantMessage(event, context, agentId = 'pixel') {
+    try {
+      const agent = context?.agentId ?? event?.agentId;
+      if (agent !== undefined && agent !== agentId) return undefined;
+      const message = event?.message;
+      if (message?.role !== 'assistant' || !Array.isArray(message.content)) return undefined;
+      const calls = message.content.filter(block => block?.type === 'toolCall').map(block => block.id);
+      if (!calls.length) return undefined;
+      const active = activeSessionRun(context?.sessionKey ?? event?.sessionKey);
+      if (!active) return undefined;
+      const {runId, state} = active;
+      if (!state.progressBudget.exhausted || state.clientCancelled || state.recursiveDeleteDenied || state.webLoopAborted) return undefined;
+      const finalization = state.progressFinalization;
+      if (finalization.phase !== 'turn' && finalization.phase !== 'failed') return undefined;
+      const preview = progressStopPreview(state);
+      const options = {localUrlsForbidden: Boolean(state.workspacePreviewRequired || state.workspacePreviewAttempted),
+        allowedUrls: preview?.url ? [preview.url] : []};
+      finalization.assistantMessage(assistantMessageText(message), calls, text => partialFinalizationAnswer(text, options));
+      if (finalization.partial) verifyPartialAnswer(state, runId, agentId);
+    } catch (error) {
+      warn(`Pixel assistant-message observation failed: ${String(error)}`);
+    }
+    return undefined;
   }
 
   function endPreviewRevalidation(event, context) {
@@ -11809,13 +11863,21 @@ export function createToolLoopGuard({
         return {status: 'failed', text: composeProgressFinalization(answer, {preview,
           previewExpected: Boolean(state.workspacePreviewRequired && !state.workspacePreviewForbidden),
           verificationStatus: state.latestVerificationStatus, researchLimit: state.researchStopped,
-          unverifiedLinks: state.completionAssurance.unverifiedCitations(answer)}), ...receipt};
+          unverifiedLinks: state.completionAssurance.unverifiedCitations(answer),
+          refusedToolCalls: state.progressFinalization.partial,
+          requestedTextMissing: requestedTextDeliveryNote(preview, state.workspaceRequestedTextCheck)}), ...receipt};
       }
+      // Without an answer, the fixed stop text is followed by the host's list
+      // of pages read successfully, when this run could have been finalized
+      // (receipt-based work keeps the strict stop text).
+      const readPages = !state.clientCancelled && progressFinalization(state).phase !== 'unavailable'
+        ? composeReadPages(state.completionAssurance.readPages) : '';
+      const pages = readPages ? `\n\n${readPages}` : '';
       // Without an answer, a research-loop stop keeps its specific text.
-      if (state.researchStopped) return {status: 'failed', text: WEB_LOOP_DELIVERY_REASON, ...receipt};
+      if (state.researchStopped) return {status: 'failed', text: WEB_LOOP_DELIVERY_REASON + pages, ...receipt};
       return {status: 'failed', text: RUN_PROGRESS_STOP_REASON + (preview
-        ? `\n\n[Open last published preview](${preview.url})\n\nThis is the last verified publication, not proof that all requested work completed.` : ''),
-        ...receipt};
+        ? `\n\n[Open last published preview](${preview.url})\n\nThis is the last verified publication, not proof that all requested work completed.` : '') +
+        pages, ...receipt};
     }
     // An acknowledged harness abort can end the model without a final token.
     // Preserve existing artifact/evidence delivery; for an otherwise empty
@@ -11912,6 +11974,8 @@ export function createToolLoopGuard({
     observeRun,
     observeModelCall,
     observeCompaction,
+    observeAssistantMessage,
+    settleDelivery,
     abortUserRun,
     verificationForRun,
     deliveryVerificationForRun,

@@ -37,6 +37,36 @@ function openedSourceUrls(tool, result) {
   return candidates.map(publicSourceUrl).filter(Boolean);
 }
 
+// A page-provided title (OpenClaw wraps it in untrusted-content markers),
+// reduced to plain words for a host-built list: no markup, links or controls.
+export function pageTitle(value) {
+  if (typeof value !== 'string' || value.length > 4000) return undefined;
+  let text = value;
+  const start = text.indexOf('<<<EXTERNAL_UNTRUSTED_CONTENT');
+  if (start >= 0) {
+    const body = text.indexOf('\n---\n', start);
+    const end = text.indexOf('<<<END_EXTERNAL_UNTRUSTED_CONTENT', body);
+    if (body < 0 || end < 0) return undefined;
+    text = text.slice(body + 5, end);
+  }
+  if (text.includes('<<<')) return undefined;
+  // No brackets, angle brackets, backticks, emphasis or escapes: the title
+  // cannot form a link, markup or code in the rendered list.
+  text = text.normalize('NFKC').replace(/[\p{Cc}\p{Cf}]/gu, ' ').replace(/[[\]<>`*_\\]/g, ' ')
+    .replace(/\s+/g, ' ').trim();
+  if (!/[\p{L}\p{N}]/u.test(text) || /:\/\/|\bwww\.|@/i.test(text)) return undefined;
+  return text.length > 160 ? `${text.slice(0, 159).trimEnd()}…` : text;
+}
+
+// One entry per successfully read page, in read order, for the fallback list.
+function readPageEntry(tool, result) {
+  const details = result?.details;
+  const urls = openedSourceUrls(tool, result);
+  if (!urls.length) return undefined;
+  const url = (tool === 'web_fetch' && publicSourceUrl(details?.finalUrl)) || urls[0];
+  return {url, keys: urls.map(citationKey).filter(Boolean), title: tool === 'web_fetch' ? pageTitle(details?.title) : undefined};
+}
+
 // Conservative page identity for matching a citation to a read receipt: URL
 // parsing already lowercases the scheme and host and drops default ports;
 // the fragment and one trailing path slash are also ignored. The query string
@@ -243,6 +273,20 @@ export function createCompletionAssurance() {
   // They satisfy the cited-page read check, but are never model reads.
   const hostVerified = new Set();
   const readSources = () => new Set([...opened, ...browserSnapshots, ...hostVerified]);
+  // Model page reads and host verifications, deduplicated by citation key.
+  const readPages = [];
+  const readPageKeys = new Set();
+  const recordReadPage = entry => {
+    if (!entry || readPages.length >= 64 || entry.keys.some(key => readPageKeys.has(key))) {
+      if (entry?.title) {
+        const known = readPages.find(page => !page.title && entry.keys.some(key => page.keys.includes(key)));
+        if (known) known.title = entry.title;
+      }
+      return;
+    }
+    for (const key of entry.keys) readPageKeys.add(key);
+    readPages.push(entry);
+  };
   return {
     begin(ownerText, event) {
       if (initialized) return;
@@ -273,6 +317,7 @@ export function createCompletionAssurance() {
         opened.add(url);
         sources.add(url);
       }
+      recordReadPage(readPageEntry(tool, event.result));
       workObserved = true;
       if (WEB.has(tool)) {
         webObserved = true;
@@ -289,9 +334,15 @@ export function createCompletionAssurance() {
     },
     observeHostVerification(url) {
       const href = publicSourceUrl(url);
-      if (href && hostVerified.size < 16) hostVerified.add(href);
+      if (href && hostVerified.size < 16) {
+        hostVerified.add(href);
+        recordReadPage({url: href, keys: [citationKey(href)].filter(Boolean)});
+      }
     },
     get hostVerifiedSources() { return [...hostVerified]; },
+    // Pages read successfully in this response: current-run model read
+    // receipts (web_fetch, targeted extraction) and host verifications.
+    get readPages() { return readPages.map(({url, title}) => (title ? {url, title} : {url})); },
     finalize(text) {
       if (conversational) return;
       const read = readSources();
