@@ -17539,6 +17539,12 @@ def _select_runtime_profile(model: dict, env: dict) -> dict | None:
     if not isinstance(profiles, list):
         return None
     backend = _normalize_key(env.get("GPU_BACKEND", GPU_BACKEND or ""))
+    # Windows no-GPU installs (including Arc hosts that install as CPU) write
+    # GPU_BACKEND=none. The installer's selector treats none/unknown/empty as
+    # the cpu backend (model_selection.normalize_backend); match it so a
+    # switch or restore keeps the CPU runtime profile the install chose.
+    if backend in {"", "none", "unknown"}:
+        backend = "cpu"
     memory_type = _normalize_key(env.get("GPU_MEMORY_TYPE", "discrete"))
     host_arch = _normalize_host_arch(platform.machine())
     vram_gb = _nvidia_vram_gb() if backend == "nvidia" else 0.0
@@ -17588,6 +17594,15 @@ def _select_runtime_profile(model: dict, env: dict) -> dict | None:
             if profile.get("vram_min_gb") is not None and vram_gb < float(profile["vram_min_gb"]):
                 continue
             if profile.get("vram_max_gb") is not None and vram_gb > float(profile["vram_max_gb"]):
+                continue
+            # A RAM ceiling scopes the profile to a class of machines (as in
+            # model_selection.hardware_matching_profiles); above it the
+            # profile does not apply, and it is not an unmet requirement.
+            if (
+                ram_gb
+                and profile.get("system_ram_max_gb") is not None
+                and float(ram_gb) > float(profile["system_ram_max_gb"])
+            ):
                 continue
         except (TypeError, ValueError):
             continue

@@ -5447,6 +5447,59 @@ class TestModelActivateRollback:
                 },
             )
 
+    @pytest.mark.parametrize("gpu_backend", ["none", "unknown", "", "cpu"])
+    def test_cpu_backend_aliases_select_the_catalog_cpu_profile(
+        self,
+        monkeypatch,
+        gpu_backend,
+    ):
+        # Windows no-GPU installs write GPU_BACKEND=none; the installer's
+        # selector reads it as cpu, so a switch must keep the CPU profile's
+        # q8 KV cache and container limit instead of running unprofiled.
+        monkeypatch.setattr(_mod, "_system_ram_gb", lambda: 32)
+        monkeypatch.setattr(_mod.platform, "machine", lambda: "x86_64")
+        catalog_path = Path(__file__).resolve().parents[4] / "config" / "model-library.json"
+        model = next(
+            entry
+            for entry in json.loads(catalog_path.read_text(encoding="utf-8"))["models"]
+            if entry["id"] == "qwen3.5-9b-q4"
+        )
+
+        profile = _mod._select_runtime_profile(
+            model,
+            {"GPU_BACKEND": gpu_backend, "SYSTEM_RAM_GB": "32"},
+        )
+
+        assert profile is not None
+        assert profile["id"] == "cpu-64k-q8-kv"
+        assert profile["env"]["LLAMA_ARG_CACHE_TYPE_K"] == "q8_0"
+
+    def test_profile_above_its_ram_ceiling_does_not_apply(self, monkeypatch):
+        # model_selection.hardware_matching_profiles: a RAM ceiling scopes a
+        # profile to a class of machines. Above it the profile neither
+        # applies nor blocks activation as an unmet requirement.
+        monkeypatch.setattr(_mod, "_system_ram_gb", lambda: 64)
+        monkeypatch.setattr(_mod.platform, "machine", lambda: "x86_64")
+        model = {
+            "runtime_profiles": [
+                {
+                    "id": "cpu-small-host",
+                    "backend": "cpu",
+                    "system_ram_min_gb": 12,
+                    "system_ram_max_gb": 22,
+                    "context_length": 65536,
+                }
+            ]
+        }
+
+        assert _mod._select_runtime_profile(
+            model, {"GPU_BACKEND": "cpu", "SYSTEM_RAM_GB": "64"}
+        ) is None
+        monkeypatch.setattr(_mod, "_system_ram_gb", lambda: 16)
+        assert _mod._select_runtime_profile(
+            model, {"GPU_BACKEND": "cpu", "SYSTEM_RAM_GB": "16"}
+        )["id"] == "cpu-small-host"
+
     def test_nvidia_vram_probe_uses_wsl_bridge_outside_service_path(
         self,
         monkeypatch,
