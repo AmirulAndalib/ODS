@@ -237,6 +237,14 @@ def normalize_catalog_entry(raw: dict[str, Any]) -> dict[str, Any] | None:
     except (TypeError, ValueError):
         context_length = 0
     context_limit_known = raw.get("context_limit_known") is not False
+    # Whether the entry itself states its native maximum (a catalog
+    # max_context_length, or an import's GGUF header value). When it does
+    # not, max_context_length below falls back to context_length for the
+    # context options, and model_selection.declared_max_context must not
+    # treat that fallback as a native ceiling.
+    native_context_declared = context_limit_known and bool(
+        raw.get("max_context_length") or raw.get("maxContextLength")
+    )
     if context_limit_known:
         try:
             max_context_length = int(
@@ -246,6 +254,7 @@ def normalize_catalog_entry(raw: dict[str, Any]) -> dict[str, Any] | None:
             )
         except (TypeError, ValueError):
             max_context_length = context_length
+            native_context_declared = False
     else:
         max_context_length = 0
 
@@ -270,6 +279,7 @@ def normalize_catalog_entry(raw: dict[str, Any]) -> dict[str, Any] | None:
         "context_length": context_length,
         "max_context_length": max(max_context_length, context_length) if context_limit_known else 0,
         "context_limit_known": context_limit_known,
+        "native_context_declared": native_context_declared,
         "specialty": raw.get("specialty", "General"),
         "description": raw.get("description", ""),
         "quantization": raw.get("quantization"),

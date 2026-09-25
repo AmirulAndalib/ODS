@@ -453,11 +453,17 @@ def plan_model_context(model: dict[str, Any], *, capacity_gb: float, backend: An
     """
     mclass = memory_class(backend, memory_type, vram_mb)
     default = _int_or_zero(model.get("context_length"))
-    native = _int_or_zero(model.get("max_context_length")) or default
+    declared_max = declared_max_context(model)
+    native = declared_max or default
     # A context already chosen for this model (by the installer or the
     # owner) is honored as the starting point, as activation always did; the
-    # floor can raise it only as far as the catalog's native maximum.
+    # floor can raise it only as far as the catalog's native maximum. A
+    # preferred context above a declared native maximum (a stale .env CTX_SIZE
+    # or installer record) is clamped to it: llama.cpp caps the slot at the
+    # model's training context, so a larger request can never be served.
     preferred = _int_or_zero(preferred_context)
+    if declared_max and preferred > declared_max:
+        preferred = declared_max
     planned = model
     if preferred and preferred != default:
         planned = {**model, "context_length": preferred, "max_context_length": max(native, preferred)}
@@ -503,6 +509,22 @@ def _int_or_zero(value: Any) -> int:
         return max(int(value or 0), 0)
     except (TypeError, ValueError):
         return 0
+
+
+def declared_max_context(model: dict[str, Any]) -> int:
+    """The catalog's declared native maximum context, or 0 when undeclared.
+
+    ``max_context_length`` is the model's native (config.json / GGUF
+    training) context; tests/test_model_library_native_context.py keeps it
+    at or below the GGUF header value. The dashboard's normalized entries
+    (performance_oracle.normalize_catalog_entry) fill ``max_context_length``
+    from ``context_length`` when the catalog declares none and mark that with
+    ``native_context_declared: False``; such an entry has no known ceiling
+    here, so an owner's larger context is not clamped to the catalog default.
+    """
+    if model.get("native_context_declared") is False:
+        return 0
+    return _int_or_zero(model.get("max_context_length"))
 
 
 def rank_key(candidate: Candidate, profile: str, *,
@@ -593,7 +615,12 @@ def check_fit(model: dict[str, Any], *, context_length: int, capacity_gb: float,
 
     A runtime profile's authored estimate applies only at the profile's own
     context; at any other context its cache settings feed the estimator.
+    A context above the declared native maximum never fits (llama.cpp caps
+    the slot there, so the raise could not be served), whatever the memory;
+    ``above_native_max`` says so.
     """
+    native_max = declared_max_context(model)
+    above_native_max = bool(native_max) and int(context_length) > native_max
     estimate = estimate_for_runtime(model, context_length=context_length, runtime_profile=runtime_profile)
     authored = 0.0
     if runtime_profile is not None:
@@ -614,9 +641,11 @@ def check_fit(model: dict[str, Any], *, context_length: int, capacity_gb: float,
         fit_margin_gb=margin, priority=0, evidence=0,
     ))
     return {
-        "fits": bool(fits),
+        "fits": bool(fits) and not above_native_max,
         "model_id": model.get("id"),
         "context_length": int(context_length),
+        "max_context_length": native_max or None,
+        "above_native_max": above_native_max,
         "runtime_profile": (runtime_profile or {}).get("id"),
         "required_gb": round(required, 2),
         "capacity_gb": round(capacity_gb, 2),

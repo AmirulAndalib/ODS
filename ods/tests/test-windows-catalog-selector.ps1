@@ -159,6 +159,19 @@ $gpu27.VramMB = 32607
 if ((Test-CatalogModelContextFit -TierConfig $config27 -GpuInfo $gpu27 -SystemRamGB 61 -SourceRoot $repoRoot -ContextLength 65536) -ne $true) {
     throw "27B must fit at 64K on an RTX 5090"
 }
+# phi-4 at 64K would fit a 32 GB card by memory, but its native context is
+# 16,384: llama.cpp caps the slot there, so the raise is never a fit.
+$configPhi4 = @{ LlmModel = "phi-4"; GgufFile = "phi-4-Q4_K_M.gguf"; MaxContext = 16384 }
+$phi4Catalog = (Get-Content (Join-Path $repoRoot "config\model-library.json") -Raw | ConvertFrom-Json).models |
+    Where-Object { $_.id -eq "phi4-q4" } | Select-Object -First 1
+$configPhi4.LlmModel = "$($phi4Catalog.llm_model_name)"
+$configPhi4.GgufFile = "$($phi4Catalog.gguf_file)"
+if ((Test-CatalogModelContextFit -TierConfig $configPhi4 -GpuInfo $gpu27 -SystemRamGB 61 -SourceRoot $repoRoot -ContextLength 65536) -ne $false) {
+    throw "A context above the declared native maximum must never fit (phi-4 at 64K)"
+}
+if ((Test-CatalogModelContextFit -TierConfig $configPhi4 -GpuInfo $gpu27 -SystemRamGB 61 -SourceRoot $repoRoot -ContextLength 16384) -ne $true) {
+    throw "phi-4 at its native 16K must fit on an RTX 5090"
+}
 $unknown = @{ LlmModel = "imported"; GgufFile = "not-in-catalog.gguf"; MaxContext = 32768 }
 if ($null -ne (Test-CatalogModelContextFit -TierConfig $unknown -GpuInfo $gpu27 -SystemRamGB 61 -SourceRoot $repoRoot -ContextLength 65536)) {
     throw "A model outside the catalog must be unknown, not a verdict"

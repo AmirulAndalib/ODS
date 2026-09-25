@@ -244,5 +244,61 @@ def test_a_switch_serves_what_the_installer_serves(envelope_id):
     assert below["context_length"] >= HERMES_FLOOR, (envelope_id, below)
 
 
+def _plan_on_nvidia(model_id: str, vram_mb: int, preferred: int | None) -> dict:
+    from model_selection import plan_model_context
+
+    return plan_model_context(
+        _catalog()[model_id], capacity_gb=vram_mb / 1024.0, backend="nvidia",
+        memory_type="discrete", vram_mb=vram_mb, ram_gb=64, host_arch="amd64",
+        min_context=HERMES_FLOOR, preferred_context=preferred,
+    )
+
+
+@pytest.mark.parametrize(
+    ("model_id", "vram_mb", "preferred"),
+    [
+        # A stale CTX_SIZE / MODEL_RECOMMENDED_CONTEXT above the native
+        # context (phi-4: 16,384; Qwen3-30B-A3B: 40,960, the #6712 rollback)
+        # must not be replayed: llama.cpp caps the slot at the training
+        # context, so the activation's context proof could never pass.
+        ("phi4-q4", 24576, 65536),
+        ("phi4-q4", 16384, 32768),
+        ("qwen3-30b-a3b-q4", 49140, 131072),
+    ],
+)
+def test_a_switch_never_plans_above_the_declared_native_context(model_id, vram_mb, preferred):
+    plan = _plan_on_nvidia(model_id, vram_mb, preferred)
+    native = int(_catalog()[model_id]["max_context_length"])
+    assert plan["context_length"] <= native, plan
+    assert plan["max_context_length"] == native, plan
+    assert plan["meets_min_context"] is False, plan
+
+
+def test_a_switch_keeps_an_owner_context_within_the_native_context():
+    # tower2: an owner's 262,144 for Qwen3-Coder-Next is its native context,
+    # so it is kept rather than clamped to the 131,072 catalog default.
+    plan = _plan_on_nvidia("qwen3-coder-next-q4", 195774, 262144)
+    assert plan["fits"] is True and plan["context_length"] == 262144, plan
+
+
+def test_the_hermes_recheck_refuses_a_raise_above_the_native_context():
+    """select-model.py --check-fit (phase 03's Hermes re-check).
+
+    phi-4 needs ~21.4 GiB at 64K, so memory alone says it fits a 24 GB card;
+    its native context is 16,384, so the raise can never be served.
+    """
+    from model_selection import check_fit
+
+    phi4 = _catalog()["phi4-q4"]
+    raised = check_fit(phi4, context_length=HERMES_FLOOR, capacity_gb=24.0, mclass="discrete")
+    assert raised["fits"] is False and raised["above_native_max"] is True, raised
+    native = check_fit(phi4, context_length=16384, capacity_gb=24.0, mclass="discrete")
+    assert native["fits"] is True and native["above_native_max"] is False, native
+    qwen3_30b = check_fit(
+        _catalog()["qwen3-30b-a3b-q4"], context_length=HERMES_FLOOR, capacity_gb=48.0, mclass="discrete",
+    )
+    assert qwen3_30b["fits"] is False and qwen3_30b["above_native_max"] is True, qwen3_30b
+
+
 if __name__ == "__main__":
     raise SystemExit(pytest.main([__file__, "-q"]))

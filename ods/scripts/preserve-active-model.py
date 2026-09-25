@@ -461,6 +461,14 @@ def preserved_contract(args: argparse.Namespace) -> dict[str, str] | None:
     # of turning a catalog advisory into an upgrade-time hard limit.
     if context < 1024 or context > 9_007_199_254_740_991:
         return None
+    # The owner's choice is honored up to the model's declared native
+    # maximum only. Above it llama.cpp caps the slot at the training context,
+    # so the recorded value is never served and the activation's context
+    # proof cannot pass (tower2 2026-09-25: qwen3-30b-a3b-q4 recorded at
+    # 131072 on a 40960-token GGUF). Carry the context that is served.
+    native_max = positive_int(model.get("max_context_length"))
+    if native_max and context > native_max:
+        context = native_max
 
     reuse_env_runtime = (
         not state_authoritative

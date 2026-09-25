@@ -14,6 +14,7 @@ from performance_oracle import (
     model_app_compatibility,
     model_publisher,
     normalize_catalog_entry,
+    planned_model_context,
     rank_pre_download_models,
     read_env_file_value,
     read_env_value,
@@ -1458,6 +1459,34 @@ def test_installer_recommended_model_survives_bootstrap_env(data_dir, tmp_path):
     assert by_id["qwen3.5-9b-q4"]["recommendation"]["source"] == "installer_tier_map"
     assert by_id["qwen3.5-9b-q4"]["recommendation"]["contextLength"] == 65536
     assert payload["recommendationAlternatives"][0]["id"] == "qwen3.5-9b-q4"
+
+
+def test_switch_plan_clamps_a_stale_context_to_the_declared_native_context():
+    """A switch or restore never asks llama.cpp for more than a declared native
+    context (it caps the slot there and the context proof fails, #6712).
+
+    phi-4 declares 16,384 and Qwen3-30B-A3B 40,960 in the catalog; a stale
+    CTX_SIZE / MODEL_RECOMMENDED_CONTEXT above that plans at the native value.
+    """
+    catalog = {raw["id"]: normalize_catalog_entry(raw) for raw in _official_model_catalog()}
+    phi4 = planned_model_context(catalog["phi4-q4"], _gpu(total_mb=24576), 64, preferred_context=65536)
+    assert phi4["context_length"] == 16384
+    assert phi4["meets_min_context"] is False
+    qwen3_30b = planned_model_context(
+        catalog["qwen3-30b-a3b-q4"], _gpu(total_mb=49140), 128, preferred_context=131072,
+    )
+    assert qwen3_30b["context_length"] == 40960
+
+
+def test_switch_plan_keeps_an_owner_context_when_no_native_context_is_declared():
+    # Normalization fills max_context_length from context_length for the
+    # context options when the catalog declares none; that fallback is not a
+    # native ceiling, so an owner's (or the installer's) larger context stays.
+    entry = normalize_catalog_entry(_model())
+    assert entry["max_context_length"] == 32768
+    assert entry["native_context_declared"] is False
+    plan = planned_model_context(entry, _gpu(total_mb=16384), 64, preferred_context=65536)
+    assert plan["context_length"] == 65536
 
 
 def test_context_options_separate_recommended_context_from_model_limit(data_dir, tmp_path):

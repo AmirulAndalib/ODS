@@ -776,6 +776,12 @@ function Test-CatalogModelContextFit {
         }
     }
     if (-not $model) { return $null }
+    # Above the declared native maximum the raise can never be served
+    # (llama.cpp caps the slot at the training context), whatever the memory.
+    if ($model.PSObject.Properties["max_context_length"] -and $model.max_context_length -and
+        $ContextLength -gt [int]$model.max_context_length) {
+        return $false
+    }
     $runtimeProfile = $null
     if ($TierConfig.RuntimeProfile) {
         $runtimeProfile = @($model.runtime_profiles | Where-Object { $_.id -eq $TierConfig.RuntimeProfile }) | Select-Object -First 1
