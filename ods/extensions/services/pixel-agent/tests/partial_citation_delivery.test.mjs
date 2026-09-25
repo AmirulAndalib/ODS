@@ -301,3 +301,35 @@ test('a tool-limit answer after the source-read revision supersedes the armed de
   assert.ok(delivery.text.includes(`<${LFF}>`) && delivery.text.includes(`<${ESPN}>`), 'its unread links are labelled by the host');
   assert.deepEqual(aborts, []);
 });
+
+test('the superseding tool-limit answer also survives a threshold compaction after it', () => {
+  // #6671's precedence (the tool-limit answer over the armed first answer)
+  // composes with compaction survival: OpenClaw's post-answer summarization
+  // call uses the run's model stream and must not forfeit that answer.
+  const aborts = [];
+  const guard = createToolLoopGuard({abortRun: (id, key) => { aborts.push([id, key]); return true; }});
+  const sdk = {runId: context.runId, sessionId: context.sessionId, sessionKey: context.sessionKey};
+  let calls = 0;
+  const turn = () => { const callId = `${context.runId}:model:${++calls}`; guard.observeModelCall({callId}, sdk); guard.observeModelEnd({callId}, sdk); };
+  guard.observeRun(context, 'pixel', {prompt: FLEET_PROMPT});
+  for (const [url, finalUrl] of FLEET_READS) tool(guard, 'web_fetch', {url}, fetched(url, finalUrl));
+  assert.equal(guard.beforeAgentFinalize({lastAssistantMessage: PHILLY_EVENTS_FIRST_ANSWER}, context)?.action, 'revise');
+  for (let i = 0; i < RUN_PROGRESS_LIMITS.consecutiveFailures; i++) {
+    const id = `failed-${i}`;
+    guard.toolResultPersist({toolCallId: id, message: {role: 'toolResult', toolName: 'web_fetch', toolCallId: id,
+      isError: true, content: [{type: 'text', text: 'Web fetch failed (403)'}]}}, {...context, toolName: 'web_fetch', toolCallId: id});
+  }
+  guard.observeModelCall({callId: 'unaware'}, sdk);
+  assert.equal(guard.beforeToolCall({toolName: 'web_search', toolCallId: 'late', params: {query: 'Philadelphia events'}},
+    {...context, toolName: 'web_search', toolCallId: 'late'})?.blockReason, PROGRESS_FINALIZATION_INSTRUCTION);
+  guard.observeModelEnd({callId: 'unaware'}, sdk);
+  turn();
+  assert.equal(guard.beforeAgentFinalize({lastAssistantMessage: PHILLY_EVENTS_REVISED_ANSWER}, context), undefined);
+  guard.observeCompaction({sessionKey: context.sessionKey}, 'start');
+  turn();
+  guard.observeCompaction({sessionKey: context.sessionKey}, 'end');
+  const delivery = guard.deliveryVerificationForRun(context.runId);
+  assert.ok(delivery.text.startsWith(PHILLY_EVENTS_REVISED_ANSWER), 'the tool-limit answer is still delivered after compaction');
+  assert.ok(delivery.text.includes(PROGRESS_FINALIZATION_NOTE));
+  assert.deepEqual(aborts, [], 'the summarization call is not aborted');
+});
