@@ -64,6 +64,7 @@ DASHBOARD_EXTENSIONS = (
     EXTENSIONS / "services" / "dashboard-api" / "routers" / "extensions.py"
 )
 REMOTE_CONTEXT = ("https://", "http://", "git://", "ssh://", "git@")
+UNTRACKED_CACHES = {"__pycache__", ".pytest_cache", "node_modules"}
 
 
 # ---------------------------------------------------------------- git view --
@@ -112,6 +113,11 @@ def files_under(directory: Path) -> list[str]:
         prefix = directory.relative_to(ROOT).as_posix()
         prefix = "" if prefix == "." else prefix + "/"
         found = [item for item in found if prefix + item in TRACKED]
+    else:
+        # Without Git, leave out the local caches running tests creates;
+        # they are never product content.
+        found = [item for item in found
+                 if not UNTRACKED_CACHES & set(item.split("/")) and not item.endswith(".pyc")]
     return sorted(found)
 
 
@@ -156,6 +162,8 @@ def parse_dockerignore(text: str) -> list[tuple[bool, re.Pattern[str]]]:
         exclusion = line.startswith("!")
         if exclusion:
             line = line[1:].strip()
+            if not line:
+                continue
         line = posixpath.normpath(line)
         if len(line) > 1 and line.startswith("/"):
             line = line.lstrip("/")
@@ -255,7 +263,11 @@ def context_reads(dockerfile_text: str, build_args: dict[str, str]) -> list[Cont
             continue
         if keyword == "ENV":
             if "=" in rest.split(" ", 1)[0]:
-                for item in shlex.split(rest):
+                try:
+                    items = shlex.split(rest)
+                except ValueError:
+                    items = rest.split()
+                for item in items:
                     name, _, value = item.partition("=")
                     variables[name] = value
             else:
@@ -263,20 +275,14 @@ def context_reads(dockerfile_text: str, build_args: dict[str, str]) -> list[Cont
                 variables[name] = value.strip()
             continue
         if keyword in ("COPY", "ADD"):
-            if rest.startswith("["):
-                args = json.loads(rest)
-                flags = []
-            else:
-                words = rest.split()
-                flags = []
-                while words and words[0].startswith("--"):
-                    flags.append(words.pop(0))
-                args = words
+            flags = []
+            while rest.startswith("--"):
+                flag, _, rest = rest.partition(" ")
+                flags.append(flag)
+                rest = rest.lstrip()
             if any(flag.startswith("--from=") for flag in flags):
-                continue
-            if rest.startswith("[") :
-                while args and args[0].startswith("--"):
-                    flags.append(args.pop(0))
+                continue  # Another stage or image, not the build context.
+            args = json.loads(rest) if rest.startswith("[") else rest.split()
             for source in args[:-1]:
                 if source.startswith("<<") or source.startswith(REMOTE_CONTEXT):
                     continue
@@ -320,7 +326,7 @@ def resolve_reads(reads: Iterable[ContextRead], context_files: list[str]) -> tup
     for read in reads:
         source = read.source
         if "$" in source:
-            missing.append(f"{read.instruction} {source} (unresolved variable)")
+            missing.append(f"{read.instruction} {source}: unresolved variable in a context path")
             continue
         source = posixpath.normpath(source.lstrip("/")) if source.strip("/") else "."
         if source == ".":
@@ -338,7 +344,7 @@ def resolve_reads(reads: Iterable[ContextRead], context_files: list[str]) -> tup
             else:
                 matched.update(path for path in context_files if path.startswith(root + "/"))
         if not matched:
-            missing.append(f"{read.instruction} {read.source}")
+            missing.append(f"{read.instruction} {read.source}: not in the build context")
         needed.update(matched)
     return needed, missing
 
@@ -397,17 +403,23 @@ def discover_builds() -> list[Build]:
             assert not build.get("additional_contexts"), (
                 f"{compose}:{name}: additional_contexts need a materialization rule")
             context = (base / context_value).resolve()
-            assert ROOT.resolve() in (context, *context.parents), (
+            assert ROOT in (context, *context.parents), (
                 f"{compose}:{name}: build context leaves the product tree")
+            dockerfile = (context / str(build.get("dockerfile", "Dockerfile"))).resolve()
+            unusable = None
+            if library and compose.parent.resolve() not in (context, *context.parents):
+                unusable = f"build context {context_value!r} leaves the recipe (install refuses it)"
+            elif not context.is_dir():
+                unusable = f"build context {context.relative_to(ROOT).as_posix()} does not exist"
+            elif "dockerfile_inline" not in build and not dockerfile.is_file():
+                unusable = f"Dockerfile {dockerfile.relative_to(ROOT).as_posix()} does not exist"
+            if unusable:
+                builds.append(Build(compose, name, context, dockerfile, library, missing=[unusable]))
+                continue
             if "dockerfile_inline" in build:
                 text = str(build["dockerfile_inline"])
                 dockerfile = compose
             else:
-                dockerfile = (context / str(build.get("dockerfile", "Dockerfile"))).resolve()
-                if not dockerfile.is_file():
-                    builds.append(Build(compose, name, context, dockerfile, library,
-                                        missing=[f"Dockerfile {dockerfile.relative_to(ROOT).as_posix()}"]))
-                    continue
                 text = dockerfile.read_text(encoding="utf-8")
             args = build.get("args") or {}
             if isinstance(args, list):
@@ -637,7 +649,7 @@ def audit() -> tuple[list[Build], dict[str, dict[str, list[str]]], list[str]]:
         if per_build:
             dropped[build.label] = per_build
         for item in build.missing:
-            problems.append(f"{build.label}: build reads {item}, which is not in its build context")
+            problems.append(f"{build.label}: {item}")
     limit = library_size_limit()
     for recipe in sorted(path for path in LIBRARY.iterdir() if path.is_dir()):
         size = sum((recipe / item).lstat().st_size for item in files_under(recipe))
@@ -722,6 +734,37 @@ def check_bootstrap_filters_on_fixture() -> str:
     return "[PASS] bootstrap rsync keeps nested recipe files and drops root development files"
 
 
+def check_readers() -> str:
+    """The contract's Dockerfile and .dockerignore readers on known inputs."""
+    rules = parse_dockerignore("*\n!Dockerfile\n!README.md\n# comment\n")
+    assert not dockerignored("README.md", rules) and dockerignored("notes.txt", rules)
+    assert dockerignored("sub/README.md", rules)
+    rules = parse_dockerignore("**/__pycache__\nsecrets/\n!secrets/public.pem\n")
+    assert dockerignored("a/b/__pycache__/x.pyc", rules)
+    assert dockerignored("secrets/key", rules) and not dockerignored("secrets/public.pem", rules)
+    reads = context_reads(
+        "# syntax=docker/dockerfile:1\n"
+        "FROM alpine AS build\n"
+        "ARG CONF=nginx.conf\n"
+        "COPY --chown=1:1 --chmod=0644 a.txt b/ \\\n    /dst/\n"
+        "COPY --from=build /x /y\n"
+        'COPY --link ["with space.txt", "/dst/"]\n'
+        "ADD https://example.com/x.tgz /tmp/\n"
+        "COPY <<EOF /etc/inline\nCOPY not-an-instruction /x\nEOF\n"
+        "RUN --mount=type=bind,source=scripts/build.sh,target=/b.sh sh /b.sh\n"
+        "RUN --mount=type=cache,target=/root/.cache true\n"
+        "COPY ${CONF} /etc/nginx/\n", {})
+    assert [read.source for read in reads] == [
+        "a.txt", "b/", "with space.txt", "scripts/build.sh", "nginx.conf"], reads
+    needed, missing = resolve_reads(
+        reads, ["a.txt", "b/c.txt", "b/d/e.txt", "scripts/build.sh", "nginx.conf"])
+    assert needed == {"a.txt", "b/c.txt", "b/d/e.txt", "scripts/build.sh", "nginx.conf"}
+    assert missing == ["COPY with space.txt: not in the build context"], missing
+    needed, _ = resolve_reads([ContextRead("COPY", "*.conf")], ["x.conf", "sub/y.conf"])
+    assert needed == {"x.conf"}
+    return "[PASS] Dockerfile and .dockerignore readers"
+
+
 def report(builds: list[Build], dropped: dict[str, dict[str, list[str]]]) -> None:
     for build in builds:
         kind = "library" if build.library else "core"
@@ -735,12 +778,16 @@ def report(builds: list[Build], dropped: dict[str, dict[str, list[str]]]) -> Non
 
 
 def main() -> int:
+    print(check_readers())
     builds, dropped, problems = audit()
     if "--report" in sys.argv[1:]:
         report(builds, dropped)
     library = sum(1 for build in builds if build.library)
     assert library >= 90, f"expected the curated library builds, found {library}"
-    assert any(build.label.endswith("mapshaper/compose.yaml:mapshaper") for build in builds)
+    # Discovery must see the regression's own build input.
+    mapshaper = [build for build in builds
+                 if build.label.endswith("mapshaper/compose.yaml:mapshaper")]
+    assert mapshaper and "extensions/library/services/mapshaper/README.md" in mapshaper[0].needed
     print(check_bootstrap_filters_on_fixture())
     print(check_filter_emulation_against_rsync())
     if problems:
