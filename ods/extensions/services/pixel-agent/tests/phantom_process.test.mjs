@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import {createToolLoopGuard, PHANTOM_PROCESS_FREE_ANSWERS, PHANTOM_PROCESS_REASON} from '../plugin/tool-loop-guard.mjs';
+import {createToolLoopGuard, FREE_CORRECTIONS_PER_KIND, PHANTOM_PROCESS_REASON} from '../plugin/tool-loop-guard.mjs';
 import {RUN_PROGRESS_LIMITS, RUN_PROGRESS_STOP_REASON} from '../plugin/run-progress-budget.mjs';
 
 const prompt = 'Run the existing Python unit tests and report the result.';
@@ -105,7 +105,7 @@ for (const wrapped of [false, true]) {
     for (let i = 0; i < RUN_PROGRESS_LIMITS.consecutiveFailures - 1; i++) {
       step('read', {path:`project/missing-${i}.py`}, missingFile);
     }
-    for (let i = 0; i < PHANTOM_PROCESS_FREE_ANSWERS; i++) {
+    for (let i = 0; i < FREE_CORRECTIONS_PER_KIND; i++) {
       assert.equal(step('process', evidence[i], {details:{status:'failed'}}).decision?.blockReason, PHANTOM_PROCESS_REASON);
       assert.equal(exhausted(), false, `free phantom answer ${i + 1} was charged`);
     }
@@ -117,7 +117,7 @@ for (const wrapped of [false, true]) {
   test(`phantom answers beyond the bound are charged, so spam still ends (wrapped=${wrapped})`, () => {
     const {step, exhausted} = harness({wrapped});
     step('exec', {command:'python3 -m unittest', workdir:'/workspace/project'}, passingTests);
-    const limit = PHANTOM_PROCESS_FREE_ANSWERS + RUN_PROGRESS_LIMITS.consecutiveFailures;
+    const limit = FREE_CORRECTIONS_PER_KIND + RUN_PROGRESS_LIMITS.consecutiveFailures;
     for (let i = 1; i <= limit; i++) {
       const {decision} = step('process', {action:'poll'}, {details:{status:'failed'}});
       assert.equal(decision?.blockReason, PHANTOM_PROCESS_REASON, `call ${i}`);
@@ -175,6 +175,6 @@ test('ODS-internal and nested calls keep their own accounting', () => {
   for (let i = 0; i < RUN_PROGRESS_LIMITS.consecutiveFailures - 1; i++) {
     step('read', {path:`project/missing-${i}.py`}, missingFile);
   }
-  for (let i = 0; i < PHANTOM_PROCESS_FREE_ANSWERS; i++) step('process', {action:'poll'}, {details:{status:'failed'}});
+  for (let i = 0; i < FREE_CORRECTIONS_PER_KIND; i++) step('process', {action:'poll'}, {details:{status:'failed'}});
   assert.equal(exhausted(), false);
 });

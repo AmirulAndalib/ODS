@@ -166,8 +166,9 @@ export const PENDING_EXEC_LOOP_ABORT_REASON =
 export const PHANTOM_PROCESS_REASON =
   "No background process is running in this response. Every command so far has completed, and its output is in the corresponding exec result. Continue with that output instead of calling process.";
 
-// Phantom process answers per run that do not consume the failure budget.
-export const PHANTOM_PROCESS_FREE_ANSWERS = 2;
+// Per run and per kind of corrective answer (see recordFreeCorrection): how
+// many answers are recorded without consuming the failure budget.
+export const FREE_CORRECTIONS_PER_KIND = 2;
 
 export const VERIFICATION_PENDING_DELIVERY_PREFIX =
   "Pixel stopped before the verification process reached a terminal result, so success is unverified. The workspace is preserved; ask Pixel to continue the run or inspect the process.";
@@ -178,8 +179,14 @@ export const VERIFICATION_FAILED_DELIVERY_PREFIX =
 export const VERIFICATION_NOT_RUN_DELIVERY_PREFIX =
   "Pixel could not complete this task successfully because the owner-requested verification was not executed. The workspace is preserved; ask Pixel to continue and run the requested checks.";
 
+// Refusal for a test command composed with a pipe, redirect, chain or filter.
+// A plain `> file` keeps the exit status, but the runner output then never
+// reaches the exec result that verification is judged from (exit-zero
+// unittest outcomes such as "Ran 0 tests" or expected failures are detected
+// in that output). So refuse, and point at the path Pixel supports: run the
+// bare command, then write the returned output if the owner wants a file.
 export const VERIFICATION_COMMAND_NOT_AUDITABLE_REASON =
-  "Pixel blocked this verification because a shell pipeline, redirect, or chained command can hide the test runner's exit status or truncate its evidence. Rerun the same test command directly, with no pipeline, redirection, chaining, or output filter, and inspect its complete output.";
+  "Not run: verification must be the bare test command, with no pipe, redirect, chain or filter, so its complete output and exit status reach this result. Run it directly, and if the owner asked for that output in a file, save the returned output with the write tool afterwards.";
 
 export const REQUESTED_UNITTEST_REQUIRED_REASON =
   "The owner explicitly requested Python unittest coverage, so that attempted file was not written. Make exactly one tool_call now with id write, the same path, and a complete replacement under 1000 characters. Begin with the needed imports including unittest; use one unittest.TestCase class with only the requested test_* methods and assertions; finish with unittest.main(). No narration, comments, docstrings, extra cases, or print-only custom runner. Do not run verification before this test file is accepted.";
@@ -6670,6 +6677,26 @@ export function createToolLoopGuard({
       !backgroundExecScopes(state, agentId).some((scope) => sessionBackgroundExecs.has(scope));
   }
 
+  // Budget for a fixed corrective answer that ran nothing (a phantom process
+  // call, a composed verification command). Such an answer is informational,
+  // neither a tool failure nor progress, so the first FREE_CORRECTIONS_PER_KIND
+  // of each kind per run are recorded now as discovery, the existing
+  // tool_search semantics: no failure is charged, earlier failures are not
+  // reset, and model rounds keep advancing. The call ID then de-duplicates the
+  // blocked receipt that after_tool_call and tool_result_persist report later.
+  // Beyond that bound the same answer is charged as an ordinary blocked
+  // result, so a model that keeps repeating the call still reaches the
+  // unchanged consecutive/total failure fuses. A nested Tool Search execution
+  // is charged through its outer tool_call receipt, whose ID differs, so it
+  // never receives the allowance.
+  function recordFreeCorrection(state, kind, callId, toolName) {
+    if (!state || typeof callId !== "string" || !callId || callId.startsWith("tool_search_code:")) return;
+    const used = state.freeCorrections.get(kind) ?? 0;
+    if (used >= FREE_CORRECTIONS_PER_KIND) return;
+    state.freeCorrections.set(kind, used + 1);
+    state.progressBudget.observeResult({callId, tool: toolName, failed: false, discovery: true});
+  }
+
   function pruneRuns() {
     while (runs.size >= MAX_TRACKED_RUNS) {
       runs.delete(runs.keys().next().value);
@@ -6886,11 +6913,11 @@ export function createToolLoopGuard({
         pendingExecSessions: new Map(),
         pendingExecBlocks: new Map(),
         // Phantom-process bookkeeping: allowed exec calls whose receipt has
-        // not been observed yet, whether any exec went to the background in
-        // this run, and how many phantom process calls were answered.
+        // not been observed yet, and whether any exec went to the background.
         execCallsInFlight: new Set(),
         backgroundExecStarted: false,
-        phantomProcessAnswers: 0,
+        // Budget-free corrective answers used so far, by kind.
+        freeCorrections: new Map(),
         execOriginalByWrapped: new Map(),
         verificationOriginalByWrapped: new Map(),
         currentSessionId: undefined,
@@ -8510,6 +8537,10 @@ export function createToolLoopGuard({
       !verificationCommandIsAuditable(selectedParams)
     ) {
       if (state) state.latestVerificationStatus = "failed";
+      // The refusal runs nothing; repeats (often with a variant redirect) are
+      // bounded by recordFreeCorrection instead of each draining the budget.
+      recordFreeCorrection(state, "verification-not-auditable",
+        context?.toolCallId ?? event?.toolCallId, toolName);
       return { block: true, blockReason: VERIFICATION_COMMAND_NOT_AUDITABLE_REASON };
     }
 
@@ -8744,21 +8775,7 @@ export function createToolLoopGuard({
     // reach process unchanged.
     const phantomCallId = context?.toolCallId ?? event?.toolCallId;
     if (phantomProcessCall(state, agentId, selectedToolTarget, selectedParams, phantomCallId)) {
-      // Budget: a phantom answer is an informational no-op, neither a failure
-      // nor progress. The first PHANTOM_PROCESS_FREE_ANSWERS per run are
-      // recorded now as discovery (like tool_search): no failure is charged,
-      // earlier failures are not reset, and model rounds keep advancing. The
-      // call ID then de-duplicates the blocked receipt that after_tool_call
-      // and tool_result_persist report later. Beyond that bound the same answer
-      // is charged as an ordinary blocked result, so a model that keeps polling
-      // still reaches the unchanged consecutive/total failure fuses. A nested
-      // Tool Search execution is charged through its outer tool_call receipt,
-      // whose ID is not this one, so it never receives the free allowance.
-      const nested = typeof phantomCallId === "string" && phantomCallId.startsWith("tool_search_code:");
-      if (!nested && ++state.phantomProcessAnswers <= PHANTOM_PROCESS_FREE_ANSWERS) {
-        state.progressBudget.observeResult({callId: phantomCallId, tool: toolName,
-          params: event?.params, failed: false, discovery: true});
-      }
+      recordFreeCorrection(state, "phantom-process", phantomCallId, toolName);
       return { block: true, blockReason: PHANTOM_PROCESS_REASON };
     }
     // An allowed exec can still return a background session. Until
