@@ -74,7 +74,19 @@ On an RTX 5090 with Qwen3.5-27B Q4_K_M and llama.cpp b9014:
 | Same rewrite, prior file JSON-escaped in context | 70.3 s | 60.6 s |
 | Novel generation and 24k-token prefill | no change (±0.5%) | no change (±0.5%) |
 
-VRAM did not change. Draft sizes keep llama.cpp's defaults (`--spec-ngram-mod-n-match 24`, `--spec-ngram-mod-n-min 48`, `--spec-ngram-mod-n-max 64`).
+VRAM did not change.
+
+On a Mac mini M4 (16 GB) with Qwen3.5-9B Q4_K_M and native b9014 (median of 3, every output exact):
+
+| Workload | b8210 (previous pin) | b9014, `LLAMA_SPEC_TYPE=none` | b9014, `ngram-mod` |
+|---|---|---|---|
+| Copy-heavy edit of a 2.0k-token file | 158.2 s | 135.6 s | 41.1 s |
+| Whole-file rewrite, prior file raw | 155.6 s | 133.8 s | 49.0 s |
+| Same rewrite, prior file JSON-escaped | 152.8 s | 131.2 s | 116.5 s |
+
+Drafts were accepted at 84%, 72% and 57% respectively. Peak llama-server RSS was 8.5 GB with ngram-mod and 8.2 GB without.
+
+Draft sizes keep llama.cpp's defaults (`--spec-ngram-mod-n-match 24`, `--spec-ngram-mod-n-min 48`, `--spec-ngram-mod-n-max 64`).
 
 To turn it off, add this to `.env` and restart llama-server:
 
@@ -106,7 +118,7 @@ Native macOS keeps the `llama-server` binary it was installed with, so an older 
 - spells the draft settings for that binary. `LLAMA_ARG_SPEC_DRAFT_N_MAX` becomes `--spec-draft-n-max` on b9014 and `--draft-max` on b8210, which rejects the newer name. `LLAMA_ARG_SPEC_DRAFT_TYPE_K`/`_V` work the same way.
 - adds `--ctx-checkpoints 32` unless `LLAMA_ARG_CTX_CHECKPOINTS` is set. b8210 keeps 8 prompt checkpoints per slot, so changing a tool result more than 8 turns back re-processes the whole prompt. On a Mac mini M4 (16 GB) with Qwen3.5-9B and b8210, editing turn 3's result after 12 tool turns took 84.3 s with 8 checkpoints and 33.4 s with 32. b9014 already defaults to 32. Each checkpoint costs about 50 MiB for this model. Set a lower value, or 0, to save memory.
 - adds `--spec-type ngram-mod` when the binary has the b8955+ implementation, `LLAMA_ARG_SPEC_TYPE` is unset and `LLAMA_SPEC_TYPE` is not `none`.
-- adds `--reasoning` from `LLAMA_REASONING` (default `off`) when the binary has that switch, as Docker does with `LLAMA_ARG_REASONING`. b9014 defaults it to `auto`, which turns Qwen3.5 thinking on for every request that does not send `enable_thinking: false`. b8210 has no such switch and never enabled thinking for Qwen3.5.
+- passes `LLAMA_REASONING` (default `off`) as `--reasoning` when the binary has that switch, and leaves `--reasoning-format` at llama.cpp's default, as Docker does with `LLAMA_ARG_REASONING`. On the Mac mini with b9014, the old native flags (`--reasoning-format none` only) left `--reasoning` at `auto`: the server logged `thinking = 1` and returned its reasoning as the reply. With `--reasoning off` but `--reasoning-format none`, every reply, tool calls included, started with an empty `<think>` block. `--reasoning off` with the default format replied exactly as b8210 did. b8210 has no `--reasoning` switch, so it keeps `--reasoning-format none`.
 
 A setting you add to `.env` that the binary cannot honour stops the restart before the running model is touched. The bootstrap full-model swap instead logs a warning and starts the full model without the tuning. A default the binary does not support is left out. A fresh install, or `get-ods.sh --force`, installs the pinned b9014.
 

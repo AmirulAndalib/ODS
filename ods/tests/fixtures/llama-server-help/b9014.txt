@@ -1,4 +1,19 @@
-load_backend: loaded CPU backend from /app/libggml-cpu-alderlake.so
+ggml_metal_device_init: tensor API disabled for pre-M5 and pre-A19 devices
+ggml_metal_library_init: using embedded metal library
+ggml_metal_library_init: loaded in 0.007 sec
+ggml_metal_rsets_init: creating a residency set collection (keep_alive = 180 s)
+ggml_metal_device_init: GPU name:   MTL0 (Apple M4)
+ggml_metal_device_init: GPU family: MTLGPUFamilyApple9  (1009)
+ggml_metal_device_init: GPU family: MTLGPUFamilyCommon3 (3003)
+ggml_metal_device_init: GPU family: MTLGPUFamilyMetal4  (5002)
+ggml_metal_device_init: simdgroup reduction   = true
+ggml_metal_device_init: simdgroup matrix mul. = true
+ggml_metal_device_init: has unified memory    = true
+ggml_metal_device_init: has bfloat            = true
+ggml_metal_device_init: has tensor            = false
+ggml_metal_device_init: use residency sets    = true
+ggml_metal_device_init: use shared buffers    = true
+ggml_metal_device_init: recommendedMaxWorkingSetSize  = 12713.12 MB
 ----- common params -----
 
 -h,    --help, --usage                  print usage and exit
@@ -84,6 +99,8 @@ load_backend: loaded CPU backend from /app/libggml-cpu-alderlake.so
                                         (env: LLAMA_ARG_CACHE_TYPE_V)
 -dt,   --defrag-thold N                 KV cache defragmentation threshold (DEPRECATED)
                                         (env: LLAMA_ARG_DEFRAG_THOLD)
+--rpc SERVERS                           comma separated list of RPC servers (host:port)
+                                        (env: LLAMA_ARG_RPC)
 --mlock                                 force system to keep model in RAM rather than swapping or compressing
                                         (env: LLAMA_ARG_MLOCK)
 --mmap, --no-mmap                       whether to memory-map model. (if mmap disabled, slower load but may

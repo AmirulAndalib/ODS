@@ -3526,11 +3526,22 @@ elif [[ -f "$INSTALL_DIR/data/.llama-server.pid" ]]; then
         if [[ ! -f "$_model_path" ]]; then
             log "WARNING: Model file not found at $_model_path"
         else
+            # Read reasoning mode from .env (default off to prevent thinking models
+            # from consuming the entire token budget on internal reasoning)
+            _reasoning=$(grep '^LLAMA_REASONING=' "$ENV_FILE" 2>/dev/null | cut -d= -f2 || echo "")
+            [[ -z "$_reasoning" ]] && _reasoning="off"
+            case "$_reasoning" in
+                off)  _reasoning_fmt="none" ;;
+                on)   _reasoning_fmt="deepseek" ;;
+                *)    _reasoning_fmt="$_reasoning" ;;
+            esac
+
             # Spell draft flags for this runtime and add the macOS defaults it
-            # supports (--ctx-checkpoints 32, --spec-type ngram-mod), with the
+            # supports (--ctx-checkpoints 32, --spec-type ngram-mod, and
+            # --reasoning on b9014 instead of this --reasoning-format), with the
             # helper install-macos.sh and ods-macos.sh use, before the bootstrap
             # model is stopped. A rejected setting must not strand the swap.
-            _llama_tuning_args=()
+            _llama_tuning_args=(--reasoning-format "$_reasoning_fmt")
             _tuning_helper="$INSTALL_DIR/installers/macos/lib/native-checkpoint-args.py"
             if [[ -f "$_tuning_helper" ]] && _tuning_file="$(mktemp)"; then
                 if "${ODS_PYTHON_CMD:-python3}" "$_tuning_helper" --binary "$LLAMA_SERVER_BIN" \
@@ -3544,8 +3555,9 @@ elif [[ -f "$INSTALL_DIR/data/.llama-server.pid" ]]; then
                     --draft-n-max="$(read_env_value LLAMA_ARG_SPEC_DRAFT_N_MAX)" \
                     --draft-type-k="$(read_env_value LLAMA_ARG_SPEC_DRAFT_TYPE_K)" \
                     --draft-type-v="$(read_env_value LLAMA_ARG_SPEC_DRAFT_TYPE_V)" \
-                    --reasoning-mode="$(read_env_value LLAMA_REASONING)" \
+                    --reasoning-mode="$_reasoning" --reasoning-format-fallback="$_reasoning_fmt" \
                     --apply-defaults > "$_tuning_file"; then
+                    _llama_tuning_args=()
                     while IFS= read -r -d '' _tuning_field; do
                         _llama_tuning_args+=("$_tuning_field")
                     done < "$_tuning_file"
@@ -3577,16 +3589,6 @@ elif [[ -f "$INSTALL_DIR/data/.llama-server.pid" ]]; then
                 fi
             fi
 
-            # Read reasoning mode from .env (default off to prevent thinking models
-            # from consuming the entire token budget on internal reasoning)
-            _reasoning=$(grep '^LLAMA_REASONING=' "$ENV_FILE" 2>/dev/null | cut -d= -f2 || echo "")
-            [[ -z "$_reasoning" ]] && _reasoning="off"
-            case "$_reasoning" in
-                off)  _reasoning_fmt="none" ;;
-                on)   _reasoning_fmt="deepseek" ;;
-                *)    _reasoning_fmt="$_reasoning" ;;
-            esac
-
             # Honour the unified BIND_ADDRESS knob (PR #964); empty/missing → loopback.
             _bind=$(grep '^BIND_ADDRESS=' "$ENV_FILE" 2>/dev/null | cut -d= -f2 | tr -d '"' || echo "")
             [[ -z "$_bind" ]] && _bind="127.0.0.1"
@@ -3604,7 +3606,6 @@ elif [[ -f "$INSTALL_DIR/data/.llama-server.pid" ]]; then
                 --model "$_model_path"
                 --ctx-size "$_ctx_size"
                 --n-gpu-layers "$_gpu_layers"
-                --reasoning-format "$_reasoning_fmt"
                 --metrics
             )
             [[ -n "$_flash_attn" ]] && _llama_args+=(--flash-attn "$_flash_attn")

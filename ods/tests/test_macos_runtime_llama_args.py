@@ -5,9 +5,8 @@ macOS launcher passes must work on each runtime ODS has pinned: b8210 (older
 installs) and b9014 (current pin). The fixtures are verbatim `llama-server
 --help` captures:
 
-  tests/fixtures/llama-server-help/b8210.txt  macOS arm64 release asset, Mac mini M4
-  tests/fixtures/llama-server-help/b9014.txt  ghcr.io/ggml-org/llama.cpp:server-cuda-b9014
-                                              (same common/arg.cpp option table)
+  tests/fixtures/llama-server-help/b8210.txt  llama-b8210-bin-macos-arm64 on the Mac mini M4
+  tests/fixtures/llama-server-help/b9014.txt  llama-b9014-bin-macos-arm64 on the Mac mini M4
 
 b8210 rejects --spec-draft-n-max (its flag is --draft-max), and b9014 lists
 --draft-max as removed. A launcher that passed --spec-draft-n-max stopped the
@@ -140,22 +139,29 @@ class QualifiedArgumentTests(unittest.TestCase):
         b8210, _ = run_with_help(HELP["b8210"], EMPTY, defaults=True)
         self.assertEqual(b8210, ["--ctx-checkpoints", "32"])
 
-    def test_llama_reasoning_maps_to_the_b9014_reasoning_switch(self):
-        # b9014 defaults --reasoning to auto, which turns Qwen3.5 thinking on;
-        # ODS's LLAMA_REASONING default is off, as Docker's LLAMA_ARG_REASONING.
+    def test_llama_reasoning_uses_the_b9014_switch_instead_of_the_format(self):
+        # On the Mac mini M4, b9014 with ODS's old argv (--reasoning-format none,
+        # --reasoning left at auto) logged "thinking = 1" and returned a reasoning
+        # trace as content; with --reasoning off it still put "<think>\n\n</think>\n\n"
+        # in every content. --reasoning off with the default format matched b8210.
         for value, expected in (("", "off"), ("off", "off"), ('"on"', "on"), ("auto", "auto")):
             with self.subTest(value=value):
-                result, _ = run_with_help(HELP["b9014"], EMPTY, defaults=True, spec_default="none", reasoning=value)
+                result, _ = run_with_help(HELP["b9014"], EMPTY, defaults=True, spec_default="none",
+                                          reasoning=value, reasoning_format="none")
                 self.assertEqual(result, ["--ctx-checkpoints", "32", "--reasoning", expected])
-        b8210, _ = run_with_help(HELP["b8210"], EMPTY, defaults=True, reasoning="off")
-        self.assertEqual(b8210, ["--ctx-checkpoints", "32"])
-        # Values llama.cpp's --reasoning does not accept are left to --reasoning-format.
-        other, _ = run_with_help(HELP["b9014"], EMPTY, defaults=True, spec_default="none", reasoning="deepseek")
-        self.assertEqual(other, ["--ctx-checkpoints", "32"])
+        # b8210 has no --reasoning switch: keep the caller's format mapping.
+        b8210, _ = run_with_help(HELP["b8210"], EMPTY, defaults=True, reasoning="off", reasoning_format="none")
+        self.assertEqual(b8210, ["--ctx-checkpoints", "32", "--reasoning-format", "none"])
+        # A value --reasoning does not accept keeps the caller's format, even on b9014.
+        other, _ = run_with_help(HELP["b9014"], EMPTY, defaults=True, spec_default="none",
+                                 reasoning="deepseek", reasoning_format="deepseek")
+        self.assertEqual(other, ["--ctx-checkpoints", "32", "--reasoning-format", "deepseek"])
         # Registered profiles (no defaults) keep their own argument list.
         with patch.object(qualifier.subprocess, "run") as run:
-            self.assertEqual(qualifier.qualify("/runtime", EMPTY, reasoning="off"), [])
+            self.assertEqual(qualifier.qualify("/runtime", EMPTY, reasoning="off", reasoning_format="none"), [])
             run.assert_not_called()
+        with self.assertRaises(ValueError):
+            qualifier.qualify("/runtime", EMPTY, defaults=True, reasoning="off", reasoning_format="none;x")
 
     def test_defaults_are_off_unless_requested(self):
         with patch.object(qualifier.subprocess, "run") as run:
@@ -200,6 +206,9 @@ class QualifiedArgumentTests(unittest.TestCase):
         for error in (OSError("missing"), subprocess.TimeoutExpired("runtime", 15), subprocess.CalledProcessError(1, "runtime")):
             with self.subTest(error=type(error).__name__), patch.object(qualifier.subprocess, "run", side_effect=error):
                 self.assertEqual(qualifier.qualify("/runtime", EMPTY, defaults=True), [])
+                # The caller's reasoning format still reaches an unprobed runtime.
+                self.assertEqual(qualifier.qualify("/runtime", EMPTY, defaults=True, reasoning="",
+                                                   reasoning_format="none"), ["--reasoning-format", "none"])
                 with self.assertRaises((OSError, subprocess.SubprocessError)):
                     qualifier.qualify("/runtime", EMPTY, ("3", "", ""), defaults=True)
 
@@ -208,7 +217,7 @@ class QualifiedArgumentTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary:
             runtime = Path(temporary) / "llama-server"
             cases = {
-                "b8210": [b"--draft-max", b"2", b"--ctx-checkpoints", b"32"],
+                "b8210": [b"--draft-max", b"2", b"--ctx-checkpoints", b"32", b"--reasoning-format", b"none"],
                 "b9014": [b"--spec-draft-n-max", b"2", b"--ctx-checkpoints", b"32", b"--spec-type", b"ngram-mod",
                           b"--reasoning", b"off"],
             }
@@ -221,7 +230,7 @@ class QualifiedArgumentTests(unittest.TestCase):
                         [sys.executable, str(SOURCE), "--binary", str(runtime), "--interval=", "--checkpoints=",
                          "--cache-mib=", "--idle-seconds=", "--min-spacing=", "--explicit-spec-type=",
                          "--spec-default=", "--draft-n-max=2", "--draft-type-k=", "--draft-type-v=",
-                         "--reasoning-mode=", "--apply-defaults"],
+                         "--reasoning-mode=", "--reasoning-format-fallback=none", "--apply-defaults"],
                         capture_output=True, timeout=30)
                     self.assertEqual(result.returncode, 0, result.stderr)
                     self.assertEqual(result.stdout.split(b"\0")[:-1], expected)
@@ -233,13 +242,29 @@ class QualifiedArgumentTests(unittest.TestCase):
 
 @unittest.skipIf(os.name == "nt" or not shutil.which("bash"), "needs bash and an executable shell script as the runtime")
 class LauncherWiringTests(unittest.TestCase):
-    """Run the real helper from the real bash callers against a fake b8210/b9014 runtime."""
+    """Run the real helper and launch code against a fake b8210/b9014 runtime."""
 
     ENV = "LLAMA_ARG_SPEC_DRAFT_N_MAX=3\nLLAMA_REASONING=off\n"
     EXPECTED = {
-        "b8210": ["--draft-max", "3", "--ctx-checkpoints", "32"],
+        "b8210": ["--draft-max", "3", "--ctx-checkpoints", "32", "--reasoning-format", "none"],
         "b9014": ["--spec-draft-n-max", "3", "--ctx-checkpoints", "32", "--spec-type", "ngram-mod", "--reasoning", "off"],
     }
+    # Stub the OS effects of a native launch; print the llama-server argv NUL-framed.
+    STUBS = r'''
+read_env_value() { sed -n "s/^$2=//p" "$1" | head -1; }
+ai() { :; }; ai_ok() { :; }; ai_warn() { :; }; ai_err() { echo "$*" >&2; }
+sleep() { :; }; curl() { return 0; }
+macos_bind_probe_host() { printf '%s' 127.0.0.1; }
+bash() {
+    if [[ "$1" == "$INSTALL/installers/macos/lib/native-llama-service.sh" && "$2" == start ]]; then
+        printf '%s\n' "$$" > "$5"
+        shift 5
+        for arg in "$@"; do printf '%s\0' "$arg"; done
+    else
+        command bash "$@"
+    fi
+}
+'''
 
     def setUp(self):
         temporary = tempfile.TemporaryDirectory()
@@ -247,6 +272,8 @@ class LauncherWiringTests(unittest.TestCase):
         self.root = Path(temporary.name)
         self.install = self.root / "install"
         (self.install / "installers/macos/lib").mkdir(parents=True)
+        (self.install / "data/models").mkdir(parents=True)
+        (self.install / "data/models/Qwen3.5-9B-Q4_K_M.gguf").write_bytes(b"GGUF-test")
         shutil.copy(SOURCE, self.install / "installers/macos/lib" / SOURCE.name)
         (self.install / ".env").write_text(self.ENV)
         self.runtime = self.root / "llama-server"
@@ -262,22 +289,87 @@ class LauncherWiringTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr.decode())
         return [part.decode() for part in result.stdout.split(b"\0")[:-1]]
 
+    def assert_argv(self, argv, release, spec=True):
+        """One reasoning decision, the defaults, and only flags this runtime accepts."""
+        flags = [part for part in argv if part.startswith("--")]
+        for flag in flags:
+            self.assertTrue(qualifier.supported(HELP[release], flag), f"{flag} rejected by {release}: {argv}")
+        self.assertEqual(argv[argv.index("--ctx-checkpoints") + 1], "32")
+        if release == "b9014":
+            self.assertEqual(argv[argv.index("--reasoning") + 1], "off")
+            self.assertNotIn("--reasoning-format", argv)
+            self.assertEqual(argv[argv.index("--spec-draft-n-max") + 1], "3")
+            self.assertEqual(flags.count("--spec-type"), 1 if spec else 0)
+            if spec:
+                self.assertEqual(argv[argv.index("--spec-type") + 1], "ngram-mod")
+        else:
+            self.assertEqual(argv[argv.index("--reasoning-format") + 1], "none")
+            self.assertNotIn("--reasoning", argv)
+            self.assertEqual(argv[argv.index("--draft-max") + 1], "3")
+            self.assertNotIn("--spec-type", argv)
+        self.assertEqual(len(flags), len(set(flags)), f"repeated flag: {argv}")
+
     def test_native_model_helper(self):
         script = r'''
 set -euo pipefail
 read_env_value() { sed -n "s/^$2=//p" "$1" | head -1; }
 source "$ROOT/installers/macos/lib/native-model.sh"
-macos_resolve_checkpoint_args "$INSTALL" "$RUNTIME"
+macos_resolve_checkpoint_args "$INSTALL" "$RUNTIME" none
 for arg in ${MACOS_NATIVE_CHECKPOINT_ARGS[@]+"${MACOS_NATIVE_CHECKPOINT_ARGS[@]}"}; do printf '%s\0' "$arg"; done
 '''
         for release, expected in self.EXPECTED.items():
             with self.subTest(release=release):
                 self.use_runtime(release)
                 self.assertEqual(self.run_bash(script), expected)
+        # Without the helper, defaults are skipped but the format still arrives.
+        (self.install / "installers/macos/lib" / SOURCE.name).unlink()
+        (self.install / ".env").write_text("LLAMA_REASONING=off\n")
+        self.assertEqual(self.run_bash(script), ["--reasoning-format", "none"])
+
+    def test_ods_macos_start(self):
+        script = (
+            "set -euo pipefail\n"
+            'INSTALL_DIR="$INSTALL"; LLAMA_SERVER_BIN="$RUNTIME"; LLAMA_SERVER_PID_FILE="$INSTALL/data/llama.pid"\n'
+            'source "$ROOT/installers/macos/lib/native-model.sh"\n'
+            + self.STUBS +
+            'eval "$(awk \'/^start_native_llama\\(\\)/ {p=1} /^stop_native_llama\\(\\)/ {p=0} p\' "$ROOT/installers/macos/ods-macos.sh")"\n'
+            'read_ods_env() { ENV_ODS_MODE=local; ENV_CTX_SIZE=8192; ENV_LLAMA_REASONING="$(read_env_value "$INSTALL/.env" LLAMA_REASONING)"; }\n'
+            "macos_configure_llm_bridge_from_env() { :; }\n"
+            "get_native_llama_status() { NATIVE_LLAMA_RUNNING=false; NATIVE_LLAMA_HEALTHY=false; NATIVE_LLAMA_PID=0; }\n"
+            "stop_native_llama() { :; }\n"
+            "start_native_llama true\n"
+        )
+        for release in ("b8210", "b9014"):
+            with self.subTest(release=release):
+                self.use_runtime(release)
+                argv = self.run_bash(script)
+                self.assertEqual(argv[argv.index("--model") + 1], str(self.install / "data/models/Qwen3.5-9B-Q4_K_M.gguf"))
+                self.assert_argv(argv, release)
+        (self.install / ".env").write_text(self.ENV + "LLAMA_SPEC_TYPE=none\n")
+        self.assert_argv(self.run_bash(script), "b9014", spec=False)
+
+    def test_installer_launch(self):
+        source = (ROOT / "installers/macos/install-macos.sh").read_text(encoding="utf-8")
+        block = section(source, "        # Read reasoning mode from .env", "        # Wait for health endpoint")
+        script = (
+            "set -euo pipefail\n"
+            'INSTALL_DIR="$INSTALL"; LLAMA_SERVER_BIN="$RUNTIME"; LLAMA_SERVER_PID_FILE="$INSTALL/data/llama.pid"\n'
+            'MODEL_FULL_PATH="$INSTALL/data/models/model.gguf"; MAX_CONTEXT=65536; MACOS_NATIVE_PROFILE=false\n'
+            'source "$ROOT/installers/macos/lib/native-model.sh"\n'
+            + self.STUBS +
+            "_macos_stop_install_owned_native_llama() { :; }\n"
+            + block
+        )
+        for release in ("b8210", "b9014"):
+            with self.subTest(release=release):
+                self.use_runtime(release)
+                argv = self.run_bash(script)
+                self.assertEqual(argv[argv.index("--model") + 1], str(self.install / "data/models/model.gguf"))
+                self.assert_argv(argv, release)
 
     def test_bootstrap_full_model_swap(self):
         source = (ROOT / "scripts/bootstrap-upgrade.sh").read_text(encoding="utf-8")
-        block = section(source, "            _llama_tuning_args=()", "            # Capture old model path")
+        block = section(source, "            # Read reasoning mode from .env", "            # Capture old model path")
         script = (
             "set -uo pipefail\n"
             'ENV_FILE="$INSTALL/.env"; INSTALL_DIR="$INSTALL"; LLAMA_SERVER_BIN="$RUNTIME"\n'
@@ -290,9 +382,9 @@ for arg in ${MACOS_NATIVE_CHECKPOINT_ARGS[@]+"${MACOS_NATIVE_CHECKPOINT_ARGS[@]}
             with self.subTest(release=release):
                 self.use_runtime(release)
                 self.assertEqual(self.run_bash(script), expected)
-        # A rejected setting keeps the swap going without the tuning.
+        # A rejected setting keeps the swap going with only the reasoning format.
         (self.install / ".env").write_text("LLAMA_ARG_SPEC_DRAFT_N_MAX=0\n")
-        self.assertEqual(self.run_bash(script), [])
+        self.assertEqual(self.run_bash(script), ["--reasoning-format", "none"])
 
 
 class LauncherContractTests(unittest.TestCase):

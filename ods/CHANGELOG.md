@@ -45,16 +45,19 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - Native macOS installs llama.cpp b9014 (Metal, `llama-b9014-bin-macos-arm64.tar.gz`,
   SHA-256 `565aecda…4f22d`) instead of b8210, the same release as the Linux
   images. b8210 turns speculative decoding off for hybrid models such as
-  Qwen3.5. Existing installs keep their binary until a fresh install or
-  `get-ods.sh --force`.
+  Qwen3.5. On the fleet Mac mini M4 with Qwen3.5-9B, a copy-heavy file edit
+  fell from 158.2 s to 41.1 s and a whole-file rewrite from 155.6 s to
+  49.0 s, with byte-identical output. Existing installs keep their binary
+  until a fresh install or `get-ods.sh --force`.
 - Native macOS llama-server now keeps 32 prompt checkpoints per slot
   (`--ctx-checkpoints 32`) unless `LLAMA_ARG_CTX_CHECKPOINTS` is set. On a Mac
   mini M4 with Qwen3.5-9B and b8210, editing a tool result 9 turns back fell
   from 84.3 s to 33.4 s. It also uses `--spec-type ngram-mod` when the
   installed llama-server supports it (b8955+), with the same
   `LLAMA_SPEC_TYPE=none` opt-out as Docker. On runtimes with b9014's
-  `--reasoning` switch it also passes `LLAMA_REASONING` (default `off`), as
-  Docker does, so Qwen3.5 does not start thinking by default.
+  `--reasoning` switch, `LLAMA_REASONING` (default `off`) is passed as
+  `--reasoning`, as Docker does. Without it, b9014 turned Qwen3.5 thinking on
+  and put `<think>` blocks in replies.
 
 ### Fixed
 - Native macOS launches no longer pass `--spec-draft-n-max` to a llama-server

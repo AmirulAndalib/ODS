@@ -53,6 +53,8 @@ def test_launch_uses_shared_manager_not_popen(managed, monkeypatch):
     assert calls[0][:3] == ['/bin/bash', str(manager), 'start']
     assert calls[0][calls[0].index('--ctx-size') + 1] == '16384'
     assert calls[0][calls[0].index('--alias') + 1] == 'test.gguf'
+    # No tuning helper installed: the reasoning format still reaches llama-server.
+    assert calls[0][calls[0].index('--reasoning-format') + 1] == 'none'
 
 
 def test_tuning_validator_failure_prevents_start(managed, monkeypatch):
@@ -142,18 +144,19 @@ def test_darwin_restart_applies_macos_defaults_through_the_qualifier(managed, mo
         commands.append(args)
         return subprocess.CompletedProcess(args, 0, stdout=b'--ctx-checkpoints\x0032\x00--spec-type\x00ngram-mod\x00')
     monkeypatch.setattr(host.subprocess, 'run', run)
-    result = host._native_llama_tuning_arguments({'LLAMA_SPEC_TYPE': 'none'}, root / 'binary')
+    result = host._native_llama_tuning_arguments({'LLAMA_SPEC_TYPE': 'none'}, root / 'binary', reasoning_format='none')
     assert result == ['--ctx-checkpoints', '32', '--spec-type', 'ngram-mod']
     assert commands[0][1:4] == [str(root / 'installers/macos/lib/native-checkpoint-args.py'), '--binary', str(root / 'binary')]
     assert '--apply-defaults' in commands[0]
     assert '--spec-default=none' in commands[0]
     assert '--explicit-spec-type=' in commands[0]
     assert '--reasoning-mode=' in commands[0]
+    assert '--reasoning-format-fallback=none' in commands[0]
 
 
 @pytest.mark.skipif(os.name == 'nt', reason='needs an executable shell script as the runtime')
 @pytest.mark.parametrize('release,expected', [
-    ('b8210', ['--draft-max', '3', '--ctx-checkpoints', '32']),
+    ('b8210', ['--draft-max', '3', '--ctx-checkpoints', '32', '--reasoning-format', 'none']),
     ('b9014', ['--spec-draft-n-max', '3', '--ctx-checkpoints', '32', '--spec-type', 'ngram-mod', '--reasoning', 'off']),
 ])
 def test_real_qualifier_accepts_the_host_agent_command(managed, release, expected):
@@ -165,13 +168,15 @@ def test_real_qualifier_accepts_the_host_agent_command(managed, release, expecte
     runtime.write_text(f"#!/bin/sh\n[ \"$1\" = --help ] && exec cat '{ods / 'tests/fixtures/llama-server-help' / (release + '.txt')}'\nexit 9\n")
     runtime.chmod(0o755)
     env = {'LLAMA_ARG_SPEC_DRAFT_N_MAX': '3', 'LLAMA_REASONING': 'off'}
-    assert host._native_llama_tuning_arguments(env, runtime) == expected
+    assert host._native_llama_tuning_arguments(env, runtime, reasoning_format='none') == expected
 
 
 def test_missing_qualifier_only_skips_defaults(managed, monkeypatch):
     root, _ = managed
     monkeypatch.setattr(host.subprocess, 'run', lambda *_a, **_k: pytest.fail('no qualifier to run'))
     assert host._native_llama_tuning_arguments({}, root / 'binary') == []
+    # The caller dropped its own --reasoning-format, so the fallback still arrives.
+    assert host._native_llama_tuning_arguments({}, root / 'binary', reasoning_format='none') == ['--reasoning-format', 'none']
     with pytest.raises(RuntimeError, match='validator is missing'):
         host._native_llama_tuning_arguments({'LLAMA_ARG_SPEC_DRAFT_N_MAX': '3'}, root / 'binary')
 
@@ -206,6 +211,9 @@ def test_darwin_launch_spells_draft_flags_through_the_qualifier(managed, monkeyp
     assert start[start.index('--spec-type') + 1] == 'ngram-mod'
     assert start[-4:] == ['--draft-max', '3', '--ctx-checkpoints', '32']
     assert '--spec-draft-n-max' not in start and '--spec-draft-type-k' not in start
+    # Reasoning flags come from the qualifier (--reasoning on b9014); no format here.
+    assert '--reasoning-format-fallback=none' in qualify and '--reasoning-mode=' in qualify
+    assert '--reasoning-format' not in start
 
 
 def test_darwin_profile_launch_gets_no_macos_defaults(managed, monkeypatch):
@@ -216,6 +224,7 @@ def test_darwin_profile_launch_gets_no_macos_defaults(managed, monkeypatch):
     assert '--draft-n-max=2' in qualify
     assert '--apply-defaults' not in qualify
     assert not any(part.startswith(('--spec-default=', '--reasoning-mode=')) for part in qualify)
+    assert start[start.index('--reasoning-format') + 1] == 'none'
 
 
 def test_windows_launch_keeps_its_direct_flags(tmp_path, monkeypatch):
@@ -233,3 +242,4 @@ def test_windows_launch_keeps_its_direct_flags(tmp_path, monkeypatch):
     host._launch_native_llama_server(tmp_path / '.env', tmp_path / 'llama-server.exe', tmp_path / 'log', tmp_path / 'pid')
     assert launched[0][launched[0].index('--spec-draft-n-max') + 1] == '3'
     assert '--ctx-checkpoints' not in launched[0]
+    assert launched[0][launched[0].index('--reasoning-format') + 1] == 'none'

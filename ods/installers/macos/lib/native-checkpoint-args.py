@@ -47,11 +47,14 @@ SPEC_DEFAULT_CHOICES = {"ngram-mod", "ngram-simple", "ngram-map-k", "ngram-map-k
 # speculation off for hybrid models, so it is left alone.
 NGRAM_MOD_CAPABILITY = "--spec-ngram-mod-n-match"
 
-# LLAMA_REASONING (off by default) also maps to --reasoning on runtimes that
-# have it, as Docker does through LLAMA_ARG_REASONING. b9014 defaults
-# --reasoning to auto, which turns Qwen3.5 thinking on for every request that
-# does not send enable_thinking=false. b8210 has no --reasoning flag, and its
-# template probe never enabled thinking for Qwen3.5.
+# LLAMA_REASONING (off by default). On runtimes with --reasoning (b9014) it is
+# passed as --reasoning with llama.cpp's default --reasoning-format, as Docker
+# does through LLAMA_ARG_REASONING. b9014 defaults --reasoning to auto, which
+# turned Qwen3.5 thinking on for every request without enable_thinking=false,
+# and with --reasoning-format none it put the empty "<think>\n\n</think>\n\n"
+# block into every reply's content (measured on the Mac mini M4). Runtimes
+# without --reasoning (b8210, which never enabled thinking for Qwen3.5) keep
+# the caller's --reasoning-format mapping.
 REASONING_CHOICES = {"off", "on", "auto"}
 
 HELP_LIMIT = 1024 * 1024
@@ -122,15 +125,31 @@ def runtime_help(binary):
     return help_text
 
 
-def qualify(binary, values, draft=("", "", ""), *, spec_type="", spec_default="", defaults=False, reasoning=None):
+def reasoning_arguments(help_text, mode, fallback_format):
+    """--reasoning where the runtime has it, else the caller's --reasoning-format."""
+    if help_text is not None and mode in REASONING_CHOICES and supported(help_text, "--reasoning"):
+        return ["--reasoning", mode]
+    return ["--reasoning-format", fallback_format] if fallback_format else []
+
+
+def qualify(binary, values, draft=("", "", ""), *, spec_type="", spec_default="", defaults=False,
+            reasoning=None, reasoning_format=""):
+    """Return the runtime's arguments.
+
+    ``reasoning`` (LLAMA_REASONING) and ``reasoning_format`` (the caller's
+    mapped --reasoning-format) hand the reasoning flags to this helper; the
+    caller must then not pass --reasoning-format itself.
+    """
     arguments = requested_arguments(values)
     drafts = requested_draft_settings(*draft)
     default_spec = default_spec_type(spec_default) if defaults and not _unquote(spec_type) else ""
     default_checkpoints = defaults and _unquote(values[1] if len(values) > 1 else "") == ""
-    reasoning_mode = (_unquote(reasoning) or "off") if defaults and reasoning is not None else ""
-    if reasoning_mode not in REASONING_CHOICES:
-        reasoning_mode = ""  # the caller's --reasoning-format mapping still applies
-    if not arguments and not drafts and not default_spec and not default_checkpoints and not reasoning_mode:
+    handle_reasoning = defaults and reasoning is not None
+    reasoning_mode = _unquote(reasoning or "") or "off"
+    fallback_format = _unquote(reasoning_format)
+    if fallback_format and not re.fullmatch(r"[A-Za-z0-9_.,-]{1,64}", fallback_format):
+        raise ValueError("--reasoning-format requires a llama.cpp format name")
+    if not arguments and not drafts and not default_spec and not default_checkpoints and not handle_reasoning:
         return []
     try:
         help_text = runtime_help(binary)
@@ -138,7 +157,7 @@ def qualify(binary, values, draft=("", "", ""), *, spec_type="", spec_default=""
         if arguments or drafts:
             raise
         print(f"ODS native runtime defaults skipped: {error}", file=sys.stderr)
-        return []
+        return reasoning_arguments(None, reasoning_mode, fallback_format) if handle_reasoning else []
     for flag in arguments[::2]:
         if not supported(help_text, flag):
             raise ValueError(f"Selected native runtime does not support {flag}; leave this setting empty or qualify a compatible runtime")
@@ -151,8 +170,8 @@ def qualify(binary, values, draft=("", "", ""), *, spec_type="", spec_default=""
         arguments.extend(("--ctx-checkpoints", DEFAULT_CTX_CHECKPOINTS))
     if default_spec and supported(help_text, NGRAM_MOD_CAPABILITY) and supported(help_text, "--spec-type"):
         arguments.extend(("--spec-type", default_spec))
-    if reasoning_mode and supported(help_text, "--reasoning"):
-        arguments.extend(("--reasoning", reasoning_mode))
+    if handle_reasoning:
+        arguments.extend(reasoning_arguments(help_text, reasoning_mode, fallback_format))
     return arguments
 
 
@@ -171,8 +190,10 @@ def main():
     parser.add_argument("--draft-n-max", default="")
     parser.add_argument("--draft-type-k", default="")
     parser.add_argument("--draft-type-v", default="")
-    # LLAMA_REASONING; empty means ODS's default, off.
+    # LLAMA_REASONING (empty means ODS's default, off) and the --reasoning-format
+    # the caller would otherwise pass. With both, this helper owns the flags.
     parser.add_argument("--reasoning-mode", default=None)
+    parser.add_argument("--reasoning-format-fallback", default="")
     parser.add_argument("--apply-defaults", action="store_true",
                         help="add the macOS defaults the runtime supports (not for registered model profiles)")
     args = parser.parse_args()
@@ -185,6 +206,7 @@ def main():
             spec_default=args.spec_default,
             defaults=args.apply_defaults,
             reasoning=args.reasoning_mode,
+            reasoning_format=args.reasoning_format_fallback,
         )
     except (OSError, ValueError, subprocess.SubprocessError) as error:
         print(f"ODS native runtime tuning rejected: {error}", file=sys.stderr)

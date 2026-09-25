@@ -2305,11 +2305,10 @@ else
             --model "$MODEL_FULL_PATH"
             --ctx-size "$MAX_CONTEXT"
             --n-gpu-layers "$_gpu_layers"
-            --reasoning-format "$_reasoning_fmt"
             --metrics
         )
         if [[ "$MACOS_NATIVE_PROFILE" == true ]]; then
-            _llama_args+=("${MACOS_NATIVE_PROFILE_ARGS[@]}")
+            _llama_args+=(--reasoning-format "$_reasoning_fmt" "${MACOS_NATIVE_PROFILE_ARGS[@]}")
         else
         _parallel="$(read_env_value "$INSTALL_DIR/.env" "LLAMA_PARALLEL")"
         _llama_args+=(--parallel "${_parallel:-1}")
@@ -2318,10 +2317,11 @@ else
         [[ -n "$_cache_type_v" ]] && _llama_args+=(--cache-type-v "$_cache_type_v")
         [[ -n "$_n_cpu_moe" ]] && _llama_args+=(--n-cpu-moe "$_n_cpu_moe")
         [[ -n "$_spec_type" ]] && _llama_args+=(--spec-type "$_spec_type")
-        # Draft flags, --ctx-checkpoints 32 and the ngram-mod default are
-        # spelled for, and only added when supported by, this runtime.
-        macos_resolve_checkpoint_args "$INSTALL_DIR" "$LLAMA_SERVER_BIN" || exit 1
-        _llama_args+=("${MACOS_NATIVE_CHECKPOINT_ARGS[@]}")
+        # Draft flags, --ctx-checkpoints 32, the ngram-mod default and the
+        # reasoning flags (--reasoning on b9014, else this --reasoning-format)
+        # are spelled for, and only added when supported by, this runtime.
+        macos_resolve_checkpoint_args "$INSTALL_DIR" "$LLAMA_SERVER_BIN" "$_reasoning_fmt" || exit 1
+        _llama_args+=(${MACOS_NATIVE_CHECKPOINT_ARGS[@]+"${MACOS_NATIVE_CHECKPOINT_ARGS[@]}"})
         fi
 
         _macos_stop_install_owned_native_llama \
