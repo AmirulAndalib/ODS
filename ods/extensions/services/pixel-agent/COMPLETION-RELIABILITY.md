@@ -143,9 +143,10 @@ orientation only:
   (`PIXEL_ODS_RESEARCH_TIMEOUT_MS`).
 - Nothing it returns is a page read: its answer and sources never produce a
   read receipt, so citing them after a source-read request still needs
-  `web_fetch` or `pixel_ods_web_extract`, or the host citation check. Its
-  returned sources count only toward the weaker "research returned sources"
-  check, in the direct and Tool Search forms alike.
+  `web_fetch` or `pixel_ods_web_extract`, or the host citation check. The
+  sources in `details` (up to five its answer cites) count only toward the
+  weaker "research returned sources" check, in the direct and Tool Search
+  forms alike.
 
 `tests/perplexica_research.test.mjs` replays the measured answers
 (`tests/fixtures/perplexica-answers.mjs`: 24 of 25 speed and balanced links and
