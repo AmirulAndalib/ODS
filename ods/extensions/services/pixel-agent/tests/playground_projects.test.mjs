@@ -51,6 +51,13 @@ test('file hooks retain explicitly selected and existing relative namespaces', {
     const guard=createToolLoopGuard();
     guard.observeRun(context,'pixel',{prompt:existing?'Use the existing file.':`Use the exact literal path "${malformed}".`},{workspaceRoot:root});
     const decision=guard.beforeToolCall({toolName:tool,params:{path:malformed}},context);
+    if(existing && tool==='write'){
+      // An earlier misplaced tree must not make new writes there look owned.
+      assert.equal(decision?.block,true);
+      assert.match(decision.blockReason,/without its leading slash/);
+      assert.equal(fs.readFileSync(path.join(root,malformed),'utf8'),'keep');
+      continue;
+    }
     assert.notEqual(decision?.block,true,decision?.blockReason);
     assert.equal(decision?.params?.path??malformed,malformed,'existing/core path semantics remain unchanged');
     if(existing)assert.equal(fs.readFileSync(path.join(root,malformed),'utf8'),'keep');
