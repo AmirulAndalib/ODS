@@ -5,7 +5,10 @@ import {createToolLoopGuard, DEFAULT_WEB_TOOL_LIMITS, FREE_CORRECTIONS_PER_KIND,
   WEB_LOOP_ABORT_REASON, WEB_LOOP_DELIVERY_REASON, WEB_SEARCH_BUDGET_EXHAUSTED_REASON} from '../plugin/tool-loop-guard.mjs';
 import {RUN_PROGRESS_LIMITS, RUN_PROGRESS_STOP_REASON} from '../plugin/run-progress-budget.mjs';
 import {composeProgressFinalization, createProgressFinalization, progressFinalizationAnswer,
-  PROGRESS_FINALIZATION_INSTRUCTION, PROGRESS_FINALIZATION_NOTE} from '../plugin/progress-finalization.mjs';
+  PROGRESS_FINALIZATION_INSTRUCTION, PROGRESS_FINALIZATION_NOTE, PROGRESS_READ_PAGES_HEADING} from '../plugin/progress-finalization.mjs';
+
+// Without an answer, the stop text is followed by the host's list of pages read.
+const readList = urls => `\n\n${PROGRESS_READ_PAGES_HEADING}\n\n${urls.map(url => `- <${url}>`).join('\n')}`;
 
 // Replays the tower3 fleet stop (2026-09-25, Qwen3.5-27B): four pages were
 // read successfully, then 403/404/ENOTFOUND fetches and search-allowance
@@ -458,7 +461,8 @@ test('tower1 replay: a tool call in the research-stop answer turn still aborts o
   assert.equal(refused?.blockReason, PROGRESS_FINALIZATION_INSTRUCTION);
   assert.deepEqual(late, {block: true, blockReason: RUN_PROGRESS_STOP_REASON});
   assert.deepEqual(aborts, [[context.sessionId, context.sessionKey]]);
-  assert.equal(guard.deliveryVerificationForRun(context.runId).text, WEB_LOOP_DELIVERY_REASON);
+  assert.equal(guard.deliveryVerificationForRun(context.runId).text, WEB_LOOP_DELIVERY_REASON +
+    readList([...Object.values(PAGES), 'https://www.tomshardware.com/pc-components/rx-9070-price']));
 });
 
 test('an ineligible run keeps the immediate research web-loop abort', () => {
@@ -581,7 +585,9 @@ test('tower3 replay: parallel refusals carry the instruction and a post-answer c
 test('tower3 replay without compaction hooks reproduces the lost answer', () => {
   const {guard, aborts} = tower3Replay({hooks: false});
   assert.equal(aborts.length, 1, 'the summarization call was treated as a further turn and aborted');
-  assert.equal(guard.deliveryVerificationForRun(context.runId).text, WEB_LOOP_DELIVERY_REASON);
+  assert.equal(guard.deliveryVerificationForRun(context.runId).text, WEB_LOOP_DELIVERY_REASON +
+    readList([...Object.values(PAGES), 'https://bottleneckpc.com/gpu/rtx-5070', 'https://www.newegg.com/rx-9070-gre']),
+    'the answer is lost; only the page list remains');
 });
 
 test('the compaction window stays bounded: a further non-summarization call still forfeits the answer turn', () => {
@@ -606,15 +612,32 @@ test('the compaction window stays bounded: a further non-summarization call stil
 });
 
 // Replays tower2 round 061 (main 17dfce8a, qwen3-coder-next, session
-// b63ee849, 11:23 UTC). Official NVIDIA/AMD pages, TechPowerUp specs and an IGN
-// benchmark were read; the search allowance ran out (282), then a refusal
-// (286), a duplicate-search refusal (290) and a second refusal (294). With only
-// six failures (one consecutive) the progress budget was not exhausted: the
-// web-loop stop at 295 refused with the finalization instruction (296's
-// details.reason). The model spent its single answer turn on another
-// web_search (297), so the specified fallback applied (research stop text,
-// abort). The transcript shows the breaker text only because
-// tool_result_persist rewrites the saved copy.
+// b63ee849, 11:23 UTC), rows 244-298 in order. The model read the official
+// NVIDIA and AMD pages, TechPowerUp, IGN and PassMark; the search allowance ran
+// out (282), then a refusal (286), a duplicate-search recall (290, a free
+// correction, not replayed) and a second refusal (294). With only six failures (one
+// consecutive) the progress budget was not exhausted: the web-loop stop at 296
+// refused with the finalization instruction. The model spent its single answer
+// turn on another web_search (298), with no text, so the research stop text
+// applies. Titles are those the transcript kept (some details were truncated
+// when persisted); the overflow compaction at 265-266 is omitted.
+const R061 = {
+  vcb2: 'https://www.videocardbenchmark.net/compare/5940vs5958/GeForce-RTX-5070-vs-Radeon-RX-9070',
+  nvidia: 'https://www.nvidia.com/en-us/geforce/graphics-cards/50-series/rtx-5070-family',
+  amd: 'https://www.amd.com/en/products/graphics/desktops/radeon/9000-series/amd-radeon-rx-9070.html',
+  vcb4: 'https://www.videocardbenchmark.net/compare/5940vs5957vs5956vs5958/GeForce-RTX-5070-vs-Radeon-RX-9060-XT-16GB-vs-Radeon-RX-9070-XT-vs-Radeon-RX-9070',
+  tpuSpecs: 'https://www.techpowerup.com/gpu-specs/geforce-rtx-5070.c4218',
+  nvidiaGuide: 'https://www.nvidia.com/content/geforce-gtx/geforce-rtx-5070-user-guide-r1.pdf',
+  ign: 'https://www.ign.com/articles/amd-radeon-rx-9070-benchmark',
+  tpuDriver: 'https://www.techpowerup.com/338591/amd-radeon-rx-9070-xt-gains-9-performance-at-1440p-with-latest-driver-beats-rtx-5070-ti',
+  techspot: 'https://www.techspot.com/specs/gpu/305059-amd-radeon-rx-9070.html',
+};
+const R061_TITLES = {
+  vcb2: 'GeForce RTX 5070 vs Radeon RX 9070 [videocardbenchmark.net] by PassMark Software',
+  vcb4: 'GeForce RTX 5070 vs Radeon RX 9060 XT 16GB vs Radeon RX 9070 XT vs Radeon RX 9070 [videocardbenchmark.net] by PassMark Software',
+  tpuSpecs: 'NVIDIA GeForce RTX 5070 Specs | TechPowerUp GPU Database',
+  tpuDriver: 'AMD Radeon RX 9070 XT Gains 9% Performance at 1440p with Latest Driver, Beats RTX 5070 Ti | TechPowerUp',
+};
 function round061Replay({finalTurn}) {
   const {guard, aborts} = guardFixture();
   const sdk = {runId: context.runId, sessionId: context.sessionId, sessionKey: context.sessionKey};
@@ -624,6 +647,8 @@ function round061Replay({finalTurn}) {
     guard.observeModelCall({callId}, sdk);
     guard.observeModelEnd({callId}, sdk);
     const id = `r61-${++n}`, ctx = {...context, toolName, toolCallId: id};
+    guard.observeAssistantMessage({message: {role: 'assistant', content: [{type: 'toolCall', id, name: toolName, arguments: params}]}},
+      {agentId: 'pixel', sessionKey: context.sessionKey});
     const decision = guard.beforeToolCall({toolName, toolCallId: id, params}, ctx);
     const result = decision?.block
       ? {content: [{type: 'text', text: decision.blockReason}], details: {status: 'blocked', reason: decision.blockReason}}
@@ -633,31 +658,48 @@ function round061Replay({finalTurn}) {
     guard.toolResultPersist({toolCallId: id, message: {role: 'toolResult', toolName, toolCallId: id, isError, ...result}}, ctx);
     return decision;
   };
-  const page = url => ({content: [{type: 'text', text: `Fetched ${url}`}], details: {status: 200, url, finalUrl: url, text: `Evidence from ${url}`}});
-  const fail = code => ({isError: true, content: [{type: 'text', text: JSON.stringify({status: 'error', tool: 'web_fetch', error: `Web fetch failed (${code})`})}],
+  const wrapped = title => `\n<<<EXTERNAL_UNTRUSTED_CONTENT id="r61">>>\nSource: Web Fetch\n---\n${title}\n<<<END_EXTERNAL_UNTRUSTED_CONTENT id="r61">>>`;
+  const page = (url, {title, finalUrl = url} = {}) => ({content: [{type: 'text', text: `Fetched ${url}`}],
+    details: {status: 200, url, finalUrl, text: `Evidence from ${finalUrl}`, ...(title ? {title: wrapped(title)} : {})}});
+  const extracted = url => ({content: [{type: 'text', text: `Targeted evidence from ${url}`}],
+    details: {boundary: 'public-web-read-only', matched: true, source_url: url}});
+  const fail = error => ({isError: true, content: [{type: 'text', text: JSON.stringify({status: 'error', tool: 'web_fetch', error})}],
     details: {status: 'error'}});
-  const found = q => ({content: [{type: 'text', text: JSON.stringify({query: q, results: []})}], details: {status: 'ok'}});
-  const q = i => `rtx 5070 rx 9070 source ${i}`;
-  const nvidia = 'https://www.nvidia.com/en-us/geforce/graphics-cards/50-series/rtx-5070-family/';
-  call('web_search', {query: q(0)}, found(q(0)));
-  call('web_fetch', {url: 'https://www.amd.com/en/products/graphics/desktops/radeon/9000-series/amd-radeon-rx-9070.html'}, fail(403));
-  call('web_fetch', {url: nvidia}, page(nvidia));
-  for (let i = 1; i < DEFAULT_WEB_TOOL_LIMITS.search; i++) {
-    call('web_search', {query: q(i)}, found(q(i)));
-    const url = `https://www.techpowerup.com/gpu-specs/source-${i}`;
-    call('web_fetch', {url}, page(url));
-  }
-  call('web_fetch', {url: nvidia}, page(nvidia));                        // repeated page: refused
-  call('web_fetch', {url: 'https://www.ign.com/articles/amd-radeon-rx-9070-benchmark'}, page('https://www.ign.com/articles/amd-radeon-rx-9070-benchmark'));
-  assert.equal(call('web_search', {query: 'rtx 5070 rx 9070 side-by-side'}, found('x'))?.blockReason, WEB_SEARCH_BUDGET_EXHAUSTED_REASON);
-  call('web_fetch', {url: 'https://www.videocardbenchmark.net/compare/5940vs5958'}, page('https://www.videocardbenchmark.net/compare/5940vs5958'));
-  // 289/290 (a duplicate-search recall) is a free correction that does not
-  // advance the allowance terminal, so it is omitted here.
-  call('web_fetch', {url: 'https://www.techpowerup.com/338591/amd-radeon-rx-9070-xt-gains'}, page('https://www.techpowerup.com/338591/amd-radeon-rx-9070-xt-gains'));
-  assert.equal(call('web_search', {query: 'rtx 5070 rx 9070 site:gpuuser'}, found('x'))?.blockReason, WEB_SEARCH_BUDGET_EXHAUSTED_REASON);
-  const stop = call('web_search', {query: 'rtx 5070 rx 9070 site:game-debate'}, found('x'));
+  const found = query => ({content: [{type: 'text', text: JSON.stringify({query, results: []})}], details: {status: 'ok'}});
+  const search = query => call('web_search', {query}, found(query));
+  search('NVIDIA GeForce RTX 5070 vs AMD Radeon RX 9070 1440p benchmark review');                  // 244
+  call('web_fetch', {url: R061.techspot}, fail('Web fetch failed (403)'));                          // 246
+  call('web_fetch', {url: R061.vcb2}, page(R061.vcb2, {title: R061_TITLES.vcb2}));                  // 248
+  search('NVIDIA GeForce RTX 5070 official specifications NVIDIA website');                        // 250
+  call('web_fetch', {url: R061.nvidia}, page(R061.nvidia));                                         // 252
+  call('pixel_ods_web_extract', {url: `${R061.nvidia}/`, query: 'RTX 5070 specifications VRAM power TDP'}, extracted(`${R061.nvidia}/`)); // 254
+  search('AMD Radeon RX 9070 official specifications AMD website');                                 // 256
+  call('web_fetch', {url: R061.amd}, page(R061.amd));                                               // 258
+  call('web_fetch', {url: R061.vcb2}, page(R061.vcb2));                                             // 260 repeated page: refused
+  call('pixel_ods_web_extract', {url: R061.vcb2, query: 'RTX 5070 RX 9070 1440p benchmark FPS'}, extracted(R061.vcb2)); // 262
+  search('NVIDIA RTX 5070 VS AMD RX 9070 benchmark 1440p comparison site:videocardbenchmark.net');  // 264
+  const vcb4Bare = R061.vcb4.replace('://www.', '://');
+  call('web_fetch', {url: vcb4Bare}, page(vcb4Bare, {title: R061_TITLES.vcb4, finalUrl: R061.vcb4})); // 268
+  search('NVIDIA RTX 5070 vs AMD RX 9070 1440p benchmark comparison site:techpowerup.com');         // 270
+  call('web_fetch', {url: R061.tpuSpecs}, page(R061.tpuSpecs, {title: R061_TITLES.tpuSpecs}));     // 272
+  search('"GeForce RTX 5070" board power TDP watts official NVIDIA documentation');                 // 274
+  call('web_fetch', {url: R061.nvidiaGuide}, page(R061.nvidiaGuide));                               // 276
+  search('AMD Radeon RX 9070 official specifications TDP power consumption AMD website');           // 278
+  call('web_fetch', {url: R061.techspot}, fail('Web fetch failed (403)'));                          // 280 repeated page: refused
+  search('NVIDIA RTX 5070 vs AMD RX 9070 1440p benchmark comparison site:ign.com');                 // 282, the last search
+  call('web_fetch', {url: R061.ign}, page(R061.ign));                                               // 284
+  assert.equal(search('"RTX 5070" "RX 9070" 1440p benchmark comparison side-by-side site:videocardbenchmark.net')?.blockReason,
+    WEB_SEARCH_BUDGET_EXHAUSTED_REASON);                                                            // 286
+  call('web_fetch', {url: R061.vcb4}, page(R061.vcb4, {title: R061_TITLES.vcb4}));                  // 288
+  // 290, a duplicate-search recall, is a free correction that does not advance
+  // the allowance terminal; it needs a bound native search receipt, so it is
+  // omitted here.
+  call('web_fetch', {url: R061.tpuDriver}, page(R061.tpuDriver, {title: R061_TITLES.tpuDriver}));  // 292
+  assert.equal(search('RTX 5070 RX 9070 1440p benchmark comparison site:gpuuser.com')?.blockReason,
+    WEB_SEARCH_BUDGET_EXHAUSTED_REASON);                                                            // 294
+  const stop = search('RTX 5070 vs RX 9070 1440p gaming benchmark 2026 site:game-debate.com');      // 296
   let late;
-  if (finalTurn === 'tool') late = call('web_search', {query: 'rtx 5070 rx 9070 site:videocardbenchmark'}, found('x'));
+  if (finalTurn === 'tool') late = search('RTX 5070 vs RX 9070 1440p benchmark site:videocardbenchmark.net'); // 298
   else {
     const callId = `${context.runId}:model:${++m}`;
     guard.observeModelCall({callId}, sdk);
@@ -672,7 +714,20 @@ test('round 061 replay: the research stop grants the answer turn, and a tool cal
   assert.deepEqual(stop, {block: true, blockReason: PROGRESS_FINALIZATION_INSTRUCTION}, 'the stop carries the instruction');
   assert.deepEqual(late, {block: true, blockReason: RUN_PROGRESS_STOP_REASON});
   assert.deepEqual(aborts, [[context.sessionId, context.sessionKey]]);
-  assert.equal(guard.deliveryVerificationForRun(context.runId).text, WEB_LOOP_DELIVERY_REASON, 'what round 061 delivered');
+  // What round 061 delivered, now followed by the host's list of the eight
+  // distinct pages read (repeated reads of one page count once).
+  const plain = title => title.replace(/[[\]]/g, ' ').replace(/\s+/g, ' ');
+  assert.equal(guard.deliveryVerificationForRun(context.runId).text, WEB_LOOP_DELIVERY_REASON +
+    `\n\n${PROGRESS_READ_PAGES_HEADING}\n\n` + [
+      `- ${plain(R061_TITLES.vcb2)} — <${R061.vcb2}>`,
+      `- <${R061.nvidia}>`,
+      `- <${R061.amd}>`,
+      `- ${plain(R061_TITLES.vcb4)} — <${R061.vcb4}>`,
+      `- ${R061_TITLES.tpuSpecs} — <${R061.tpuSpecs}>`,
+      `- <${R061.nvidiaGuide}>`,
+      `- <${R061.ign}>`,
+      `- ${R061_TITLES.tpuDriver} — <${R061.tpuDriver}>`,
+    ].join('\n'));
 });
 
 test('round 061 replay: an answer in that turn is delivered from the evidence already read', () => {

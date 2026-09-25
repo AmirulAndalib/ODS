@@ -477,6 +477,11 @@ export default definePluginEntry({
       const message = compactToolResultEnvelope(original);
       return message !== original ? {...decision, message} : decision;
     });
+    // Observation only (never blocks or rewrites): after a tool-limit stop the
+    // answer turn's message can carry partial-answer text with its tool calls.
+    api.on("before_message_write", (event, context) => {
+      toolLoopGuard.observeAssistantMessage(event, context, AGENT_ID);
+    });
     api.on("before_agent_finalize", async (event, context) => {
       await toolLoopGuard.revalidateWorkspacePreview(event, context, AGENT_ID);
       await toolLoopGuard.recoverWorkspacePreview(event, context, AGENT_ID);
@@ -539,6 +544,7 @@ export default definePluginEntry({
           sendJson(res, parsed.status, { error: "invalid verification request" });
           return true;
         }
+        await toolLoopGuard.settleDelivery(parsed.runId);
         const task = taskActivity.projection(parsed.runId);
         sendJson(res, 200, {...toolLoopGuard.deliveryVerificationForRun(parsed.runId), ...(task ? {task} : {})});
         return true;
