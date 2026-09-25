@@ -108,14 +108,19 @@ from a counted list: no hN heading equals the name, a heading contains it as
 whole words and names no other listed item, and another listed item is exactly
 a heading of that same level. The workspace guide also tells the model to use
 owner-named items verbatim as headings or labels.
+`tests/requested_heading_revision.test.mjs` replays the tower2 case.
 
 A listed card name can also be on the page but in no heading at all (tower2
 round 082: "Dawn jazz" was only a badge, and its card's `h2.event-title` read
 "Sunrise Sessions"). This is reported the same way, with its own fixed text,
-only when the owner listed cards or headings, no hN heading equals or contains
-the name, and at least two headings with one tag and class list include
-another listed item exactly. Comments, scripts and styles are never heading
-text; a script that may render the name still keeps the check silent.
+only when the owner listed cards or headings ("three event cards"; words after
+the noun, as in "tabs with titles", do not count), no hN heading equals or
+contains the name, and a group of at least two headings with the same tag and
+class list includes another name from the same list exactly. Evidence from
+another list (section headings beside dish cards) never counts, and the
+round 073 rule above also takes its same-level evidence from the same list
+only. Comments, scripts and styles are never heading text; a script that may
+render the name still keeps the check silent.
 `tests/requested_item_heading_presence.test.mjs` replays that page.
 
 The same path covers files the owner lists for a named directory that is then
@@ -123,11 +128,15 @@ published (tower2 round 082 coding-v1: "create a public directory with
 index.html, test-results.txt ..." was published without `test-results.txt`,
 which the model had written to the project root). Each list part must be one
 file name after plain lead words (such as "raw byte-for-byte source copies"),
-optionally followed by a description naming no other file; a nested list, a
-path or a "copy of x.py" skips the whole list. The names bind to the published
-directory's name and are checked against the receipt's complete published path
-list. `tests/requested_published_files.test.mjs` replays that case.
-`tests/requested_heading_revision.test.mjs` replays the tower2 case.
+optionally followed by a description naming no other file. The whole list is
+skipped when any part is a nested list, a path, "a copy of x.py", a file type
+the host preview cannot publish (its `ALLOWED_SUFFIXES`, mirrored as
+`PREVIEW_FILE_SUFFIXES` and kept equal by a contract test), optional or
+conditional ("optional", "if you have time", "you can"), removed, or content
+or a runtime result ("the sales.csv data as a chart", "export.csv the page
+generates"). The names bind to the published directory's name and are checked
+against the receipt's complete published path list.
+`tests/requested_published_files.test.mjs` replays that case.
 
 ## Saved project delivery
 

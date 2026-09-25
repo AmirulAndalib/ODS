@@ -52,9 +52,9 @@ const cards = heading => [RENAMED, '<h2 class="event-title">River lantern walk</
 
 test('round 082 page: a card name kept only as a badge beside exact sibling card headings is a heading miss', () => {
   assert.deepEqual(literals.filter(literal => literal.match === 'item').map(literal => ({...literal})), [
-    {text: 'Dawn jazz', match: 'item', targets: ['heading']},
-    {text: 'River lantern walk', match: 'item', targets: ['heading']},
-    {text: 'Midnight sold-out concert', match: 'item', targets: ['heading']},
+    {text: 'Dawn jazz', match: 'item', targets: ['heading'], list: 0},
+    {text: 'River lantern walk', match: 'item', targets: ['heading'], list: 0},
+    {text: 'Midnight sold-out concert', match: 'item', targets: ['heading'], list: 0},
   ]);
   const preview = snapshot(FILES);
   assert.equal(preview.sha256, TOWER2.manifest.sha256, 'the fixture bytes reproduce the host snapshot digest');
@@ -114,6 +114,48 @@ test('card-heading misses stay near zero false positives', () => {
   // A heading that contains the name keeps the existing longer-heading report.
   assert.deepEqual(missingRequestedText(literals, site(ORIGINAL.replace(RENAMED, '<h2 class="event-title">Dawn jazz at sunrise</h2>'))),
     [{text: 'Dawn jazz', heading: 'Dawn jazz at sunrise'}]);
+});
+
+// Review reproducers for PR #6710.
+test('sibling-heading evidence comes only from the same list, and "with titles" is not a headed list', () => {
+  const page = html => [{path: 'index.html', text: html}];
+  const check = (prompt, html) => missingRequestedText(extractRequestedLiterals(prompt), page(html));
+  // Section headings (one list) never make dish cards (another list) unheaded.
+  const cafe = 'Build a cafe page. Include three section headings: About, Menu, Visit. ' +
+    'In the menu, add four dish cards: Pho, Banh mi, Spring rolls, Iced coffee.';
+  assert.deepEqual(extractRequestedLiterals(cafe).map(literal => `${literal.text}:${literal.list}`),
+    ['About:0', 'Menu:0', 'Visit:0', 'Pho:1', 'Banh mi:1', 'Spring rolls:1', 'Iced coffee:1']);
+  assert.deepEqual(check(cafe, `<title>Cafe</title><h1>Cafe</h1>
+    <section><h2 class="section-title">About</h2><p>Family run.</p></section>
+    <section><h2 class="section-title">Menu</h2>
+      <div class="card"><p class="dish-name">Pho</p></div><div class="card"><p class="dish-name">Banh mi</p></div>
+      <div class="card"><p class="dish-name">Spring rolls</p></div><div class="card"><p class="dish-name">Iced coffee</p></div></section>
+    <section><h2 class="section-title">Visit</h2></section>`), []);
+  // Event cards titled by h3.card-title do not make speaker names unheaded.
+  assert.deepEqual(check('Add three event cards: Dawn jazz, River walk, Midnight concert. Add two speaker cards: Ana Lima, Bo Chen.',
+    `<article><h3 class="card-title">Dawn jazz</h3></article><article><h3 class="card-title">River walk</h3></article>
+     <article><h3 class="card-title">Midnight concert</h3></article>
+     <article><img alt="Ana Lima"><h3 class="card-title">Keynote</h3><p>Ana Lima</p></article>
+     <article><img alt="Bo Chen"><h3 class="card-title">Panel</h3><p>Bo Chen</p></article>`), []);
+  // Words after the noun do not make tabs headed items.
+  const tabs = 'Add three tabs with titles: Overview, Pricing, FAQ.';
+  assert.deepEqual(extractRequestedLiterals(tabs).map(literal => literal.targets.length), [0, 0, 0]);
+  assert.deepEqual(check(tabs, `<div role="tablist"><button>Overview</button><button>Pricing</button><button>FAQ</button></div>
+    <h2 class="panel-title">Overview</h2><h2 class="panel-title">Pricing</h2><h2 class="panel-title">Frequently asked questions</h2>`), []);
+  // Still reported: two unheaded cards beside one exact heading, and a renamed
+  // card whose heading uses another element than its siblings.
+  const events = 'Include three event cards: Dawn jazz, River lantern walk, and Midnight sold-out concert.';
+  assert.deepEqual(check(events, `<article><p>Dawn jazz</p><h2 class="event-title">Sunrise Sessions</h2></article>
+    <article><p>River lantern walk</p><h2 class="event-title">Lantern stroll</h2></article>
+    <article><h2 class="event-title">Midnight sold-out concert</h2></article>`),
+  [{text: 'Dawn jazz', unheaded: true}, {text: 'River lantern walk', unheaded: true}]);
+  assert.deepEqual(check(events, `<article><p>Dawn jazz</p><h3>Sunrise Sessions</h3></article>
+    <article><h2>River lantern walk</h2></article><article><h2>Midnight sold-out concert</h2></article>`),
+  [{text: 'Dawn jazz', unheaded: true}]);
+  // The class list is read as an attribute, never from text inside another attribute.
+  assert.deepEqual(check('Add three pricing cards: Free, Pro, Team.',
+    `<div><h3 title="x class=a" class="plan">Free</h3></div><div><h3 title="x class=b" class="plan">Pro</h3></div>
+     <div><strong>Team</strong><h3 class="plan">Contact us</h3></div>`), [{text: 'Team', unheaded: true}]);
 });
 
 const context = {agentId: 'pixel', runId: 'chatcmpl_a59d688b-777f-401c-8103-b129094fc676', sessionId: 'session',

@@ -10,7 +10,7 @@ import {createHash} from 'node:crypto';
 import * as fs from 'node:fs';
 import {createToolLoopGuard} from '../plugin/tool-loop-guard.mjs';
 import {extractRequestedLiterals, requestedTextCheck, requestedTextInstruction, requestedTextRevisionInstruction,
-  requestedTextDeliveryNote, REQUESTED_FILE_REVISION_INSTRUCTION} from '../plugin/requested-literals.mjs';
+  requestedTextDeliveryNote, REQUESTED_FILE_REVISION_INSTRUCTION, PREVIEW_FILE_SUFFIXES} from '../plugin/requested-literals.mjs';
 
 const TOWER2 = JSON.parse(fs.readFileSync(new URL('./requested-files-tower2-round082.json', import.meta.url), 'utf8'));
 const RECEIPT = TOWER2.publicationReceipt;
@@ -90,13 +90,47 @@ test('listed-file extraction skips anything ambiguous', () => {
     ['site:index.html', 'site:results.txt', 'site:app.js']);
   assert.deepEqual(files('Publish a static site containing index.html, styles.css and app.js, built with Chart.js.'),
     [':index.html', ':styles.css', ':app.js']);
+  assert.deepEqual(files('Then create a public directory with an index.html file, a test-results.txt file with the output, and a sources.json file.'),
+    ['public:index.html', 'public:test-results.txt', 'public:sources.json']);
+});
+
+// Review reproducers for PR #6710: none of these may require a file.
+test('files the host cannot publish, optional files and content descriptions are never required', () => {
+  const files = prompt => extractRequestedLiterals(prompt).filter(literal => literal.match === 'file');
+  for (const prompt of [
+    // The host preview rejects these types, so the list is not about the publication.
+    'In a new workspace project site-proj, build a small landing page. Then create a public directory with index.html, ' +
+      'robots.txt and sitemap.xml. Publish ONLY public as a verified Pixel workspace preview.',
+    'Publish a site containing index.html and resume.pdf as a download.',
+    'Create a public directory with index.html, results.txt and source report.py. Keep .py files outside the preview.',
+    'Create a public directory with index.html, report.py and results.json.',
+    'Create a public directory with index.html and config.yaml.',
+    'Create a public directory with index.html and build.log.',
+    // Optional or conditional.
+    'Create a public directory with index.html, styles.css and favicon.ico (optional).',
+    'Create a public directory with index.html, app.js, and README.md if you have time.',
+    'You can optionally create a public directory with index.html and notes.md.',
+    'Create a public directory with index.html and an optional favicon.ico.',
+    // Content or a runtime result, not a published file.
+    'Publish a preview containing the README.md contents rendered as HTML.',
+    'Publish a static site containing the sales.csv data as a bar chart.',
+    'Publish a site containing the results.json output as a table.',
+    'Create a public directory with index.html, app.js, and export.csv which the page generates client-side when clicked.',
+  ]) assert.deepEqual(files(prompt), [], prompt);
+});
+
+test('publishable suffixes mirror the host preview allowlist', () => {
+  const host = fs.readFileSync(new URL('../host/workspace_preview.py', import.meta.url), 'utf8');
+  const block = /^ALLOWED_SUFFIXES = frozenset\(\s*\{([^}]*)\}\s*\)/m.exec(host);
+  assert.ok(block, 'host/workspace_preview.py defines ALLOWED_SUFFIXES');
+  assert.deepEqual([...PREVIEW_FILE_SUFFIXES].sort(), [...block[1].matchAll(/"(\.[a-z0-9]+)"/g)].map(match => match[1]).sort());
 });
 
 const context = {agentId: 'pixel', runId: 'chatcmpl_12a07451-429c-41f0-817c-d3b8b95d3623', sessionId: 'session',
   sessionKey: 'agent:pixel:openai-user:owner'};
-function fixture() {
+function fixture({prompt = TOWER2.prompt, directory = DIRECTORY} = {}) {
   const guard = createToolLoopGuard({workspacePreviewInspectionAvailable: false});
-  guard.observeRun(context, 'pixel', {prompt: TOWER2.prompt});
+  guard.observeRun(context, 'pixel', {prompt});
   const invoke = (tool, params, id, result) => {
     const ctx = {...context, toolName: tool, toolCallId: id};
     const event = {toolName: tool, runId: context.runId, toolCallId: id, params};
@@ -109,11 +143,11 @@ function fixture() {
   };
   // As recorded, the model wrote public/index.html itself (content stands in;
   // the check reads only the receipt's published path list).
-  const index = `${DIRECTORY}/index.html`, html = '<!DOCTYPE html><title>Expense report CLI</title><h1>Test results</h1>';
-  assert.ok(TOWER2.calls.some(call => call.tool === 'write' && call.arguments.path === index));
+  const index = `${directory}/index.html`, html = '<!DOCTYPE html><title>Expense report CLI</title><h1>Test results</h1>';
+  assert.ok(directory !== DIRECTORY || TOWER2.calls.some(call => call.tool === 'write' && call.arguments.path === index));
   invoke('write', {path: index, content: html}, 'write-index',
     {content: [{type: 'text', text: `Successfully wrote ${html.length} bytes to ${index}`}]});
-  const publish = (receipt, id) => invoke('pixel_ods_workspace_preview', {relativeDirectory: DIRECTORY}, id,
+  const publish = (receipt, id) => invoke('pixel_ods_workspace_preview', {relativeDirectory: directory}, id,
     {content: [{type: 'text', text: `ODS independently published and read back ${receipt.files} workspace static files.`}], details: receipt});
   return {guard, publish};
 }
@@ -145,4 +179,20 @@ test('tower2 round 082 coding: republishing with test-results.txt inside public 
   const outcome = guard.verificationForRun(context.runId);
   assert.equal(outcome.status, 'passed');
   assert.equal(outcome.preview.sha256, receipt.sha256);
+});
+
+// Review reproducers for PR #6710: a correct delivery of an optional file or a
+// file type the host cannot publish is never turned into a repair and a failure.
+test('an unpublishable or optional listed file never gates a correct publication', () => {
+  for (const [listed, paths] of [['index.html, styles.css and favicon.ico (optional)', ['index.html', 'styles.css']],
+    ['index.html, robots.txt and sitemap.xml', ['index.html', 'robots.txt']]]) {
+    const directory = 'site-proj/public';
+    const prompt = `In a new workspace project site-proj, build a small landing page. Then create a public directory with ${listed}. ` +
+      'Publish ONLY public as a verified Pixel workspace preview and include the preview URL.';
+    const {guard, publish} = fixture({prompt, directory});
+    const receipt = republished(paths, {...RECEIPT, relativeDirectory: directory});
+    assert.doesNotMatch(publish(receipt, 'publish'), /Requested files/, listed);
+    assert.equal(guard.beforeAgentFinalize({lastAssistantMessage: `Published ${receipt.url}.`}, context), undefined, listed);
+    assert.equal(guard.verificationForRun(context.runId).status, 'passed', listed);
+  }
 });
