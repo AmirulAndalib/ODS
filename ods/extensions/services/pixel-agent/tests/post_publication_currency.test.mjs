@@ -157,36 +157,72 @@ test('read-only calls after the fleet exec neither advance nor revoke the pendin
 // each publication must reproduce the recorded snapshot digest, and the guard
 // must refuse exactly the calls it refused in production.
 const ROUND061 = JSON.parse(readFileSync(new URL('./post-publication-tower2-round061.json', import.meta.url), 'utf8'));
+// strixy-wsl-beta round 069 (main 76706b5f, #6681 installed): coding-v1 published
+// through the deferred tool_call wrapper, then ran one exit-0 CLI smoke test.
+const ROUND069 = JSON.parse(readFileSync(new URL('./post-publication-strixy-round069.json', import.meta.url), 'utf8'));
+// A publication, direct or through Tool Search (bare or qualified id).
+const publication = call => call.tool === 'pixel_ods_workspace_preview'
+  ? {relativeDirectory: call.args.relativeDirectory, details: call.result.details}
+  : call.tool === 'tool_call' && call.args.id?.split(':').at(-1) === 'pixel_ods_workspace_preview'
+    ? {relativeDirectory: call.args.args.relativeDirectory, details: call.result.details.result.details} : undefined;
 const resultText = result => result.content.filter(item => item.type === 'text').map(item => item.text).join('\n');
 
 async function replay(t, run, {wrapped}) {
   const {dir, workspace, host, verify, probes} = hostFixture(t, 'pixel-replay-');
   const scratch = join(dir, 'tmp');
   mkdirSync(scratch, {mode: 0o700});
-  const context = {agentId: 'pixel', runId: 'run-061', sessionId: 'session-061', sessionKey: 'agent:pixel:fleet'};
+  const context = {agentId: 'pixel', runId: 'run-replay', sessionId: 'session-replay', sessionKey: 'agent:pixel:fleet'};
   const guard = createToolLoopGuard({verifyWorkspacePreview: verify, workspacePreviewInspectionAvailable: true,
     ...(wrapped ? {execControl: EXEC_CONTROL} : {})});
   guard.observeRun(context, 'pixel', {prompt: run.prompt}, {workspaceRoot: workspace, executionHost: 'sandbox', privateBrowserAccess: false});
   // The sandbox mounts the workspace at /workspace, its cwd, and a private tmpfs at /tmp.
   const sandboxed = command => command.replace(/(^|[\s'"=(>])\/(workspace|tmp)\//g,
     (_, before, mount) => `${before}${mount === 'workspace' ? workspace : scratch}/`);
+  // Performs the model's call on the workspace (production wraps exec only
+  // for cancellation); returns the recorded receipt.
+  const perform = (id, tool, args, recorded) => {
+    const result = structuredClone(recorded);
+    if (tool === 'write') {
+      mkdirSync(dirname(join(workspace, args.path)), {recursive: true, mode: 0o755});
+      writeFileSync(join(workspace, args.path), args.content, {mode: 0o600});
+    } else if (tool === 'edit') {
+      let text = readFileSync(join(workspace, args.path), 'utf8');
+      for (const {oldText, newText} of args.edits) {
+        assert.equal(text.split(oldText).length, 2, `${id}: edit must match once`);
+        text = text.replace(oldText, () => newText);
+      }
+      writeFileSync(join(workspace, args.path), text);
+    } else if (tool === 'exec') {
+      const done = spawnSync('sh', ['-c', `umask 022\n${sandboxed(args.command)}`], {cwd: workspace, encoding: 'utf8'});
+      assert.equal(done.status, recorded.details.exitCode, `${id}: ${done.stderr}`);
+      const text = resultText(result);
+      result.details.aggregated ??= text === '(no output)' ? '' : text;
+    } else if (tool === 'pixel_ods_workspace_preview') {
+      const published = host({schemaVersion: 1, action: 'publish', relativeDirectory: args.relativeDirectory});
+      for (const key of ['siteId', 'sha256', 'files', 'bytes', 'entrySha256']) assert.equal(published[key], recorded.details[key], key);
+    } else assert.ok(['read', 'pixel_ods_workspace_preview_inspect'].includes(tool), tool);
+    return result;
+  };
+  let nested = 0;
   for (const call of run.calls) {
     const ctx = {...context, toolName: call.tool, toolCallId: call.id};
     const prepared = guard.beforeToolCall({toolName: call.tool, params: call.args, toolCallId: call.id}, ctx);
     assert.equal(prepared?.block === true, call.blocked === true, `${call.tool} ${call.id}: ${prepared?.blockReason}`);
-    const result = structuredClone(call.result);
-    if (!call.blocked && call.tool === 'write') {
-      mkdirSync(dirname(join(workspace, call.args.path)), {recursive: true, mode: 0o755});
-      writeFileSync(join(workspace, call.args.path), call.args.content, {mode: 0o600});
-    } else if (!call.blocked && call.tool === 'exec') {
-      const done = spawnSync('sh', ['-c', `umask 022\n${sandboxed(call.args.command)}`], {cwd: workspace, encoding: 'utf8'});
-      assert.equal(done.status, call.result.details.exitCode, `${call.id}: ${done.stderr}`);
-      const text = resultText(result);
-      result.details.aggregated = text === '(no output)' ? '' : text;
-    } else if (call.tool === 'pixel_ods_workspace_preview') {
-      const published = host({schemaVersion: 1, action: 'publish', relativeDirectory: call.args.relativeDirectory});
-      for (const key of ['siteId', 'sha256', 'files', 'bytes', 'entrySha256']) assert.equal(published[key], call.result.details[key], key);
-    } else assert.ok(call.blocked || ['read', 'pixel_ods_workspace_preview_inspect'].includes(call.tool), call.tool);
+    let result = structuredClone(call.result);
+    if (!call.blocked && call.tool === 'tool_call') {
+      // OpenClaw's Tool Search runs the catalog tool through its own
+      // before_tool_call and after_tool_call hooks under a child ID. Only the
+      // outer tool_call result is written to the session, so only the outer
+      // call reaches tool_result_persist.
+      const tool = call.result.details.tool.name, args = (prepared?.params ?? call.args).args ?? {};
+      const childId = `tool_search_code:${call.id}:${tool}:${++nested}`, childCtx = {...context, toolName: tool, toolCallId: childId};
+      const child = guard.beforeToolCall({toolName: tool, params: args, toolCallId: childId}, childCtx);
+      assert.notEqual(child?.block, true, child?.blockReason);
+      const inner = perform(childId, tool, call.args.args ?? {}, call.result.details.result);
+      guard.afterToolCall({toolName: tool, params: child?.params ?? args, result: inner,
+        ...(inner.isError ? {error: resultText(inner)} : {}), toolCallId: childId}, childCtx);
+      result.details.result = inner;
+    } else if (!call.blocked) result = perform(call.id, call.tool, call.args, call.result);
     // As OpenClaw reports it: a refused call keeps the model's params.
     guard.afterToolCall({toolName: call.tool, params: call.blocked ? call.args : prepared?.params ?? call.args, result,
       ...(result.isError ? {error: resultText(result)} : {}), toolCallId: call.id}, ctx);
@@ -200,15 +236,16 @@ async function replay(t, run, {wrapped}) {
 }
 const PREVIEW_READY = /\n\nYour preview is ready\.\n\n\[Open preview\]\((http:\/\/[^)]+)\)/;
 
-for (const wrapped of [false, true]) for (const [name, run] of Object.entries(ROUND061.runs)) {
-  test(`tower2 round 061 ${name} replay delivers the model's verified answer (wrapped exec=${wrapped})`,
+for (const wrapped of [false, true]) for (const [fleet, runs] of [['tower2 round 061', ROUND061.runs], ['strixy round 069', ROUND069.runs]])
+for (const [name, run] of Object.entries(runs)) {
+  test(`${fleet} ${name} replay delivers the model's verified answer (wrapped exec=${wrapped})`,
     {skip: !python && 'python3 unavailable'}, async t => {
       const delivered = await replay(t, run, {wrapped});
       assert.equal(delivered.probes, 1, 'one bounded host comparison at finalization');
       assert.equal(delivered.status, 'passed');
       assert.ok(delivered.text.startsWith(run.final), delivered.text);
       assert.doesNotMatch(delivered.text, STALE);
-      const published = run.calls.findLast(call => call.tool === 'pixel_ods_workspace_preview');
-      assert.equal(PREVIEW_READY.exec(delivered.text)?.[1], published.result.details.url);
+      const published = publication(run.calls.findLast(publication));
+      assert.equal(PREVIEW_READY.exec(delivered.text)?.[1], published.details.url);
     });
 }
