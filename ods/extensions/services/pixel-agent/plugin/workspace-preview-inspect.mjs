@@ -64,6 +64,27 @@ export const inspectionPageErrors = receipt => receipt?.pageErrors;
 const pageErrorsValid = p => exact(p,['count','messages']) && Number.isSafeInteger(p.count) && p.count>=1 && p.count<=MAX_PAGE_ERRORS &&
   Array.isArray(p.messages) && p.messages.length>=1 && p.messages.length<=Math.min(MAX_PAGE_ERROR_MESSAGES,p.count) &&
   p.messages.every(message=>printable(message,MAX_PAGE_ERROR_CHARS)) && new Set(p.messages).size===p.messages.length;
+// Rendered palette (capsule-computed): the page's painted colors by share of a
+// fixed desktop viewport as first loaded. Evidence about paint only; it never
+// changes a step, the receipt status or interaction proof.
+export const MAX_RENDERED_COLORS = 6;
+export const NEUTRAL_COLOR_NAMES = Object.freeze(['white','light gray','gray','dark gray','black']);
+export const RENDERED_COLOR_NAMES = Object.freeze([...NEUTRAL_COLOR_NAMES,'red','orange','amber','yellow','green','teal','blue','purple','pink','brown']);
+// Each rounded share exceeds its exact share by at most one half.
+const renderedColorsValid = r => exact(r,['viewport','colors']) && exact(r.viewport,['width','height']) &&
+  Object.values(r.viewport).every(v=>Number.isSafeInteger(v)&&v>=240&&v<=1920) &&
+  Array.isArray(r.colors) && r.colors.length>=1 && r.colors.length<=MAX_RENDERED_COLORS &&
+  r.colors.every((c,i)=>exact(c,['name','hex','percent']) && RENDERED_COLOR_NAMES.includes(c.name) &&
+    typeof c.hex==='string' && /^#[0-9a-f]{6}$/.test(c.hex) && Number.isSafeInteger(c.percent) && c.percent>=1 && c.percent<=100 &&
+    (i===0 || c.percent<=r.colors[i-1].percent)) &&
+  r.colors.reduce((sum,c)=>sum+c.percent,0)<=100+Math.floor(r.colors.length/2);
+// Fixed format; neutral names carry no hex. Only the list varies.
+export function renderedColorsLine(renderedColors) {
+  const {viewport:{width,height},colors} = renderedColors;
+  return `Rendered colors (by area, desktop ${width}x${height} as loaded): ` +
+    colors.map(c=>NEUTRAL_COLOR_NAMES.includes(c.name) ? `${c.name} ${c.percent}%` : `${c.name} ${c.hex} ${c.percent}%`).join(', ') +
+    '. Colors under 1% of the view and hover/focus-only styles are not listed.';
+}
 const INPUT_HINTS = new Map([
   ['invalid preview inspection fields','Provide only siteId, sha256, viewport and steps.'],
   ['invalid preview inspection digest','sha256 must be the full 64-character lowercase snapshot digest from the publication receipt; never the shortened site suffix or a file digest.'],
@@ -102,9 +123,10 @@ export function validateWorkspacePreviewInspectionReceipt(value, request) {
     if(!exact(value,['schemaVersion','kind','status','errorCode','siteId','sha256','planSha256','scope'])||value.status!=='failed'||!['unavailable','output_limit','timeout','cancelled'].includes(value.errorCode)) throw Error('invalid inspection failure');
     return value;
   }
-  // pageErrors is optional: absent when none was observed or when an older
-  // capsule produced the receipt. Present, it must be exactly bounded.
-  if(!exact(value,['schemaVersion','kind','status','siteId','sha256','planSha256','viewport','steps','diagnostics','blockedRequests',...(value.pageErrors===undefined?[]:['pageErrors']),'scope']) || (value.pageErrors!==undefined&&!pageErrorsValid(value.pageErrors)) || canonical(value.viewport)!==canonical(request.viewport)||!Array.isArray(value.steps)||value.steps.length<1||value.steps.length>request.steps.length||!exact(value.diagnostics,['renderedHiddenAttributeCount','hiddenUntilFoundCount'])||Object.values(value.diagnostics).some(v=>!Number.isSafeInteger(v)||v<0||v>100000)||!Array.isArray(value.blockedRequests)||value.blockedRequests.length>32||value.blockedRequests.some(v=>!['navigation','network','popup','download','websocket'].includes(v))) throw Error('invalid inspection receipt');
+  // pageErrors and renderedColors are optional: absent when none was observed
+  // or captured, or when an older capsule produced the receipt. Present, each
+  // must be exactly bounded.
+  if(!exact(value,['schemaVersion','kind','status','siteId','sha256','planSha256','viewport','steps','diagnostics','blockedRequests',...(value.pageErrors===undefined?[]:['pageErrors']),...(value.renderedColors===undefined?[]:['renderedColors']),'scope']) || (value.pageErrors!==undefined&&!pageErrorsValid(value.pageErrors)) || (value.renderedColors!==undefined&&!renderedColorsValid(value.renderedColors)) || canonical(value.viewport)!==canonical(request.viewport)||!Array.isArray(value.steps)||value.steps.length<1||value.steps.length>request.steps.length||!exact(value.diagnostics,['renderedHiddenAttributeCount','hiddenUntilFoundCount'])||Object.values(value.diagnostics).some(v=>!Number.isSafeInteger(v)||v<0||v>100000)||!Array.isArray(value.blockedRequests)||value.blockedRequests.length>32||value.blockedRequests.some(v=>!['navigation','network','popup','download','websocket'].includes(v))) throw Error('invalid inspection receipt');
   value.steps.forEach((step,i)=>{
     if(step.errorCode==='invalid_selector') {
       if(!exact(step,['index','action','locator','stable','status','errorCode'])||step.index!==i||i!==value.steps.length-1||step.action!==request.steps[i].action||canonical(step.locator)!==canonical(request.steps[i].locator)||!exact(step.locator,['selector'])||step.stable!==false||step.status!=='failed'||value.status!=='failed') throw Error('invalid selector failure evidence');
@@ -145,7 +167,7 @@ export function createWorkspacePreviewInspectTool({request,transport='unix'}={})
   if(!['unix','native'].includes(transport))throw Error('invalid inspection transport');
   request??=transport==='unix'?unixRequest:nativeRequest;
   return {name:'pixel_ods_workspace_preview_inspect',
-    description:'Inspect an already published owned snapshot using bounded CSS or exact accessible role/name locators. Pass its exact siteId and sha256 from publication. Immediately after publication, check each requested interaction with an initial state assertion, the relevant click, then an explicit postcondition assertion matching the requested behavior. Do not wait until finalization. Each locator must match exactly one element. Exact role/name locators match rendered elements; assert-hidden also matches hidden ones, so one role/name can be asserted hidden, clicked into view, then asserted visible. This tests CSS layout visibility, not pixel paint, occlusion or clipping. A click alone proves no behavioral result. Rendered hidden attributes are diagnostic; intentional CSS overrides are not automatically errors. Uncaught page script errors are reported and leave interactions unverified. Unavailable inspection is unverified, never success. No URLs or JavaScript accepted.',
+    description:'Inspect an already published owned snapshot using bounded CSS or exact accessible role/name locators. Pass its exact siteId and sha256 from publication. Immediately after publication, check each requested interaction with an initial state assertion, the relevant click, then an explicit postcondition assertion matching the requested behavior. Do not wait until finalization. Each locator must match exactly one element. Exact role/name locators match rendered elements; assert-hidden also matches hidden ones, so one role/name can be asserted hidden, clicked into view, then asserted visible. This tests CSS layout visibility, not pixel paint, occlusion or clipping. The result also lists the rendered colors of the page by area at a desktop view as first loaded; use them to confirm a requested color change is actually visible. A click alone proves no behavioral result. Rendered hidden attributes are diagnostic; intentional CSS overrides are not automatically errors. Uncaught page script errors are reported and leave interactions unverified. Unavailable inspection is unverified, never success. No URLs or JavaScript accepted.',
     parameters:{type:'object',additionalProperties:false,required:['siteId','sha256','viewport','steps'],properties:{siteId:{type:'string',pattern:'^site-[a-f0-9]{24}$'},sha256:{type:'string',pattern:'^[a-f0-9]{64}$',description:'Full snapshot sha256 from the same publication receipt; not entrySha256 or a site suffix.'},viewport:{type:'object',additionalProperties:false,required:['width','height'],properties:{width:{type:'integer',minimum:240,maximum:1920},height:{type:'integer',minimum:240,maximum:1920}}},steps:{type:'array',minItems:1,maxItems:12,items:{type:'object',additionalProperties:false,required:['action','locator'],properties:{action:{type:'string',enum:['assert-visible','assert-hidden','click']},locator:{oneOf:[{type:'object',additionalProperties:false,required:['selector'],properties:{selector:{type:'string',maxLength:256}}},{type:'object',additionalProperties:false,required:['role','name','exact'],properties:{role:{type:'string',enum:[...roles]},name:{type:'string',maxLength:120},exact:{const:true}}}]}}}}}},
     execute:async(_id,params,signal)=>{
       let normalized;
@@ -168,8 +190,11 @@ export function createWorkspacePreviewInspectTool({request,transport='unix'}={})
         const summary=pageErrors
           ? `Preview inspection ${result.status==='passed'?'steps passed, but':'failed, and'} ${pageErrorFeedback(pageErrors)}`
           : `Preview inspection ${result.status}. ${transitionCoverageFeedback(normalized, result)}`;
-        const evidence=pageErrors?{...result,pageErrors:{count:pageErrors.count}}:result;
-        return {content:[{type:'text',text:`${summary} ${INSPECTION_SCOPE} Evidence: ${JSON.stringify(evidence)}`}],details:result,...(result.status==='failed'?{isError:true}:{})};
+        // The palette is stated once, as its fixed line; the evidence copy omits it.
+        const {renderedColors,...rest}=result;
+        const palette=renderedColors?` ${renderedColorsLine(renderedColors)}`:'';
+        const evidence=pageErrors?{...rest,pageErrors:{count:pageErrors.count}}:rest;
+        return {content:[{type:'text',text:`${summary} ${INSPECTION_SCOPE}${palette} Evidence: ${JSON.stringify(evidence)}`}],details:result,...(result.status==='failed'?{isError:true}:{})};
       } catch {
         return {content:[{type:'text',text:'Preview inspection unavailable or invalid. Requested behavior remains unverified; retain the published artifact and do not claim these checks passed.'}],details:{schemaVersion:1,kind:INSPECTION_KIND,status:'failed',errorCode:signal?.aborted?'cancelled':'unavailable',scope:INSPECTION_SCOPE},isError:true};
       }
