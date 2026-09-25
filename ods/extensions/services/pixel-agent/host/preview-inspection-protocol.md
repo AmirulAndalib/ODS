@@ -181,8 +181,9 @@ capsule evaluates one read-only function in the isolated world. It walks the
 document (and open shadow roots) with the same Playwright-compatible role and
 name rules as the hidden-inclusive matcher and records every element whose
 role is `button` or `link`, hidden ones included, in document order: its role,
-its computed accessible name, whether it is rendered (the same
-`checkVisibility` and client-rect test as a step), what supplied the name
+its computed accessible name, whether it is exposed (rendered with a box by
+display, visibility and content-visibility, and outside `aria-hidden`; opacity,
+which entrance animations change at load, is ignored), what supplied the name
 (`aria-labelledby`, `aria-label`, `content`, or `other` such as `title`,
 `value` or a `<label>`), and its own content text when that differs from the
 name. Names and text are author-controlled: whitespace is collapsed, control,

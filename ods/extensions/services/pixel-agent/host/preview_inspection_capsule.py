@@ -278,12 +278,15 @@ MAX_RENDERED_MATCHES = 32
 # Playwright-compatible role and name rules as the matcher above. An owner may
 # require a control named exactly X, and a script may replace a correct name
 # (fleet round 100: setAttribute('aria-label', ...) on load), so the capsule
-# reports the computed name, whether the element is rendered, what supplied the
+# reports the computed name, whether the element is exposed, what supplied the
 # name, and the element's own content text when that differs from the name.
+# Exposed means rendered with a box (display, visibility, content-visibility)
+# and outside aria-hidden. Opacity is ignored: entrance animations change it
+# at load, and it hides nothing from assistive technology or role locators.
 # Read-only, in the isolated world; evidence only, never a step or a status.
 CONTROL_NAMES = "function(limit) {\n" + ACCESSIBLE_NAME_RULES + r"""  const CONTROLS = new Set(['button', 'link']);
-  const rendered = e => e.checkVisibility({checkOpacity:true,checkVisibilityCSS:true,contentVisibilityAuto:true}) &&
-    [...e.getClientRects()].some(r => r.width > 0 && r.height > 0);
+  const rendered = e => e.checkVisibility({checkVisibilityCSS:true,contentVisibilityAuto:true}) &&
+    [...e.getClientRects()].some(r => r.width > 0 && r.height > 0) && !e.closest('[aria-hidden="true"]');
   const items = [];
   let count = 0;
   const walk = root => {

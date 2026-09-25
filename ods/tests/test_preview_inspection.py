@@ -1637,16 +1637,21 @@ class BrowserTests(unittest.TestCase):
                 '<span id="l" hidden>Open menu</span><dialog><button>Close</button></dialog>'
                 '<button id="go" onclick="this.textContent=\'Clicked\'">Go</button>'
                 '<input type="submit" value="Send"><script>document.getElementById("go").title="later"</script>'
-                '<button id="late"></button><script>document.getElementById("late").textContent="Made by script"</script>')
+                '<button id="late"></button><script>document.getElementById("late").textContent="Made by script"</script>'
+                '<style>@keyframes in{from{opacity:0}to{opacity:1}}.fade{animation:in 30s}</style>'
+                '<a class="fade" href="#t">Tickets</a><div aria-hidden="true"><button>Decor</button></div>')
         result = self.check(html, [step("click", "#go")])
         self.assertEqual(result["status"], "passed", result)
-        self.assertEqual(result["controls"], {"count": 6, "items": [
+        # An entrance fade does not hide a control; aria-hidden does.
+        self.assertEqual(result["controls"], {"count": 8, "items": [
             {"role": "link", "name": "Top", "visible": True, "source": "content"},
             {"role": "button", "name": "Open menu", "visible": True, "source": "aria-labelledby", "text": "x"},
             {"role": "button", "name": "Close", "visible": False, "source": "content"},
             {"role": "button", "name": "Go", "visible": True, "source": "content"},
             {"role": "button", "name": "Send", "visible": True, "source": "other"},
             {"role": "button", "name": "Made by script", "visible": True, "source": "content"},
+            {"role": "link", "name": "Tickets", "visible": True, "source": "content"},
+            {"role": "button", "name": "Decor", "visible": False, "source": "content"},
         ]})
 
     def test_load_time_names_agree_with_playwright_get_by_role(self):
