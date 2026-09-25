@@ -265,8 +265,6 @@ export default definePluginEntry({
       execControl: () => execCancellationControl, runtimeVersion: OPENCLAW_VERSION,
       hooksAllowed: api.config?.plugins?.entries?.["pixel-ods"]?.hooks?.allowConversationAccess === true});
     registerBootstrapCapabilities(api);
-    // One system prompt for every Pixel chat: no per-chat session key or id.
-    registerStableRuntimeLine(api);
     const managedRuntime = managedRuntimeRegistry.register(api, accessRuntime);
     if (managedRuntime) currentManagedRuntime = managedRuntime;
     contextCompaction ??= createContextCompaction({agentId:AGENT_ID,
@@ -290,6 +288,8 @@ export default definePluginEntry({
         release:token => accessRuntime.release(token), owns:token => accessRuntime.owns(token)},
     });
     registerHistoryIntegration(api,{compactor:contextCompaction,getSessionEntry,patchSessionEntry,resolveStorePath,withSessionTranscriptWriteLock});
+    // One system prompt for every Pixel chat: no per-chat session key or id.
+    registerStableRuntimeLine(api);
     const statusFile = statusFileFromEnv();
     const configuredContextWindow = api.pluginConfig?.modelContextWindow;
     const configuredLeanPrompt = api.pluginConfig?.leanPrompt === true;
