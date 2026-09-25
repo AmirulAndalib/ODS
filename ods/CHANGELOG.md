@@ -85,9 +85,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   Hermes needs where a model fits at 64K; the installers re-check the fit
   before raising a smaller context, and record the served context so a
   Dashboard restore of the installer's pick no longer drops to 32K. A
-  Dashboard model switch uses the same context rule as the installer, and
-  ODS Talk says up front when the served context is below 64K instead of
-  failing in Hermes.
+  Dashboard model switch uses the same context rule as the installer and
+  never asks for more than a model's native context, and ODS Talk says up
+  front when the context llama-server actually serves is below 64K instead
+  of failing in Hermes. An installer rerun keeps a previously active model
+  (clamped to its native context) rather than replacing it; when that model
+  cannot serve 64K, Talk is shown as unavailable with the reason.
 - Gemma 4 26B-A4B, E2B and E4B now run at 64K: their sliding-window layers
   keep the KV cache small, so the context no longer rules them out of Hermes.
 - Perplexica now runs upstream release v1.12.2, published under its new name
