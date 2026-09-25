@@ -314,19 +314,41 @@ def test_base_reinstall_stops_before_changing_a_native_installation(tmp_path, st
     elif state == 'broken-link':
         native.symlink_to(tmp_path / 'missing')
     script = (ROOT / 'installers/macos/install-macos.sh').read_text()
-    start = script.index('if ! $ENABLE_PIXEL && [[ -e "${INSTALL_DIR}/data/pixel-native"')
-    stop = script.index('\nif $ENABLE_PIXEL; then', start)
+    start = script.index('if ! $PREFLIGHT_ONLY && ! $ENABLE_PIXEL && [[ -e "${INSTALL_DIR}/data/pixel-native"')
+    stop = script.index('\nif $ENABLE_PIXEL && ! $PREFLIGHT_ONLY; then', start)
     assert stop < script.index('ods_prepare_install_log "$ODS_LOG_FILE" || exit 1')
     shell = 'set -euo pipefail\nai_err() { echo "$*" >&2; }\nai() { echo "$*"; }\n' + script[start:stop] + '\nprintf reached-base-install\n'
-    result = subprocess.run(['bash'], input=shell, text=True, capture_output=True,
-        env={**os.environ, 'ENABLE_PIXEL': 'false', 'INSTALL_DIR': str(tmp_path)})
+
+    def run(preflight_only):
+        return subprocess.run(['bash'], input=shell, text=True, capture_output=True,
+            env={**os.environ, 'ENABLE_PIXEL': 'false', 'PREFLIGHT_ONLY': preflight_only,
+                 'INSTALL_DIR': str(tmp_path)})
+
+    def assert_native_unchanged():
+        if state == 'existing': assert (native / 'owner-data').read_text() == 'keep exactly'
+        elif state == 'broken-link': assert native.is_symlink()
+        else: assert not os.path.lexists(native)
+
+    result = run('false')
     if state == 'absent':
         assert result.returncode == 0 and result.stdout == 'reached-base-install'
     else:
         assert result.returncode != 0 and 'reached-base-install' not in result.stdout
         assert 'Existing native Pixel installation detected' in result.stderr
-        if state == 'existing': assert (native / 'owner-data').read_text() == 'keep exactly'
-        else: assert native.is_symlink()
+    assert_native_unchanged()
+
+    # get-ods.sh --force runs --preflight-only while the installation it will
+    # replace, including native Pixel state its candidate uninstaller retires,
+    # is still on disk, so that mode skips this tree-state guard. It must still
+    # change nothing: it exits after Phase 1, before hardware detection and
+    # before the native Pixel installer can run.
+    result = run('true')
+    assert result.returncode == 0 and result.stdout == 'reached-base-install'
+    assert_native_unchanged()
+    preflight_exit = script.index(
+        'if $PREFLIGHT_ONLY; then\n    ai_ok "Preflight passed; no changes were made."\n    exit 0\nfi\n')
+    assert preflight_exit < script.index('# PHASE 2 -- HARDWARE DETECTION')
+    assert preflight_exit < script.index('if ! /usr/bin/python3 "$LIB_DIR/pixel-native-install.py"')
 
 
 # Run native retirement contracts in the existing cross-platform lifecycle CI
