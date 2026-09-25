@@ -12217,6 +12217,7 @@ class AgentHandler(BaseHTTPRequestHandler):
         mutation_started = False
         rollback_attempted = False
         runtime_restart_strategy: str | None = None
+        readiness_diagnosis: dict = {}
         opencode_restarted = False
         opencode_config_mutated = False
         litellm_restart_attempted = False
@@ -12307,6 +12308,21 @@ class AgentHandler(BaseHTTPRequestHandler):
                 raise RuntimeError(
                     f"Unknown model activation restart strategy: {runtime_restart_strategy}"
                 )
+
+        def capture_runtime_failure() -> dict[str, str]:
+            """Keep why the staged runtime failed before rollback replaces it."""
+            captured: dict[str, str] = {}
+            reason = str(readiness_diagnosis.get("reason") or "")[:500]
+            if reason:
+                captured["runtime_diagnosis"] = reason
+            if runtime_restart_strategy in {"compose-llama", "container-llama"}:
+                excerpt = _failed_llama_server_log_excerpt()
+                if excerpt:
+                    logger.warning(
+                        "Failed llama-server log excerpt for %s:\n%s", gguf_file, excerpt
+                    )
+                    captured["runtime_log_excerpt"] = excerpt
+            return captured
 
         def rollback_and_prove() -> tuple[bool, str]:
             """Restore config/runtime/dependents and prove the prior route."""
@@ -12861,6 +12877,7 @@ class AgentHandler(BaseHTTPRequestHandler):
                     lemonade_model_id=lemonade_model_id,
                     return_proof=True,
                     require_exact_context=requested_context_length is not None,
+                    diagnosis=readiness_diagnosis,
                     **_activation_readiness_cadence(),
                 )
 
@@ -13015,6 +13032,7 @@ class AgentHandler(BaseHTTPRequestHandler):
                     lemonade_model_id=lemonade_model_id,
                     return_identity=True,
                     require_exact_context=requested_context_length is not None,
+                    diagnosis=readiness_diagnosis,
                     **_activation_readiness_cadence(),
                 )
                 healthy = bool(runtime_identity)
@@ -13374,6 +13392,7 @@ class AgentHandler(BaseHTTPRequestHandler):
                     },
                 )
             else:
+                runtime_failure = capture_runtime_failure()
                 logger.warning("Model activation failed — rolling back")
                 rolled_back, rollback_error = rollback_and_prove()
                 error = (
@@ -13384,7 +13403,9 @@ class AgentHandler(BaseHTTPRequestHandler):
                         f"{rollback_error}"
                     )
                 )
-                payload = {"error": error, "rolled_back": rolled_back}
+                if runtime_failure.get("runtime_diagnosis"):
+                    error += f". Cause: {runtime_failure['runtime_diagnosis']}"
+                payload = {"error": error, "rolled_back": rolled_back, **runtime_failure}
                 if pixel_transaction is not None and not pixel_transaction.completed:
                     payload.update(pending=True, code='managed_model_recovery_required')
                 if switchboard_run and not switchboard_run.get("ok"):
@@ -13399,13 +13420,17 @@ class AgentHandler(BaseHTTPRequestHandler):
         except Exception as exc:
             rolled_back = False
             rollback_error = ""
+            runtime_failure: dict[str, str] = {}
             if not committed and mutation_started and not rollback_attempted:
+                runtime_failure = capture_runtime_failure()
                 rolled_back, rollback_error = rollback_and_prove()
             logger.exception("Model activation failed")
             error = f"Model activation failed: {exc}"
             if rollback_error:
                 error += f"; rollback could not be proved: {rollback_error}"
-            payload = {"error": error}
+            if runtime_failure.get("runtime_diagnosis"):
+                error += f". Cause: {runtime_failure['runtime_diagnosis']}"
+            payload = {"error": error, **runtime_failure}
             if ((pixel_transaction is None and isinstance(exc, _PixelModelTransactionUncertain))
                     or (pixel_transaction is not None and not pixel_transaction.completed)):
                 payload.update(pending=True, code='managed_model_recovery_required')
@@ -14436,6 +14461,47 @@ def _llama_runtime_context_length(host: str, port: str) -> int:
         return 0
 
 
+def _llama_training_context_length(body: str, runtime_identity: str) -> int:
+    """Return the GGUF training context llama.cpp reports for a loaded row."""
+    try:
+        data = json.loads(body)
+    except (json.JSONDecodeError, TypeError):
+        return 0
+    rows = data.get("data") if isinstance(data, dict) else None
+    for row in rows if isinstance(rows, list) else ():
+        if isinstance(row, dict) and str(row.get("id") or "").strip() == runtime_identity:
+            meta = row.get("meta")
+            return (_positive_int(meta.get("n_ctx_train")) or 0) if isinstance(meta, dict) else 0
+    return 0
+
+
+def _llama_context_shortfall(
+    runtime_identity: str,
+    runtime_context: int,
+    expected_context: int,
+    training_context: int,
+) -> tuple[str, bool]:
+    """Explain a loaded llama.cpp model whose context misses the request.
+
+    Returns ``(reason, final)``. llama.cpp caps every slot at the GGUF
+    training context, so a request above it can never be proven by waiting;
+    that case is final. An unreadable context stays retryable and silent.
+    """
+    if runtime_context <= 0:
+        return "", False
+    reason = (
+        f"{runtime_identity} is loaded but serves a {runtime_context}-token "
+        f"context; {expected_context} was requested"
+    )
+    if 0 < training_context < expected_context and runtime_context <= training_context:
+        return (
+            f"{reason}, above the model's {training_context}-token training "
+            "context (llama.cpp caps the slot there)",
+            True,
+        )
+    return reason, False
+
+
 def _runtime_context_matches_request(
     runtime_context: int,
     expected_context: int,
@@ -14799,6 +14865,7 @@ def _wait_for_model_readiness(
     allow_model_warmup: bool = True,
     fast_poll_seconds: float = 0.0,
     fast_poll_interval: float = _MODEL_READINESS_FAST_POLL_INTERVAL_SECONDS,
+    diagnosis: dict | None = None,
 ) -> bool | str | dict[str, object]:
     """Prove exact runtime identity and one matching meaningful completion.
 
@@ -14811,7 +14878,14 @@ def _wait_for_model_readiness(
     there counts toward ``initial_delay``, and the full ``attempts`` schedule
     still follows, so a slow load never fails earlier than before. Lemonade
     keeps the regular cadence because its probes can send warmup loads.
+
+    ``diagnosis`` (caller-owned) receives ``reason`` when the runtime serves
+    the model but cannot satisfy the request, and ``final`` when no further
+    probe can change that answer (llama.cpp capped the slot at the model's
+    training context), in which case the wait ends immediately.
     """
+    if diagnosis is None:
+        diagnosis = {}
     gpu_backend = str(env.get("GPU_BACKEND") or "nvidia").lower()
     windows_native_llama = _is_windows_host_llama_server(env)
     is_lemonade = _uses_lemonade_runtime(env)
@@ -14874,10 +14948,11 @@ def _wait_for_model_readiness(
             require_exact_context=require_exact_context,
             cancel_event=cancel_event,
             allow_model_warmup=allow_model_warmup,
+            diagnosis=diagnosis,
         )
         # Every success contract is truthy; every not-ready result is falsy
         # and falls through to the unchanged regular schedule below.
-        if fast_result:
+        if fast_result or diagnosis.get("final"):
             return fast_result
         initial_delay = max(0.0, float(initial_delay) - (time.monotonic() - fast_started))
 
@@ -14956,6 +15031,18 @@ def _wait_for_model_readiness(
                             allow_llama_alignment_padding=True,
                         )
                     ):
+                        reason, final = _llama_context_shortfall(
+                            runtime_identity,
+                            runtime_context,
+                            expected_context,
+                            _llama_training_context_length(body, runtime_identity),
+                        )
+                        if reason:
+                            diagnosis["reason"] = reason
+                        if final:
+                            diagnosis["final"] = True
+                            logger.warning("Model %s cannot become ready: %s", gguf_file, reason)
+                            break
                         runtime_identity = ""
             if (
                 runtime_identity
@@ -15001,10 +15088,11 @@ def _wait_for_model_readiness(
                 return runtime_identity if return_identity else True
             if attempt % 6 == 0:
                 logger.info(
-                    "Model %s readiness incomplete (attempt %d, identity=%s)",
+                    "Model %s readiness incomplete (attempt %d, identity=%s)%s",
                     gguf_file,
                     attempt + 1,
                     bool(runtime_identity),
+                    f": {diagnosis['reason']}" if diagnosis.get("reason") else "",
                 )
         except subprocess.TimeoutExpired:
             if attempt % 6 == 0:
@@ -17702,6 +17790,50 @@ def _launch_native_llama_server(env_path: Path, llama_bin: Path, llama_log: Path
         )
     pid_file.write_text(str(proc.pid), encoding="utf-8")
     logger.info("Native llama-server launched (pid %d, model %s)", proc.pid, gguf_file)
+
+
+_RUNTIME_LOG_EXCERPT_MAX_LINES = 12
+_RUNTIME_LOG_EXCERPT_MAX_CHARS = 2000
+_RUNTIME_LOG_SIGNAL_RE = re.compile(
+    r"error|fail|warn|exceed|capping|overflow|out of memory|unable|invalid|abort|exception|n_ctx",
+    re.IGNORECASE,
+)
+_RUNTIME_LOG_SECRET_RE = re.compile(
+    r"(?i)(api[-_]?key|token|secret|password|authorization|bearer)([\"'=:\s]+)((?:bearer\s+)?[^\s\"',]+)"
+)
+_RUNTIME_LOG_ANSI_RE = re.compile(r"\x1b\[[0-9;?]*[A-Za-z]")
+
+
+def _runtime_log_excerpt(text: object) -> str:
+    """Bound a runtime log to the redacted lines that explain a failed start."""
+    lines = [
+        _RUNTIME_LOG_ANSI_RE.sub("", line).rstrip()
+        for line in str(text or "").splitlines()
+    ]
+    lines = [line for line in lines if line.strip()]
+    selected = [line for line in lines if _RUNTIME_LOG_SIGNAL_RE.search(line)] or lines
+    excerpt = [
+        _RUNTIME_LOG_SECRET_RE.sub(r"\1\2[redacted]", line)[:240]
+        for line in selected[-_RUNTIME_LOG_EXCERPT_MAX_LINES:]
+    ]
+    return "\n".join(excerpt)[-_RUNTIME_LOG_EXCERPT_MAX_CHARS:]
+
+
+def _failed_llama_server_log_excerpt(container: str = "ods-llama-server") -> str:
+    """Read the staged llama-server log before rollback recreates the container."""
+    try:
+        result = subprocess.run(
+            ["docker", "logs", "--tail", "400", container],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            timeout=10,
+        )
+        if result.returncode != 0:
+            return ""
+        return _runtime_log_excerpt(result.stdout)
+    except Exception:  # diagnostics must never block the rollback
+        return ""
 
 
 def _compose_restart_llama_server(env: dict):
