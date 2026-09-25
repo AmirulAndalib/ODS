@@ -7,8 +7,9 @@ const selectedTool = id => typeof id === 'string' && /^(?:openclaw:core:)?(?:rea
   ? id.split(':').at(-1) : id === 'pixel_ods_workspace_preview' ? id : undefined;
 
 // A missing leading slash is not an alias: accepting it would create a second
-// host-looking tree inside the workspace. Existing or owner-named trees remain
-// ordinary core-tool paths; never reinterpret or move their files.
+// host-looking tree inside the workspace. Owner-named trees remain ordinary
+// core-tool paths, and existing files there stay readable and editable so
+// misplaced work can be recovered; never reinterpret or move their files.
 export function malformedRelativeWorkspacePath(tool, params, root, ownerIntent, stat = lstatSync) {
   if (tool === 'tool_call') return malformedRelativeWorkspacePath(selectedTool(params?.id), params?.args, root, ownerIntent, stat);
   if (!['read','write','edit'].includes(tool) || typeof params?.path !== 'string' || typeof root !== 'string') return undefined;
@@ -34,20 +35,24 @@ export function malformedRelativeWorkspacePath(tool, params, root, ownerIntent, 
       }
     }
   }
-  let cursor=configured;
-  let missing=false;
-  for (const component of rootParts) {
-    cursor=path.posix.join(cursor,component);
-    try {
-      const entry=stat(cursor);
-      // Never follow a link to decide whether an existing namespace is real.
-      if (entry.isSymbolicLink() || !entry.isDirectory()) return undefined;
-    } catch (error) {
-      if (error?.code !== 'ENOENT') return undefined;
-      missing=true;break;
+  // An earlier misplaced write must not make the repeated tree look owned:
+  // every new write there is refused, whether or not the tree exists.
+  if (tool !== 'write') {
+    let cursor=configured;
+    let missing=false;
+    for (const component of rootParts) {
+      cursor=path.posix.join(cursor,component);
+      try {
+        const entry=stat(cursor);
+        // Never follow a link to decide whether an existing namespace is real.
+        if (entry.isSymbolicLink() || !entry.isDirectory()) return undefined;
+      } catch (error) {
+        if (error?.code !== 'ENOENT') return undefined;
+        missing=true;break;
+      }
     }
+    if (!missing) return undefined;
   }
-  if (!missing) return undefined;
   const suffix=value.slice(relativeRoot.length+1);
   const correction=suffix.length<=240 ? `Use the workspace-relative path ${JSON.stringify(suffix)}.`
     : 'Use a workspace-relative file path without that host-root prefix.';

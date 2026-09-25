@@ -36,7 +36,7 @@ test('owner-selected literal paths and existing namespaces retain ordinary core 
   assert.match(malformedRelativeWorkspacePath('write',{path:malformed},root,`Write ${root}/calc/compute.py.`,missing),/without its leading slash/);
   assert.match(malformedRelativeWorkspacePath('write',{path:malformed},root,`Write ${malformed}-other.`,missing),/without its leading slash/);
   const directory=()=>({isSymbolicLink:()=>false,isDirectory:()=>true});
-  assert.equal(malformedRelativeWorkspacePath('write',{path:malformed},root,'',directory),undefined);
+  for(const tool of ['read','edit']) assert.equal(malformedRelativeWorkspacePath(tool,{path:malformed},root,'',directory),undefined);
   let calls=0;
   assert.equal(malformedRelativeWorkspacePath('edit',{path:malformed},root,'',()=>{calls++;return{isSymbolicLink:()=>true};}),undefined);
   assert.equal(calls,1,'never traverse an existing symbolic link');
@@ -45,6 +45,27 @@ test('owner-selected literal paths and existing namespaces retain ordinary core 
   const reason=malformedRelativeWorkspacePath('write',{path:long},root,'private unrelated prompt',missing);
   assert.ok(reason.length<300);
   assert.doesNotMatch(reason,/xxx|private unrelated prompt/);
+});
+
+test('an earlier misplaced tree never makes new writes under the repeated root look owned',()=>{
+  // Laptop fleet run: a 2026-09-23 run created workspace/home/<owner>/.openclaw/workspace-pixel,
+  // after which every later misrouted write succeeded into that nested tree.
+  const malformed=root.slice(1)+'/Playground/site/index.html';
+  let calls=0;
+  const existing=()=>{calls++;return{isSymbolicLink:()=>false,isDirectory:()=>true};};
+  for(const wrapped of [false,true]) {
+    const args={path:malformed};
+    const reason=malformedRelativeWorkspacePath(wrapped?'tool_call':'write',wrapped?{id:'openclaw:core:write',args}:args,root,'Build a site',existing);
+    assert.match(reason,/Nothing was written or edited/);
+    assert.match(reason,/workspace-relative path "Playground\/site\/index.html"/);
+    assert.equal(args.path,malformed);
+  }
+  assert.equal(calls,0,'a write never consults the misplaced tree');
+  // Recovery of already misplaced files stays possible.
+  assert.equal(malformedRelativeWorkspacePath('read',{path:malformed},root,'',existing),undefined);
+  assert.equal(malformedRelativeWorkspacePath('edit',{path:malformed},root,'',existing),undefined);
+  // An owner who names the literal path keeps ordinary behavior.
+  assert.equal(malformedRelativeWorkspacePath('write',{path:malformed},root,`Write exactly ${malformed}`,existing),undefined);
 });
 
 test('native exec selects the configured workspace without altering command text',t=>{
