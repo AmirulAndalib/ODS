@@ -19,6 +19,15 @@ Ranking (lexicographic, highest first):
 5. weight size, as a final tie-breaker only.
 
 File size never outranks a curated priority.
+
+Every fit decision (ranking, :func:`plan_model_context` for a dashboard
+switch, :func:`check_fit` for the installers' Hermes re-check) goes through
+one gate, :func:`candidate_fits`, over one estimator,
+model_memory.estimate_model_memory. The discrete-GPU residency check of the
+GPU-residency change (model_memory.resident_configuration: llama.cpp's own
+device projection against total VRAM minus the platform reserve, the fit
+target and other processes) plugs in at that gate for discrete GPUs; unified
+memory and CPU keep the class rules here.
 """
 
 from __future__ import annotations
@@ -341,6 +350,20 @@ class Candidate:
         }
 
 
+def candidate_fits(candidate: Candidate) -> bool:
+    """The one fit gate for a planned candidate (see the module docstring).
+
+    Architecture estimates must leave ``fit_margin_gib`` free (discrete GPUs:
+    max(0.25 GiB, 3%); unified and CPU capacities are already bounded shares
+    of RAM). Legacy estimates and hand-measured runtime-profile budgets keep
+    the historical +0.25 GiB tolerance.
+    """
+    return memory_fits(
+        candidate.required_gb, candidate.capacity_gb, candidate.memory_class,
+        architecture_estimate=candidate.architecture_estimate,
+    )
+
+
 def plan_candidate(model: dict[str, Any], *, capacity_gb: float, mclass: str,
                    backend: Any, memory_type: Any, vram_mb: Any, ram_gb: Any,
                    host_arch: Any, min_context: int = 0,
@@ -394,10 +417,7 @@ def plan_candidate(model: dict[str, Any], *, capacity_gb: float, mclass: str,
         authored = authored_profile_estimate(runtime_profile)
         required = authored or (estimate.total_gib if include_host else estimate.device_gib)
         candidate = _candidate(context, estimate, required, bool(authored))
-        if memory_fits(candidate.required_gb, capacity_gb, mclass,
-                       architecture_estimate=candidate.architecture_estimate):
-            return candidate
-        return None
+        return candidate if candidate_fits(candidate) else None
 
     contexts = context_candidates(model, min_context=min_context)
     ordered = (
@@ -408,8 +428,7 @@ def plan_candidate(model: dict[str, Any], *, capacity_gb: float, mclass: str,
         estimate = estimate_model_memory(model, context_length=context)
         required = estimate.total_gib if include_host else estimate.device_gib
         candidate = _candidate(context, estimate, required, False)
-        if memory_fits(candidate.required_gb, capacity_gb, mclass,
-                       architecture_estimate=candidate.architecture_estimate):
+        if candidate_fits(candidate):
             return candidate
     return None
 
@@ -586,8 +605,14 @@ def check_fit(model: dict[str, Any], *, context_length: int, capacity_gb: float,
             authored = authored_profile_estimate(runtime_profile)
     required = authored or (estimate.total_gib if mclass == "cpu" else estimate.device_gib)
     architecture = (not authored) and estimate.method == "architecture"
-    fits = memory_fits(required, capacity_gb, mclass, architecture_estimate=architecture)
     margin = fit_margin_gib(capacity_gb, mclass) if architecture else -LEGACY_FIT_TOLERANCE_GIB
+    fits = candidate_fits(Candidate(
+        model=model, runtime_profile=runtime_profile, context_length=int(context_length),
+        required_gb=round(required, 2), estimate=estimate,
+        architecture_estimate=architecture, authored_estimate=bool(authored),
+        meets_min_context=True, memory_class=mclass, capacity_gb=float(capacity_gb),
+        fit_margin_gb=margin, priority=0, evidence=0,
+    ))
     return {
         "fits": bool(fits),
         "model_id": model.get("id"),
