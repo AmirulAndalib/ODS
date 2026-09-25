@@ -209,6 +209,28 @@ semantics, and the harness still refuses a revision after side effects.
 `tests/owner_visible_reply.test.mjs` and the real-harness fixtures `tests/runtime_progress_finalization.integration.mjs`
 and `tests/runtime_owner_visible_reply.integration.mjs` cover both paths.
 
+## Owner cancellation
+
+Every recovery decision is bound to the run that armed it. An acknowledged
+owner cancel (`/pixel-ods/abort`) voids that run's completion assurance: no
+further revision, no armed replacement text, and any host citation read it is
+waiting on is aborted. OpenClaw already refuses a revision for an aborted
+attempt; if one started just before the cancel, its prompt is told to stop and
+its tool calls stay refused.
+
+OpenClaw keeps the cancelled request in the transcript without an answer, and a
+model otherwise treats it as still pending (tower1 round 067: a later "Reply
+with exactly …" ran the cancelled research first). The first owner turn after
+the cancel therefore gets fixed, model-only context (a `before_prompt_build`
+`prependContext`, never persisted as owner text) saying that request is
+withdrawn unless the new message asks to resume it. In that run, web evidence
+does not by itself require attribution: the missing-source revision applies
+only when the current message asks for research or source reads, or resends the
+cancelled request. A later message sees none of this.
+`tests/cancel_request_binding.test.mjs` replays the fleet case and a cancel
+before, during and after a revision is armed; the real-harness fixture
+`tests/runtime_cancel_recovery.integration.mjs` cancels through the ingress.
+
 ## Search availability
 
 Existing SearXNG installations can report HTTP 200 with zero results while their

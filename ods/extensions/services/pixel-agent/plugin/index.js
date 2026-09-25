@@ -353,7 +353,9 @@ export default definePluginEntry({
       });
       const repositoryEvidence = contract ? await extensionRepositoryContext(event,
         result => toolLoopGuard.observeRepositorySource(context?.runId ?? event?.runId, result)) : '';
-      return contract ? { ...contract, ...(goalProgress.active(context?.runId ?? event?.runId) ? {appendContext:GOAL_CONTRACT} : {}), appendSystemContext: `${ACTIVITY_CONTRACT} ${goalProgress.active(context?.runId ?? event?.runId) ? GOAL_CONTRACT : ""} ${contract.appendSystemContext} ${executionContext()} ${repositoryEvidence}` } : undefined;
+      // Per-attempt, model-only context: not part of the cached system prompt.
+      const cancelContext = toolLoopGuard.promptContextForRun(context?.runId ?? event?.runId);
+      return contract ? { ...contract, ...(cancelContext ? {prependContext:cancelContext} : {}), ...(goalProgress.active(context?.runId ?? event?.runId) ? {appendContext:GOAL_CONTRACT} : {}), appendSystemContext: `${ACTIVITY_CONTRACT} ${goalProgress.active(context?.runId ?? event?.runId) ? GOAL_CONTRACT : ""} ${contract.appendSystemContext} ${executionContext()} ${repositoryEvidence}` } : undefined;
     });
     api.on("model_call_started", (event, context) =>
       toolLoopGuard.observeModelCall(event, context, AGENT_ID)
@@ -383,6 +385,7 @@ export default definePluginEntry({
     }
     api.on("agent_end", (event, context) => {
       toolLoopGuard.endPreviewRevalidation(event, context);
+      toolLoopGuard.observeAgentEnd(event, context);
       if (!accessRuntime.isProbe(context)) { goalProgress.finish(event, context); taskActivity.finish(event, context); }
       if (!managedRuntime) return accessRuntime.finish({runId: event.runId}, context);
     });

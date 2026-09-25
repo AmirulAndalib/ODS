@@ -94,6 +94,12 @@ jobs:
         env:
           OPENCLAW_PACKAGE: ${{ runner.temp }}/read-runtime/node_modules/openclaw
         run: node --test ods/extensions/services/pixel-agent/tests/runtime_tool_result_delivery.integration.mjs
+      - name: Verify an owner cancel leaves the next message clean with the real runtime
+        if: runner.os != 'Windows'
+        shell: bash
+        env:
+          OPENCLAW_PACKAGE: ${{ runner.temp }}/read-runtime/node_modules/openclaw
+        run: node --test ods/extensions/services/pixel-agent/tests/runtime_cancel_recovery.integration.mjs
       - name: Verify tool-limit finalization and silent-reply recovery with real Pixel runtime
         if: runner.os != 'Windows'
         shell: bash
