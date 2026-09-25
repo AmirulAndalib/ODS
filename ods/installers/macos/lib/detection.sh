@@ -205,9 +205,14 @@ calculate_llama_cpu_budget() {
 
 # ── Disk Space ──
 
+# test_disk_space PATH REQUIRED_GB [RECLAIMABLE_GB]
+# RECLAIMABLE_GB is space that will be freed on PATH's filesystem before the
+# install writes anything (a forced-reinstall preflight credits the
+# installation it will replace). It defaults to 0.
 test_disk_space() {
     local path="${1:-$HOME}"
     local required_gb="${2:-30}"
+    local reclaimable_gb="${3:-0}"
 
     # Walk up to nearest existing parent if path doesn't exist yet (first install)
     while [[ ! -d "$path" ]]; do path="$(dirname "$path")"; done
@@ -219,10 +224,14 @@ test_disk_space() {
         # Fallback: use df -BG (Linux-style, unlikely on macOS but safe)
         free_gb=$(df -BG "$path" 2>/dev/null | tail -1 | awk '{gsub(/G/, "", $4); print int($4)}')
     fi
+    [[ "$reclaimable_gb" =~ ^[0-9]+$ ]] || reclaimable_gb=0
     DISK_FREE_GB="${free_gb:-0}"
+    [[ "$DISK_FREE_GB" =~ ^[0-9]+$ ]] || DISK_FREE_GB=0
+    DISK_RECLAIMABLE_GB="$reclaimable_gb"
+    DISK_AVAILABLE_GB=$(( DISK_FREE_GB + DISK_RECLAIMABLE_GB ))
     DISK_REQUIRED_GB="$required_gb"
     DISK_SUFFICIENT=false
-    if [[ "$DISK_FREE_GB" -ge "$DISK_REQUIRED_GB" ]]; then
+    if [[ "$DISK_AVAILABLE_GB" -ge "$DISK_REQUIRED_GB" ]]; then
         DISK_SUFFICIENT=true
     fi
 }

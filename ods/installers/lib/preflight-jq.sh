@@ -7,6 +7,11 @@ ods_preflight_require_jq() {
             error "jq is required for a complete dry run. Install jq yourself and retry; dry run will not install packages."
             return 1
         fi
+        # A forced-reinstall preflight only reports; the real run installs it.
+        if [[ "${PREFLIGHT_ONLY:-false}" == true ]]; then
+            log "jq not found - the installer will install it"
+            return 0
+        fi
         log "jq not found - attempting auto-install..."
         if ! ods_sudo_available; then
             error "jq is required but not installed and privileged package installation is unavailable. Install jq first, then re-run ODS."

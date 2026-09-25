@@ -4,6 +4,8 @@
 # --dry-run --skip-docker --force --tier --voice --workflows --rag
 # --openclaw --all --non-interactive --no-bootstrap --bootstrap --offline
 # --use-existing-lemonade --lemonade-url --lemonade-api-key
+# --preflight-only (environment checks only; used by get-ods.sh --force through
+#   installers/reinstall-preflight.sh before an existing install is removed)
 
 set -euo pipefail
 

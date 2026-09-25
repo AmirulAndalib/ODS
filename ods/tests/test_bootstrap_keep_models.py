@@ -15,6 +15,7 @@ ROOT = Path(__file__).resolve().parents[1]
 BOOTSTRAP = ROOT / 'get-ods.sh'
 UNINSTALL = (ROOT / 'ods-uninstall.sh').read_text()
 HELPER = ROOT / 'lib/model-cache-custody.py'
+REINSTALL_PREFLIGHT = ROOT / 'installers/reinstall-preflight.sh'
 spec = importlib.util.spec_from_file_location('model_cache_custody', HELPER)
 custody = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(custody)
@@ -43,8 +44,13 @@ class KeepModelsTests(unittest.TestCase):
         ods.mkdir(parents=True)
         (ods / 'lib').mkdir()
         shutil.copyfile(HELPER, ods / 'lib/model-cache-custody.py')
+        # Custody is under test here; the real preflight entry point hands this
+        # stub installer --preflight-only, which passes.
+        (ods / 'installers').mkdir()
+        shutil.copyfile(REINSTALL_PREFLIGHT, ods / 'installers/reinstall-preflight.sh')
         installer = '''#!/bin/bash
 set -euo pipefail
+[[ "${1:-}" != --preflight-only ]] || exit 0
 python3 - "$@" <<'PY'
 import json,os,pathlib,sys
 root=pathlib.Path.cwd();model=root/'data/models/llm/model.gguf'
