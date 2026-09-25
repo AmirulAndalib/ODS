@@ -100,7 +100,7 @@ function Resolve-QwenTierConfig {
         "CLOUD" {
             return @{
                 TierName   = "Cloud (API)"
-                LlmModel   = "anthropic/claude-sonnet-4-5-20250514"
+                LlmModel   = "anthropic/claude-sonnet-4-6"
                 GgufFile   = ""
                 GgufUrl    = ""
                 GgufSha256 = ""
@@ -248,7 +248,7 @@ function Resolve-GemmaTierConfig {
         "CLOUD" {
             return @{
                 TierName   = "Cloud (API)"
-                LlmModel   = "anthropic/claude-sonnet-4-5-20250514"
+                LlmModel   = "anthropic/claude-sonnet-4-6"
                 GgufFile   = ""
                 GgufUrl    = ""
                 GgufSha256 = ""
@@ -828,7 +828,7 @@ function ConvertTo-ModelFromTier {
 
     if ($effectiveProfile -eq "gemma4") {
         switch -Regex ($Tier) {
-            "^CLOUD$"                { return "anthropic/claude-sonnet-4-5-20250514" }
+            "^CLOUD$"                { return "anthropic/claude-sonnet-4-6" }
             "^NV_ULTRA$"             { return "gemma-4-31b-it" }
             "^SH_LARGE$"             { return "gemma-4-31b-it" }
             "^(SH_COMPACT|SH)$"      { return "gemma-4-26b-a4b-it" }
@@ -842,7 +842,7 @@ function ConvertTo-ModelFromTier {
     }
 
     switch -Regex ($Tier) {
-        "^CLOUD$"                { return "anthropic/claude-sonnet-4-5-20250514" }
+        "^CLOUD$"                { return "anthropic/claude-sonnet-4-6" }
         "^NV_ULTRA$"             { return "qwen3-coder-next" }
         "^SH_LARGE$"             { return "qwen3.6-35b-a3b" }
         "^(SH_COMPACT|SH)$"      { return "qwen3-30b-a3b" }

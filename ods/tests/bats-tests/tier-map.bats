@@ -115,7 +115,7 @@ teardown() {
     TIER=CLOUD
     resolve_tier_config
     assert_equal "$TIER_NAME" "Cloud (API)"
-    assert_equal "$LLM_MODEL" "anthropic/claude-sonnet-4-5-20250514"
+    assert_equal "$LLM_MODEL" "anthropic/claude-sonnet-4-6"
     assert_equal "$GGUF_FILE" ""
     assert_equal "$GGUF_URL" ""
     assert_equal "$MAX_CONTEXT" "200000"
@@ -160,7 +160,7 @@ teardown() {
 
 @test "tier_to_model: default profile maps special tiers correctly" {
     run tier_to_model CLOUD
-    assert_output "anthropic/claude-sonnet-4-5-20250514"
+    assert_output "anthropic/claude-sonnet-4-6"
 
     run tier_to_model NV_ULTRA
     assert_output "qwen3-coder-next"

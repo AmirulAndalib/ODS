@@ -401,6 +401,9 @@ jobs:
       - name: Runtime Config Renderer Tests
         run: python3 tests/test-render-runtime-configs.py
 
+      - name: Cloud Model ID Allowlist
+        run: python3 tests/test-cloud-model-ids.py
+
       - name: Runtime Renderer Environment Modes
         run: |
           python3 -m pip install pytest==8.4.2

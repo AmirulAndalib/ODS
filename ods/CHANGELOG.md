@@ -48,6 +48,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   restarts of native macOS inference now read the same checkpoint keys as the
   installer (`LLAMA_ARG_CHECKPOINT_EVERY_NT`,
   `LLAMA_ARG_CHECKPOINT_MIN_SPACING_NT`).
+- Cloud mode, hybrid mode's `cloud` route and the CLOUD tier now use Claude
+  Sonnet 4.6 (`claude-sonnet-4-6`). The previous default,
+  `claude-sonnet-4-5-20250514`, is not an Anthropic model ID: it paired the
+  Sonnet 4.5 name with Sonnet 4's date, and neither Anthropic's model list nor
+  LiteLLM's model map has it. The `fast` route stays on Claude Haiku 4.5
+  (`claude-haiku-4-5-20251001`). A new test fails CI if any `anthropic/claude-*`
+  ID in ODS is not on a verified allowlist.
 
 ## [3.0.0] - 2026-09-24
 
