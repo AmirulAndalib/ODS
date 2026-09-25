@@ -8834,7 +8834,11 @@ test("research exhaustion preserves report delivery without inferred workspace i
         : {url: "https://docs.python.org/3/library/csv.html", query: "reader"};
       assert.equal(invoke(blockedName, blockedArgs).blockReason, reason);
       assert.notEqual(invoke("read", { path: "research/report.md" })?.block, true);
-      assert.equal(invoke(blockedName, blockedArgs).blockReason, WEB_LOOP_ABORT_REASON);
+      // The research stop carries the one-time answer instruction; without
+      // model hooks, the next call ends the run.
+      assert.equal(invoke(blockedName, blockedArgs).blockReason, PROGRESS_FINALIZATION_INSTRUCTION);
+      assert.deepEqual(aborts, []);
+      assert.equal(invoke("read", { path: "research/report.md" }).blockReason, RUN_PROGRESS_STOP_REASON);
       assert.deepEqual(aborts, ["session-1"]);
       // A fresh run gets a fresh web budget.
       assert.equal(call(guard, "web_search", {
@@ -9057,8 +9061,16 @@ test("web exhaustion lets a whole model batch finish before escalating", () => {
     assert.notEqual(invoke("read", { path: "report.md" })?.block, true);
     assert.deepEqual(aborts, []);
     nextRound();
+    // The stop's refusal (and its batch siblings) carries the one-time answer
+    // instruction; a tool call in the following answer turn ends the run.
     assert.equal(invoke("web_search", { query: "still ignoring warnings" }).blockReason,
-      WEB_LOOP_ABORT_REASON);
+      PROGRESS_FINALIZATION_INSTRUCTION);
+    assert.equal(invoke("web_search", { query: "sibling in the same batch" }).blockReason,
+      PROGRESS_FINALIZATION_INSTRUCTION);
+    assert.deepEqual(aborts, []);
+    nextRound();
+    assert.equal(invoke("web_search", { query: "ignoring the answer turn" }).blockReason,
+      RUN_PROGRESS_STOP_REASON);
     assert.deepEqual(aborts, ["session-1"]);
     assert.equal(call(guard, "web_search", {
       context: { agentId: "pixel", runId: "run-2", sessionId: "session-2" },
@@ -9173,12 +9185,20 @@ test("without model hooks the finite web-loop fallback aborts only the active ru
   assert.equal(call(guard, "web_search").blockReason, WEB_BUDGET_EXHAUSTED_REASON);
   assert.equal(call(guard, "read"), undefined);
   assert.equal(call(guard, "web_search").blockReason, WEB_BUDGET_EXHAUSTED_REASON);
+  // The stop grants one tool-free answer; with no model hooks the call-count
+  // bound still ends the run at the next call.
   assert.deepEqual(call(guard, "web_search"), {
     block: true,
-    blockReason: WEB_LOOP_ABORT_REASON,
+    blockReason: PROGRESS_FINALIZATION_INSTRUCTION,
+  });
+  assert.deepEqual(aborts, []);
+  assert.match(warnings[0], /repeated web-tool loop.*one tool-free answer turn remains/);
+  assert.deepEqual(call(guard, "web_search"), {
+    block: true,
+    blockReason: RUN_PROGRESS_STOP_REASON,
   });
   assert.deepEqual(aborts, ["session-1"]);
-  assert.match(warnings[0], /active run aborted=true/);
+  assert.match(warnings.join("\n"), /progress-limit abort observation: .*"acknowledged":true/);
 });
 
 test("does not constrain other agents or non-web tools", () => {
@@ -13350,11 +13370,13 @@ test("an abort failure is contained and remains a blocked tool result", () => {
   call(guard, "web_search");
   assert.equal(call(guard, "read"), undefined);
   assert.equal(call(guard, "web_search").blockReason, WEB_BUDGET_EXHAUSTED_REASON);
+  assert.equal(call(guard, "web_search").blockReason, PROGRESS_FINALIZATION_INSTRUCTION);
   const result = call(guard, "web_search");
   assert.equal(result.block, true);
-  assert.equal(result.blockReason, WEB_LOOP_ABORT_REASON);
-  assert.match(warnings[0], /abort failed/);
-  assert.deepEqual(guard.deliveryVerificationForRun("run-1"), { status: "none" });
+  assert.equal(result.blockReason, RUN_PROGRESS_STOP_REASON);
+  assert.match(warnings.join("\n"), /progress-limit abort observation: .*"callbackThrew":true/);
+  // The response stays stopped: the forfeited answer turn delivers the research stop text.
+  assert.deepEqual(guard.deliveryVerificationForRun("run-1"), { status: "failed", text: WEB_LOOP_DELIVERY_REASON });
 });
 
 test("acknowledged research aborts deliver their cause without replacing an unexhausted reply", () => {
@@ -13376,12 +13398,13 @@ test("acknowledged research aborts deliver their cause without replacing an unex
       assert.deepEqual(guard.deliveryVerificationForRun("run-1"), {status: "none"},
         "reaching a limit does not erase a useful final answer");
       assert.equal(search().blockReason, WEB_BUDGET_EXHAUSTED_REASON);
-      assert.equal(search().blockReason, WEB_LOOP_ABORT_REASON);
-      assert.deepEqual(guard.deliveryVerificationForRun("run-1"), acknowledged
-        ? {status: "failed", text: WEB_LOOP_DELIVERY_REASON}
-        : {status: "none"});
+      assert.equal(search().blockReason, PROGRESS_FINALIZATION_INSTRUCTION);
+      // A tool call instead of the one tool-free answer ends the run; with or
+      // without an acknowledged abort, the stopped response delivers its cause.
+      assert.equal(search().blockReason, RUN_PROGRESS_STOP_REASON);
+      assert.deepEqual(guard.deliveryVerificationForRun("run-1"), {status: "failed", text: WEB_LOOP_DELIVERY_REASON});
       const rewritten = guard.replyPayloadSending({runId: "run-1", kind: "final", payload: {text: ""}});
-      assert.equal(rewritten?.payload?.text, acknowledged ? WEB_LOOP_DELIVERY_REASON : undefined);
+      assert.equal(rewritten?.payload?.text, WEB_LOOP_DELIVERY_REASON);
       assert.deepEqual(guard.deliveryVerificationForRun("another-run"), {status: "none"},
         "the failure belongs only to the aborted run");
     }

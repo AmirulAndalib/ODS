@@ -58,10 +58,11 @@ export function progressFinalizationAnswer(text, {localUrlsForbidden = false, al
 
 // Model answer first (the requested format stays intact), then host facts.
 export function composeProgressFinalization(answer, {preview, previewExpected = false,
-  verificationStatus, unverifiedLinks = []} = {}) {
+  verificationStatus, researchLimit = false, unverifiedLinks = []} = {}) {
   const fences = [...answer.matchAll(/^[ \t]{0,3}(`{3,}|~{3,})/gm)].map(match => match[1]);
   const closing = fences.length % 2 ? `\n${fences.at(-1)}` : '';
   const facts = [PROGRESS_FINALIZATION_NOTE];
+  if (researchLimit) facts.push("This response's web research allowance was used up, so no further sources could be read.");
   if (verificationStatus === 'failed') facts.push('The latest recognized test or verification command failed.');
   else if (verificationStatus === 'pending') facts.push('A recognized test or verification command had not finished, so its result is unverified.');
   const links = unverifiedLinks.filter(url => typeof url === 'string' && url.length <= 2048).slice(0, 5);
@@ -81,9 +82,15 @@ export function composeProgressFinalization(answer, {preview, previewExpected = 
 //   turn        the single tool-free answer turn is in progress
 //   answered    a deliverable answer was captured
 //   failed      the turn was forfeited; deliver the canned stop text
+// Parallel sibling calls of the model round that received the instruction
+// share it; any other call forfeits the answer turn.
+const MAX_SIBLING_INSTRUCTIONS = 8;
+
 export function createProgressFinalization() {
   let phase = 'idle';
   let unawareCalls = 0;
+  let instructedRound;
+  let instructions = 0;
   let answer;
   const fail = () => { phase = 'failed'; answer = undefined; };
   return {
@@ -95,11 +102,23 @@ export function createProgressFinalization() {
       if (phase === 'idle') phase = eligible ? 'pending' : 'unavailable';
       return phase;
     },
-    // A tool call after exhaustion. 'instruct' means its refusal carries the
+    // A tool call after exhaustion, in observed model round `round` (0 when the
+    // runtime reports no model calls). 'instruct' means its refusal carries the
     // instruction; 'stop' means the canned stop text (and the abort) applies.
-    toolBoundary() {
-      if (phase === 'pending' || phase === 'instructed') { phase = 'instructed'; return 'instruct'; }
-      if (phase === 'turn' || phase === 'answered') fail();
+    // Without an observed round, only the first refusal can carry it.
+    toolBoundary(round = 0) {
+      if (phase === 'pending') {
+        phase = 'instructed';
+        instructedRound = round;
+        instructions = 1;
+        return 'instruct';
+      }
+      if (phase === 'instructed' && round > 0 && round === instructedRound &&
+          instructions < MAX_SIBLING_INSTRUCTIONS) {
+        instructions += 1;
+        return 'instruct';
+      }
+      if (phase === 'instructed' || phase === 'turn' || phase === 'answered') fail();
       return 'stop';
     },
     modelCallStarted() {
@@ -111,8 +130,11 @@ export function createProgressFinalization() {
       else if (phase === 'pending' && ++unawareCalls > 1) fail();
       return phase;
     },
+    // Final text is produced only by a model call after the last tool result,
+    // so in 'instructed' (no model hook observed the call) it follows the
+    // instruction as well.
     accept(text, options) {
-      if (phase !== 'turn' && phase !== 'pending') return undefined;
+      if (!['pending', 'instructed', 'turn'].includes(phase)) return undefined;
       answer = progressFinalizationAnswer(text, options);
       if (answer) phase = 'answered';
       else fail();

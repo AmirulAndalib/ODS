@@ -1,7 +1,8 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {createHash} from 'node:crypto';
-import {createToolLoopGuard, FREE_CORRECTIONS_PER_KIND, PHANTOM_PROCESS_REASON} from '../plugin/tool-loop-guard.mjs';
+import {createToolLoopGuard, DEFAULT_WEB_TOOL_LIMITS, FREE_CORRECTIONS_PER_KIND, PHANTOM_PROCESS_REASON,
+  WEB_LOOP_ABORT_REASON, WEB_LOOP_DELIVERY_REASON, WEB_SEARCH_BUDGET_EXHAUSTED_REASON} from '../plugin/tool-loop-guard.mjs';
 import {RUN_PROGRESS_LIMITS, RUN_PROGRESS_STOP_REASON} from '../plugin/run-progress-budget.mjs';
 import {composeProgressFinalization, createProgressFinalization, progressFinalizationAnswer,
   PROGRESS_FINALIZATION_INSTRUCTION, PROGRESS_FINALIZATION_NOTE} from '../plugin/progress-finalization.mjs';
@@ -79,8 +80,8 @@ test('state machine grants exactly one answer turn after the instruction', () =>
   assert.equal(finalization.abortDeferred, false, 'no deferral before the budget is exhausted');
   assert.equal(finalization.arm(true), 'pending');
   assert.equal(finalization.modelCallStarted(), 'pending', 'the call that is still unaware of the stop');
-  assert.equal(finalization.toolBoundary(), 'instruct');
-  assert.equal(finalization.toolBoundary(), 'instruct', 'parallel sibling calls carry the same instruction');
+  assert.equal(finalization.toolBoundary(3), 'instruct');
+  assert.equal(finalization.toolBoundary(3), 'instruct', 'parallel sibling calls carry the same instruction');
   assert.equal(finalization.modelCallStarted(), 'turn');
   assert.equal(finalization.abortDeferred, true);
   const answer = 'The RTX 5070 has 12 GB of VRAM according to the NVIDIA page.';
@@ -91,8 +92,8 @@ test('state machine grants exactly one answer turn after the instruction', () =>
   assert.equal(finalization.accept('A second answer is never accepted after the turn was spent.'), undefined);
 
   const toolInTurn = createProgressFinalization();
-  toolInTurn.arm(true); toolInTurn.toolBoundary(); toolInTurn.modelCallStarted();
-  assert.equal(toolInTurn.toolBoundary(), 'stop');
+  toolInTurn.arm(true); toolInTurn.toolBoundary(1); toolInTurn.modelCallStarted();
+  assert.equal(toolInTurn.toolBoundary(2), 'stop');
   assert.equal(toolInTurn.phase, 'failed');
   assert.equal(toolInTurn.abortDeferred, false);
 
@@ -100,6 +101,19 @@ test('state machine grants exactly one answer turn after the instruction', () =>
   assert.equal(ineligible.arm(false), 'unavailable');
   assert.equal(ineligible.toolBoundary(), 'stop');
   assert.equal(ineligible.abortDeferred, false);
+
+  // Without observed model rounds only the first refusal carries the
+  // instruction; the next call ends the run (the hookless call-count bound).
+  const hookless = createProgressFinalization();
+  hookless.arm(true);
+  assert.equal(hookless.toolBoundary(0), 'instruct');
+  assert.equal(hookless.toolBoundary(0), 'stop');
+  assert.equal(hookless.abortDeferred, false);
+  // Siblings are bounded even when a stalled hook leaves the round unchanged.
+  const stalled = createProgressFinalization();
+  stalled.arm(true);
+  const refusals = Array.from({length: 10}, () => stalled.toolBoundary(5));
+  assert.deepEqual(refusals, [...Array(8).fill('instruct'), 'stop', 'stop']);
 
   const unaware = createProgressFinalization();
   unaware.arm(true);
@@ -372,6 +386,112 @@ test('free corrections apply before exhaustion; after it the single answer turn 
   guard.observeModelCall({}, context);
   assert.equal(phantom('answer-turn'), RUN_PROGRESS_STOP_REASON);
   assert.deepEqual(aborts, [[context.sessionId, context.sessionKey]], 'a tool call in the answer turn ends the run');
+});
+
+// Replays tower1 session 5e600138 (integration build e482ce65, 2026-09-25
+// 09:08-09:12 UTC): the search allowance ran out, a context-overflow error
+// round was compacted, then ENOTFOUND, a second search refusal and a 404 left
+// three consecutive failures. The next web_search hit the research web-loop
+// terminal, which aborted at once (WEB_LOOP_ABORT_REASON; its receipt then
+// exhausted the progress budget) and the owner got only the canned stop text.
+function tower1Replay({finalTurn}) {
+  const {guard, aborts} = guardFixture();
+  let n = 0;
+  const call = (toolName, params, outcome) => {
+    const id = `t1-${++n}`, ctx = {...context, toolName, toolCallId: id};
+    const decision = guard.beforeToolCall({toolName, toolCallId: id, params}, ctx);
+    const result = decision?.block
+      ? {content: [{type: 'text', text: decision.blockReason}], details: {status: 'blocked', reason: decision.blockReason}}
+      : outcome;
+    const isError = decision?.block === true || result?.isError === true;
+    guard.afterToolCall({toolName, toolCallId: id, params, result, ...(isError ? {error: result.content[0].text} : {})}, ctx);
+    guard.toolResultPersist({toolCallId: id, message: {role: 'toolResult', toolName, toolCallId: id, isError, ...result}}, ctx);
+    return decision;
+  };
+  const round = () => guard.observeModelCall({}, context);
+  const page = url => ({content: [{type: 'text', text: `Fetched ${url}`}], details: {status: 200, url, finalUrl: url, text: `Evidence from ${url}`}});
+  const failure = error => ({isError: true, content: [{type: 'text', text: JSON.stringify({status: 'error', tool: 'web_fetch', error})}],
+    details: {status: 'error'}});
+  const search = query => ({content: [{type: 'text', text: JSON.stringify({query, results: []})}], details: {status: 'ok'}});
+  Object.values(PAGES).forEach(url => { round(); call('web_fetch', {url}, page(url)); });
+  for (let i = 0; i < DEFAULT_WEB_TOOL_LIMITS.search; i++) { round(); call('web_search', {query: `gpu ${i}`}, search(`gpu ${i}`)); }
+  round();
+  assert.equal(call('web_search', {query: 'RX 9070 Newegg price'}, search('x'))?.blockReason, WEB_SEARCH_BUDGET_EXHAUSTED_REASON);
+  const toms = 'https://www.tomshardware.com/pc-components/rx-9070-price';
+  round(); call('web_fetch', {url: toms}, page(toms));
+  // Context-overflow error round, then compaction and the resumed attempt.
+  round(); guard.observeModelEnd({}, context);
+  guard.observeRun(context, 'pixel', {prompt: RESEARCH_PROMPT});
+  round(); call('web_fetch', {url: 'https://www.gamersnexusguide.com/amd-radeon-rx-9070-review'}, failure('getaddrinfo ENOTFOUND www.gamersnexusguide.com'));
+  round();
+  assert.equal(call('web_search', {query: 'RTX 5070 RX 9070 1440p GamersNexus'}, search('x'))?.blockReason, WEB_SEARCH_BUDGET_EXHAUSTED_REASON);
+  round(); call('web_fetch', {url: 'https://www.gamersnexus.net/reviews/amd-radeon-rx-9070-review-benchmarks'}, failure('Web fetch failed (404)'));
+  round();
+  const refused = call('web_search', {query: 'site:gamersnexus.net RTX 5070 RX 9070'}, search('x'));
+  guard.observeModelEnd({}, context);
+  round();
+  const late = finalTurn === 'tool' ? call('web_search', {query: 'one more'}, search('x')) : undefined;
+  guard.observeModelEnd({}, context);
+  guard.beforeAgentFinalize({lastAssistantMessage: finalTurn === 'tool' ? 'Let me search again.' : RESEARCH_ANSWER}, context);
+  return {guard, aborts, refused, late};
+}
+
+test('tower1 replay: a research-loop stop after compaction gets the one answer turn, not an immediate abort', () => {
+  const {guard, aborts, refused} = tower1Replay({finalTurn: 'answer'});
+  assert.deepEqual(refused, {block: true, blockReason: PROGRESS_FINALIZATION_INSTRUCTION},
+    'the refused call carries the instruction instead of WEB_LOOP_ABORT_REASON');
+  assert.deepEqual(aborts, [], 'no abort before or during the answer turn');
+  const delivery = guard.deliveryVerificationForRun(context.runId);
+  assert.equal(delivery.status, 'failed');
+  assert.ok(delivery.text.startsWith(RESEARCH_ANSWER));
+  assert.ok(delivery.text.includes(PROGRESS_FINALIZATION_NOTE));
+  assert.match(delivery.text, /web research allowance was used up/);
+  assert.ok(!delivery.text.includes(RUN_PROGRESS_STOP_REASON) && !delivery.text.includes(WEB_LOOP_DELIVERY_REASON));
+  assert.equal(guard.replyPayloadSending({runId: context.runId, kind: 'final', payload: {text: RESEARCH_ANSWER}}).payload.text,
+    delivery.text);
+  assert.equal(guard.continuationAllowed(context.runId), false);
+});
+
+test('tower1 replay: a tool call in the research-stop answer turn still aborts once, with the research stop text', () => {
+  const {guard, aborts, refused, late} = tower1Replay({finalTurn: 'tool'});
+  assert.equal(refused?.blockReason, PROGRESS_FINALIZATION_INSTRUCTION);
+  assert.deepEqual(late, {block: true, blockReason: RUN_PROGRESS_STOP_REASON});
+  assert.deepEqual(aborts, [[context.sessionId, context.sessionKey]]);
+  assert.equal(guard.deliveryVerificationForRun(context.runId).text, WEB_LOOP_DELIVERY_REASON);
+});
+
+test('an ineligible run keeps the immediate research web-loop abort', () => {
+  const {guard, aborts} = guardFixture("Inspect this computer's CPU health and search the web for its current driver version.");
+  let n = 0;
+  const search = () => {
+    guard.observeModelCall({}, context);
+    const id = `op-${++n}`, params = {query: `driver ${n}`}, ctx = {...context, toolName: 'web_search', toolCallId: id};
+    const decision = guard.beforeToolCall({toolName: 'web_search', toolCallId: id, params}, ctx);
+    if (!decision?.block) guard.afterToolCall({toolName: 'web_search', toolCallId: id, params,
+      result: {content: [{type: 'text', text: `results ${n}`}], details: {status: 'ok'}}}, ctx);
+    return decision;
+  };
+  for (let i = 0; i < DEFAULT_WEB_TOOL_LIMITS.search; i++) search();
+  assert.equal(search()?.blockReason, WEB_SEARCH_BUDGET_EXHAUSTED_REASON);
+  assert.equal(search()?.blockReason, WEB_SEARCH_BUDGET_EXHAUSTED_REASON);
+  assert.equal(search()?.blockReason, WEB_LOOP_ABORT_REASON);
+  assert.equal(aborts.length, 1);
+});
+
+test('without model hooks, an answer after the research-stop refusal is still delivered', () => {
+  const aborts = [];
+  const guard = createToolLoopGuard({abortRun: id => { aborts.push(id); return true; }, limits: {search: 1, fetch: 4, total: 5}});
+  guard.observeRun(context, 'pixel', {prompt: RESEARCH_PROMPT});
+  const search = q => guard.beforeToolCall({toolName: 'web_search', toolCallId: q, params: {query: q}}, {...context, toolName: 'web_search', toolCallId: q});
+  assert.equal(search('a'), undefined);
+  assert.equal(search('b')?.blockReason, WEB_SEARCH_BUDGET_EXHAUSTED_REASON);
+  assert.equal(search('c')?.blockReason, WEB_SEARCH_BUDGET_EXHAUSTED_REASON);
+  assert.equal(search('d')?.blockReason, PROGRESS_FINALIZATION_INSTRUCTION);
+  guard.beforeAgentFinalize({lastAssistantMessage: RESEARCH_ANSWER}, context);
+  const delivery = guard.deliveryVerificationForRun(context.runId);
+  assert.ok(delivery.text.startsWith(RESEARCH_ANSWER));
+  assert.match(delivery.text, /web research allowance was used up/);
+  assert.deepEqual(aborts, []);
 });
 
 test('the instruction is fixed text, identical for every run and tool', () => {

@@ -6800,6 +6800,7 @@ export function createToolLoopGuard({
         fetch: 0,
         total: 0,
         webLoopAborted: false,
+        researchStopped: false,
         webTerminals: new Map(),
         codingExhausted: false,
         codingTerminalBlocks: 0,
@@ -6990,14 +6991,16 @@ export function createToolLoopGuard({
   // based work (Operations, exact downloads, managed extension requests, team
   // coordination) keeps the strict stop text: a model summary must not stand
   // in for those host receipts.
+  function progressFinalizationEligible(state) {
+    return !state.clientCancelled && !state.recursiveDeleteDenied &&
+      !state.unrequestedOperationsAborted && !state.webLoopAborted && !state.ownerQuestions &&
+      !state.operationsRequired && !state.exactDownloadRequested && !state.extensionCompletionGate?.active &&
+      !state.extensionPendingHandoff && !state.managedTeamCoordinator;
+  }
+
   function progressFinalization(state) {
     const finalization = state.progressFinalization;
-    if (state.progressBudget.exhausted) {
-      finalization.arm(!state.clientCancelled && !state.recursiveDeleteDenied &&
-        !state.unrequestedOperationsAborted && !state.webLoopAborted && !state.ownerQuestions &&
-        !state.operationsRequired && !state.exactDownloadRequested && !state.extensionCompletionGate?.active &&
-        !state.extensionPendingHandoff && !state.managedTeamCoordinator);
-    }
+    if (state.progressBudget.exhausted) finalization.arm(progressFinalizationEligible(state));
     return finalization;
   }
 
@@ -7086,7 +7089,7 @@ export function createToolLoopGuard({
     // tool call during the answer turn forfeits that turn and ends the run at
     // this boundary (the provider stream has already completed).
     if (state?.progressBudget.exhausted && progressFinalization(state).phase !== 'unavailable') {
-      if (state.progressFinalization.toolBoundary() === 'instruct') {
+      if (state.progressFinalization.toolBoundary(state.operationsPromptRound) === 'instruct') {
         return {block:true, blockReason:PROGRESS_FINALIZATION_INSTRUCTION};
       }
       stopExhaustedRun(state, runId);
@@ -8702,6 +8705,18 @@ export function createToolLoopGuard({
         terminal.blocks = 1;
         terminal.round = state.operationsPromptRound;
         return { block: true, blockReason: reason };
+      }
+      // The research loop stops this response exactly as the progress budget
+      // does: no further tool runs, and this refusal carries the one-time
+      // tool-free answer instruction instead of an immediate abort. A tool
+      // call in that answer turn, or an ineligible run, still aborts.
+      if (state.progressFinalization.phase === "idle" && progressFinalizationEligible(state)) {
+        state.researchStopped = true;
+        state.progressBudget.stop();
+        warn(`Pixel stopped a repeated web-tool loop for run ${runId}; one tool-free answer turn remains`);
+        if (progressFinalization(state).toolBoundary(state.operationsPromptRound) === "instruct") {
+          return { block: true, blockReason: PROGRESS_FINALIZATION_INSTRUCTION };
+        }
       }
       let aborted = false;
       try {
@@ -11377,9 +11392,11 @@ export function createToolLoopGuard({
       if (answer) {
         return {status: 'failed', text: composeProgressFinalization(answer, {preview,
           previewExpected: Boolean(state.workspacePreviewRequired && !state.workspacePreviewForbidden),
-          verificationStatus: state.latestVerificationStatus,
+          verificationStatus: state.latestVerificationStatus, researchLimit: state.researchStopped,
           unverifiedLinks: state.completionAssurance.unverifiedCitations(answer)}), ...receipt};
       }
+      // Without an answer, a research-loop stop keeps its specific text.
+      if (state.researchStopped) return {status: 'failed', text: WEB_LOOP_DELIVERY_REASON, ...receipt};
       return {status: 'failed', text: RUN_PROGRESS_STOP_REASON + (preview
         ? `\n\n[Open last published preview](${preview.url})\n\nThis is the last verified publication, not proof that all requested work completed.` : ''),
         ...receipt};
