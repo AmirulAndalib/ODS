@@ -146,10 +146,10 @@ function Resolve-QwenTierConfig {
         "SH_COMPACT" {
             return @{
                 TierName   = "Strix Halo Compact"
-                LlmModel   = "qwen3-30b-a3b"
-                GgufFile   = "Qwen3-30B-A3B-Q4_K_M.gguf"
-                GgufUrl    = "https://huggingface.co/unsloth/Qwen3-30B-A3B-GGUF/resolve/main/Qwen3-30B-A3B-Q4_K_M.gguf"
-                GgufSha256 = "9f1a24700a339b09c06009b729b5c809e0b64c213b8af5b711b3dbdfd0c5ba48"
+                LlmModel   = "qwen3.6-35b-a3b"
+                GgufFile   = "Qwen3.6-35B-A3B-UD-Q4_K_M.gguf"
+                GgufUrl    = "https://huggingface.co/unsloth/Qwen3.6-35B-A3B-GGUF/resolve/main/Qwen3.6-35B-A3B-UD-Q4_K_M.gguf"
+                GgufSha256 = "ac0e2c1189e055faa36eff361580e79c5bd6f8e76bffb4ce547f167d53e31a61"
                 MaxContext = 131072
                 ModelProfileRequested = "qwen"
                 ModelProfileEffective = "qwen"
@@ -202,11 +202,11 @@ function Resolve-QwenTierConfig {
         "3" {
             return @{
                 TierName   = "Pro"
-                LlmModel   = "qwen3-30b-a3b"
-                GgufFile   = "Qwen3-30B-A3B-Q4_K_M.gguf"
-                GgufUrl    = "https://huggingface.co/unsloth/Qwen3-30B-A3B-GGUF/resolve/main/Qwen3-30B-A3B-Q4_K_M.gguf"
-                GgufSha256 = "9f1a24700a339b09c06009b729b5c809e0b64c213b8af5b711b3dbdfd0c5ba48"
-                MaxContext = 32768
+                LlmModel   = "qwen3.5-27b"
+                GgufFile   = "Qwen3.5-27B-Q4_K_M.gguf"
+                GgufUrl    = "https://huggingface.co/unsloth/Qwen3.5-27B-GGUF/resolve/main/Qwen3.5-27B-Q4_K_M.gguf"
+                GgufSha256 = "84b5f7f112156d63836a01a69dc3f11a6ba63b10a23b8ca7a7efaf52d5a2d806"
+                MaxContext = 65536
                 ModelProfileRequested = "qwen"
                 ModelProfileEffective = "qwen"
                 LlamaServerImage = ""
@@ -216,10 +216,10 @@ function Resolve-QwenTierConfig {
         "4" {
             return @{
                 TierName   = "Enterprise"
-                LlmModel   = "qwen3-30b-a3b"
-                GgufFile   = "Qwen3-30B-A3B-Q4_K_M.gguf"
-                GgufUrl    = "https://huggingface.co/unsloth/Qwen3-30B-A3B-GGUF/resolve/main/Qwen3-30B-A3B-Q4_K_M.gguf"
-                GgufSha256 = "9f1a24700a339b09c06009b729b5c809e0b64c213b8af5b711b3dbdfd0c5ba48"
+                LlmModel   = "qwen3.6-35b-a3b"
+                GgufFile   = "Qwen3.6-35B-A3B-UD-Q4_K_M.gguf"
+                GgufUrl    = "https://huggingface.co/unsloth/Qwen3.6-35B-A3B-GGUF/resolve/main/Qwen3.6-35B-A3B-UD-Q4_K_M.gguf"
+                GgufSha256 = "ac0e2c1189e055faa36eff361580e79c5bd6f8e76bffb4ce547f167d53e31a61"
                 MaxContext = 131072
                 ModelProfileRequested = "qwen"
                 ModelProfileEffective = "qwen"
@@ -1214,12 +1214,12 @@ function ConvertTo-ModelFromTier {
         "^CLOUD$"                { return "anthropic/claude-sonnet-4-6" }
         "^NV_ULTRA$"             { return "qwen3-coder-next" }
         "^SH_LARGE$"             { return "qwen3.6-35b-a3b" }
-        "^(SH_COMPACT|SH)$"      { return "qwen3-30b-a3b" }
+        "^(SH_COMPACT|SH)$"      { return "qwen3.6-35b-a3b" }
         "^(0|T0)$"               { return "qwen3.5-2b" }
         "^(1|T1)$"               { return "qwen3.5-9b" }
         "^(2|T2)$"               { return "qwen3.5-9b" }
-        "^(3|T3)$"               { return "qwen3-30b-a3b" }
-        "^(4|T4)$"               { return "qwen3-30b-a3b" }
+        "^(3|T3)$"               { return "qwen3.5-27b" }
+        "^(4|T4)$"               { return "qwen3.6-35b-a3b" }
         default                  { return "" }
     }
 }

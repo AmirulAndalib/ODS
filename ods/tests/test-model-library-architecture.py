@@ -146,3 +146,25 @@ def test_demoted_models_say_why():
 
 if __name__ == "__main__":
     raise SystemExit(pytest.main([__file__, "-q"]))
+
+
+def _qwen_tier_map_files() -> dict[str, set[str]]:
+    files = {}
+    linux = (ROOT / "installers" / "lib" / "tier-map.sh").read_text(encoding="utf-8")
+    linux = linux[linux.index("set_qwen_tier_config()"):linux.index("set_gemma4_tier_config()")]
+    files["installers/lib/tier-map.sh"] = set(re.findall(r'GGUF_FILE="([^"]+)"', linux))
+    macos = (ROOT / "installers" / "macos" / "lib" / "tier-map.sh").read_text(encoding="utf-8")
+    macos = macos[macos.index("set_qwen_tier_config()"):macos.index("set_gemma4_tier_config()")]
+    files["installers/macos/lib/tier-map.sh"] = set(re.findall(r'GGUF_FILE="([^"]+)"', macos))
+    windows = (ROOT / "installers" / "windows" / "lib" / "tier-map.ps1").read_text(encoding="utf-8")
+    windows = windows[windows.index("function Resolve-QwenTierConfig"):windows.index("function Resolve-GemmaTierConfig")]
+    files["installers/windows/lib/tier-map.ps1"] = set(re.findall(r'GgufFile\s*=\s*"([^"]+)"', windows))
+    return {name: {item for item in found if item} for name, found in files.items()}
+
+
+def test_tier_map_defaults_are_install_recommendations():
+    installable = {model["gguf_file"] for model in _models() if _installable(model)}
+    for tier_map, files in _qwen_tier_map_files().items():
+        assert files, tier_map
+        stale = sorted(files - installable)
+        assert not stale, (tier_map, stale)

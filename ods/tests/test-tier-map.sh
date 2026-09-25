@@ -81,9 +81,10 @@ echo "Tier 3 (Pro):"
 run_tier 3
 assert_eq "TIER_NAME"   "Pro"                                  "$TIER_NAME"
 assert_eq "MODEL_PROFILE_EFFECTIVE" "qwen"                   "$MODEL_PROFILE_EFFECTIVE"
-assert_eq "LLM_MODEL"   "qwen3-30b-a3b"                       "$LLM_MODEL"
-assert_eq "GGUF_FILE"   "Qwen3-30B-A3B-Q4_K_M.gguf"           "$GGUF_FILE"
-assert_eq "MAX_CONTEXT"  "32768"                                "$MAX_CONTEXT"
+assert_eq "LLM_MODEL"   "qwen3.5-27b"                         "$LLM_MODEL"
+assert_eq "GGUF_FILE"   "Qwen3.5-27B-Q4_K_M.gguf"             "$GGUF_FILE"
+assert_eq "MAX_CONTEXT"  "65536"                                "$MAX_CONTEXT"
+assert_eq "LLM_MODEL_SIZE_MB" "16700"                           "$LLM_MODEL_SIZE_MB"
 echo ""
 
 # --- Tier 4: Enterprise ---
@@ -91,9 +92,10 @@ echo "Tier 4 (Enterprise):"
 run_tier 4
 assert_eq "TIER_NAME"   "Enterprise"                           "$TIER_NAME"
 assert_eq "MODEL_PROFILE_EFFECTIVE" "qwen"                   "$MODEL_PROFILE_EFFECTIVE"
-assert_eq "LLM_MODEL"   "qwen3-30b-a3b"                       "$LLM_MODEL"
-assert_eq "GGUF_FILE"   "Qwen3-30B-A3B-Q4_K_M.gguf"           "$GGUF_FILE"
+assert_eq "LLM_MODEL"   "qwen3.6-35b-a3b"                     "$LLM_MODEL"
+assert_eq "GGUF_FILE"   "Qwen3.6-35B-A3B-UD-Q4_K_M.gguf"      "$GGUF_FILE"
 assert_eq "MAX_CONTEXT"  "131072"                               "$MAX_CONTEXT"
+assert_eq "LLM_MODEL_SIZE_MB" "21110"                           "$LLM_MODEL_SIZE_MB"
 echo ""
 
 # --- NV_ULTRA ---
@@ -135,8 +137,8 @@ echo "SH_COMPACT (Strix Halo Compact):"
 run_tier SH_COMPACT
 assert_eq "TIER_NAME"   "Strix Halo Compact"                  "$TIER_NAME"
 assert_eq "MODEL_PROFILE_EFFECTIVE" "qwen"                   "$MODEL_PROFILE_EFFECTIVE"
-assert_eq "LLM_MODEL"   "qwen3-30b-a3b"                       "$LLM_MODEL"
-assert_eq "GGUF_FILE"   "Qwen3-30B-A3B-Q4_K_M.gguf"           "$GGUF_FILE"
+assert_eq "LLM_MODEL"   "qwen3.6-35b-a3b"                     "$LLM_MODEL"
+assert_eq "GGUF_FILE"   "Qwen3.6-35B-A3B-UD-Q4_K_M.gguf"      "$GGUF_FILE"
 assert_eq "MAX_CONTEXT"  "131072"                               "$MAX_CONTEXT"
 echo ""
 
