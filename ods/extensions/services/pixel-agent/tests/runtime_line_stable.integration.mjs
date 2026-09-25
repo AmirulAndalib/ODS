@@ -111,7 +111,7 @@ test('every Pixel chat reaches a real provider with the same system prompt', {sk
     assert.match(upstreamLine, new RegExp(`^Runtime: agent=pixel \\| session=agent:pixel:openai-user:${MAIN} \\| sessionId=[0-9a-f-]{36} \\| host=`), upstreamLine);
     assert.equal(mainB, mainA, 'the resident chat itself is stable');
     assert.notEqual(side, mainA);
-    const split = [...mainA].findIndex((character, index) => character !== side[index]);
+    let split = 0; while (split < mainA.length && mainA[split] === side[split]) split++;
     assert.ok(mainA.slice(0, split).endsWith('Runtime: agent=pixel | session=agent:pixel:openai-user:ods-'),
       `upstream chats diverge at the session key, not at ${JSON.stringify(mainA.slice(split - 40, split + 10))}`);
     assert.equal(stablePixelRuntimeLine(mainA), stablePixelRuntimeLine(side), 'the key and id are the only per-chat text');

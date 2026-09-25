@@ -15,8 +15,11 @@
 // the same bytes for every Pixel chat on a host, so a new chat reuses the
 // cached prefix up to its own first message.
 //
-// Only the Runtime line of the `pixel` agent is changed; the rest of the
-// prompt, other agents and every message are left as they are.
+// Only the two fields of the `pixel` agent's Runtime line are removed; the
+// rest of the prompt and other agents are left as they are. OpenClaw passes
+// message text through the same replacement on each model call, so a message
+// line that itself starts with this Runtime prefix and these fields loses them
+// too, identically on every call; stored transcripts are never rewritten.
 
 export const PIXEL_RUNTIME_LINE_PREFIX = 'Runtime: agent=pixel';
 
@@ -38,8 +41,9 @@ export function stablePixelRuntimeLine(text) {
 
 // OpenClaw applies registered input text transforms to the system prompt when
 // it builds each attempt, before hook context is appended, and to message text
-// on each model call. Registration is skipped on runtimes without the API and
-// when the owner disabled this plugin's prompt changes.
+// on each model call (inside its tool-result projection, which keeps its own
+// state on the original messages). Registration is skipped on runtimes
+// without the API and when the owner disabled this plugin's prompt changes.
 export function registerStableRuntimeLine(api) {
   if (typeof api?.registerTextTransforms !== 'function') return false;
   if (api.config?.plugins?.entries?.['pixel-ods']?.hooks?.allowPromptInjection === false) return false;

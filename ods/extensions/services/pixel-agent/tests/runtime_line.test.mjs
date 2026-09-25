@@ -45,7 +45,7 @@ test('the Runtime line keeps every field except the chat session key and id', ()
 test('a new chat and the resident chat get byte-identical system prompts', () => {
   const main = prompt(runtimeSection(MAIN)), side = prompt(runtimeSection(SIDE));
   assert.notEqual(main, side);
-  const firstDifference = [...main].findIndex((character, index) => character !== side[index]);
+  let firstDifference = 0; while (main[firstDifference] === side[firstDifference]) firstDifference++;
   assert.ok(main.slice(0, firstDifference).endsWith('session=agent:pixel:openai-user:ods-'),
     'without the transform the chats diverge inside the session key');
   assert.equal(stablePixelRuntimeLine(main), stablePixelRuntimeLine(side));
@@ -80,6 +80,12 @@ test('other agents, other lines and later fields are not touched', () => {
   assert.equal(stablePixelRuntimeLine(other), other);
   const quoted = `The owner pasted:\n> Runtime: agent=pixel | session=${MAIN.key} | host=h`;
   assert.equal(stablePixelRuntimeLine(quoted), quoted, 'only a line that starts with the Runtime prefix');
+  // OpenClaw also passes message text through input transforms. A pasted line
+  // that starts with the exact prefix loses the same two fields, the same way
+  // on every call, so the request stays append-only.
+  const pasted = `Here is my prompt:\nRuntime: agent=pixel | session=${MAIN.key} | sessionId=${MAIN.id} | host=h\nthanks`;
+  assert.equal(stablePixelRuntimeLine(pasted), 'Here is my prompt:\nRuntime: agent=pixel | host=h\nthanks');
+  assert.equal(stablePixelRuntimeLine(stablePixelRuntimeLine(pasted)), stablePixelRuntimeLine(pasted));
   // Background exec sessions are model-facing (process log/poll) and stay.
   const processes = 'Active background exec sessions in this scope:\n- warm-otter running pid=41 :: npm run dev';
   const withProcesses = stablePixelRuntimeLine(prompt(runtimeSection({...MAIN, processes})));
