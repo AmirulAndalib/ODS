@@ -20,6 +20,22 @@ A locked Windows binary also fails without terminating its process: finish activ
 work and rerun the installer. Configuration/session directories are not removed.
 The existing ODS model-route configuration migration still runs after success.
 
+OpenCode 1.18.32 is built with Bun 1.3.14. That runtime copies each bundled
+native library (`.so`, `.dylib`, `.dll`, `.node`) to a new randomly named file
+in the temp directory whenever it loads it, and never deletes the copy
+([#42700](https://github.com/anomalyco/opencode/issues/42700),
+[#49283](https://github.com/anomalyco/opencode/issues/49283)). The upstream fix
+needs Bun 1.4 or later; the 1.18.x upgrade
+([#44946](https://github.com/anomalyco/opencode/pull/44946)) is still open.
+ODS therefore starts
+its managed OpenCode with `BUN_TMPDIR` set to an ODS-owned directory, emptied on
+every start: `~/.cache/ods/opencode-bun-tmp` (systemd `ExecStartPre`, also removed
+by `ExecStopPost`), `~/Library/Caches/ODS/opencode-bun-tmp` (LaunchAgent wrapper),
+and `%LOCALAPPDATA%\ODS\opencode-bun-tmp` (Windows launcher). `TMPDIR` for
+OpenCode's tools is unchanged. OpenCode run directly by a user (TUI, `opencode
+run`) is not covered. The Windows host-agent restart after a model switch starts
+`opencode.exe` without the launcher, so it is not covered either.
+
 ODS launchers enable the upstream `websearch` tool for local model providers via
 `OPENCODE_ENABLE_EXA=1`. Upstream uses Exa by default and ODS preserves an explicit
 `OPENCODE_WEBSEARCH_PROVIDER` override in the service/launcher environment.

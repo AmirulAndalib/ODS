@@ -294,6 +294,9 @@ jobs:
       - name: brave-search searxng Compat Tests
         run: bash tests/test-brave-search-searxng-compat.sh
 
+      - name: OpenCode Bun Temp Confinement Tests
+        run: bash tests/test-opencode-bun-tmpdir.sh
+
       - name: ODS Doctor Tests
         run: |
           bash tests/test-ods-doctor.sh

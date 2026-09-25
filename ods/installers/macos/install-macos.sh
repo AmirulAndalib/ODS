@@ -2978,6 +2978,15 @@ for service in (data.get("services") or {}).values():
     <string>${OPENCODE_PLIST_LABEL}</string>
     <key>ProgramArguments</key>
     <array>
+        <!-- OpenCode 1.18.x (Bun 1.3.14) copies bundled native libraries to a
+             new temp file on every load and never deletes them
+             (anomalyco/opencode#42700, #49283). Empty the ODS-owned
+             BUN_TMPDIR on every start, then exec OpenCode itself. -->
+        <string>/bin/sh</string>
+        <string>-c</string>
+        <string>dir="\$1"; shift; rm -rf "\$dir" &amp;&amp; mkdir -p -m 0700 "\$dir" &amp;&amp; export BUN_TMPDIR="\$dir" &amp;&amp; exec "\$@"</string>
+        <string>ods-opencode-web</string>
+        <string>${OPENCODE_BUN_TMPDIR}</string>
         <string>${OPENCODE_BIN}</string>
         <string>web</string>
         <string>--port</string>

@@ -75,6 +75,13 @@ if ($_ocReady -and (Test-Path $script:OPENCODE_EXE)) {
 Remove-Item Env:OPENCODE_SERVER_PASSWORD -ErrorAction SilentlyContinue
 `$env:OPENCODE_ENABLE_EXA = '1'
 # Preserve inherited OPENCODE_WEBSEARCH_PROVIDER; enabled Exa is the default.
+# OpenCode 1.18.x (Bun 1.3.14) copies bundled native libraries to a new temp
+# file on every load and never deletes them (anomalyco/opencode#42700).
+# Start from an emptied ODS-owned BUN_TMPDIR.
+`$bunTmp = Join-Path `$env:LOCALAPPDATA 'ODS\opencode-bun-tmp'
+if (Test-Path -LiteralPath `$bunTmp) { Remove-Item -LiteralPath `$bunTmp -Recurse -Force }
+New-Item -ItemType Directory -Path `$bunTmp -Force | Out-Null
+`$env:BUN_TMPDIR = `$bunTmp
 Set-Location -LiteralPath '$_ocDirLiteral'
 & '$_ocExeLiteral' web --port $($script:OPENCODE_PORT) --hostname 127.0.0.1
 exit `$LASTEXITCODE

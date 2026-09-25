@@ -65,6 +65,8 @@ OPENCODE_CONFIG_DIR="$HOME/.config/opencode"
 OPENCODE_PORT=3003
 OPENCODE_PLIST_LABEL="com.ods.opencode-web"
 OPENCODE_PLIST="$HOME/Library/LaunchAgents/${OPENCODE_PLIST_LABEL}.plist"
+# ODS-owned BUN_TMPDIR for the managed service; emptied on every service start.
+OPENCODE_BUN_TMPDIR="$HOME/Library/Caches/ODS/opencode-bun-tmp"
 
 # Docker
 DOCKER_COMPOSE_CMD="docker compose"

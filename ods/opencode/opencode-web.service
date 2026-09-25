@@ -22,6 +22,15 @@ Environment=OPENCODE_ENABLE_EXA=1
 # OPENCODE_SERVER_PASSWORD as a Basic Auth password when present, but this
 # localhost-only web UI should be reachable without a login prompt.
 UnsetEnvironment=OPENCODE_SERVER_PASSWORD
+# OpenCode 1.18.x embeds Bun 1.3.14, which copies bundled native libraries to
+# a new randomly named temp file on every load and never deletes them
+# (anomalyco/opencode#42700, #49283). Keep those copies in an ODS-owned
+# directory that is emptied before each start and removed after stop.
+# BUN_TMPDIR leaves TMPDIR for OpenCode's tools unchanged.
+Environment="BUN_TMPDIR=__HOME__/.cache/ods/opencode-bun-tmp"
+ExecStartPre=rm -rf "__HOME__/.cache/ods/opencode-bun-tmp"
+ExecStartPre=mkdir -p -m 0700 "__HOME__/.cache/ods/opencode-bun-tmp"
+ExecStopPost=rm -rf "__HOME__/.cache/ods/opencode-bun-tmp"
 
 # Hardening
 NoNewPrivileges=true
