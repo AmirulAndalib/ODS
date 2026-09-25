@@ -135,21 +135,6 @@ def test_cloud_default_is_allowlisted() -> None:
 
 def test_every_shipped_anthropic_id_is_allowlisted() -> None:
     found = scan_anthropic_ids()
-    # Prove the scan reaches the files that carry the default before trusting
-    # an all-clear from it.
-    default_id = CLOUD_DEFAULT_MODEL.split("/", 1)[1]
-    default_sites = {where.split(":", 1)[0] for where in found.get(default_id, [])}
-    for required in (
-        "installers/lib/tier-map.sh",
-        "installers/macos/lib/tier-map.sh",
-        "installers/windows/lib/tier-map.ps1",
-        "config/litellm/cloud.yaml",
-        "config/litellm/hybrid.yaml",
-        "config/litellm/switchboard.yaml",
-        "scripts/render-runtime-configs.py",
-    ):
-        assert required in default_sites, f"scan did not find the cloud default in {required}"
-
     unknown = {
         model_id: sites
         for model_id, sites in found.items()
@@ -163,6 +148,21 @@ def test_every_shipped_anthropic_id_is_allowlisted() -> None:
             for model_id, sites in sorted(unknown.items())
         )
     )
+
+    # An all-clear only counts if the scan reached the files that carry the
+    # default.
+    default_id = CLOUD_DEFAULT_MODEL.split("/", 1)[1]
+    default_sites = {where.split(":", 1)[0] for where in found.get(default_id, [])}
+    for required in (
+        "installers/lib/tier-map.sh",
+        "installers/macos/lib/tier-map.sh",
+        "installers/windows/lib/tier-map.ps1",
+        "config/litellm/cloud.yaml",
+        "config/litellm/hybrid.yaml",
+        "config/litellm/switchboard.yaml",
+        "scripts/render-runtime-configs.py",
+    ):
+        assert required in default_sites, f"scan did not find the cloud default in {required}"
 
 
 def test_linux_and_macos_tier_maps_resolve_cloud_default() -> None:
