@@ -1,5 +1,6 @@
 import {createAgentSkillTool} from './agent-skills.mjs';
 import {registerBootstrapCapabilities} from './bootstrap-capabilities.mjs';
+import {registerStableRuntimeLine} from './runtime-line.mjs';
 import {createRuntimeIdentity} from './runtime-identity.mjs';
 import {fileURLToPath} from 'node:url';
 import {createActivityTool, ACTIVITY_CONTRACT} from './activity-display.mjs';
@@ -264,6 +265,8 @@ export default definePluginEntry({
       execControl: () => execCancellationControl, runtimeVersion: OPENCLAW_VERSION,
       hooksAllowed: api.config?.plugins?.entries?.["pixel-ods"]?.hooks?.allowConversationAccess === true});
     registerBootstrapCapabilities(api);
+    // One system prompt for every Pixel chat: no per-chat session key or id.
+    registerStableRuntimeLine(api);
     const managedRuntime = managedRuntimeRegistry.register(api, accessRuntime);
     if (managedRuntime) currentManagedRuntime = managedRuntime;
     contextCompaction ??= createContextCompaction({agentId:AGENT_ID,
