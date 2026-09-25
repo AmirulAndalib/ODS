@@ -296,6 +296,16 @@ const withoutComments = (source, kind) => kind === 'style'
 const VOID_ELEMENTS = new Set(['area','base','br','col','embed','hr','img','input','link','meta','param','source','track','wbr']);
 const TEXT_ATTRIBUTE = /^(?:aria-label|title|alt|placeholder|value|label|data-[\w-]+)$/i;
 
+// A heading's accessible name as authored: its aria-label, else its text with
+// whitespace collapsed (no quote, dash or case folding). aria-labelledby, or a
+// name the inspection locator cannot carry, leaves it unknown.
+const MAX_HEADING_NAME_CHARS = 120;
+function headingName(element, text) {
+  if (element.labelledBy) return undefined;
+  const name = (element.label ?? text).replace(/[\t\n\f\r ]+/g, ' ').trim();
+  return name && Array.from(name).length <= MAX_HEADING_NAME_CHARS && !/[\p{C}\u2028\u2029]/u.test(name) ? name : undefined;
+}
+
 // A bounded static reading of authored HTML: element and text-node strings,
 // titles, h1s and labelling attributes. Inline scripts and styles are opaque.
 function readHtml(source, corpus) {
@@ -321,7 +331,8 @@ function readHtml(source, corpus) {
       if (element.name === 'title') corpus.titles.push(...values);
       if (element.name === 'h1') corpus.h1s.push(...values);
       if (/^h[1-6]$/.test(element.name) && values.length && corpus.headings.length <= MAX_HEADINGS) {
-        corpus.headings.push({level: Number(element.name[1]), family: element.family, forms: values});
+        corpus.headings.push({level: Number(element.name[1]), family: element.family, forms: values,
+          name: headingName(element, joined.slice(element.joined))});
       }
     }
   };
@@ -335,9 +346,11 @@ function readHtml(source, corpus) {
       if (depth >= 0) close(depth);
       continue;
     }
-    let classes = '';
+    let classes = '', label;
+    const labelledBy = /(?:^|\s)aria-labelledby(?=[\s=/]|$)/i.test(match[3]);
     for (const attribute of match[3].matchAll(/([^\s=/"'>]+)\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s"'>]+))/g)) {
       if (/^class$/i.test(attribute[1])) classes = attribute[2] ?? attribute[3] ?? attribute[4] ?? '';
+      if (/^aria-label$/i.test(attribute[1])) label = decodeEntities(attribute[2] ?? attribute[3] ?? attribute[4] ?? '');
       if (!TEXT_ATTRIBUTE.test(attribute[1])) continue;
       const value = decodeEntities(attribute[2] ?? attribute[3] ?? attribute[4] ?? '');
       corpus.attributes.push(value);
@@ -353,7 +366,7 @@ function readHtml(source, corpus) {
     if (!VOID_ELEMENTS.has(name) && !/\/\s*$/.test(match[3]) && stack.length < 1024) {
       // Sibling card headings share their tag and class list.
       const family = `${name}.${classes.split(/\s+/).filter(Boolean).sort().join('.')}`;
-      stack.push({name, joined: joined.length, spaced: spaced.length, family});
+      stack.push({name, joined: joined.length, spaced: spaced.length, family, label, labelledBy});
     }
   }
   text(html.slice(at));
@@ -376,7 +389,7 @@ function textCorpus(files) {
     titles: corpus.titles, h1s: corpus.h1s,
     // Every hN element in document order, with its level and relaxed forms.
     headings: () => form('headings', () => corpus.headings.length > MAX_HEADINGS ? []
-      : corpus.headings.map(({level, family, forms}) => ({level, family, forms, keys: forms.map(relaxed)}))),
+      : corpus.headings.map(({level, family, forms, name}) => ({level, family, forms, name, keys: forms.map(relaxed)}))),
     opaque: exact => form(`opaque:${exact}`, () => corpus.opaque.map(exact ? canonicalText : folded)),
     visible: exact => form(`visible:${exact}`, () => [...corpus.visible, ...corpus.attributes].map(exact ? canonicalText : folded)),
     elements: () => form('elements', () => new Set(corpus.elements.map(relaxed))),
@@ -548,6 +561,24 @@ export function requestedTextCheck(literals, preview, {receipt, trackedContent, 
     if (!files && !published) return undefined;
     return Object.freeze({siteId: preview.siteId, sha256: preview.sha256,
       missing: Object.freeze([...files ? missingRequestedText(text, files) : [], ...published ?? []].map(Object.freeze))});
+  } catch {
+    return undefined;
+  }
+}
+
+// The exact accessible name of the one heading in the published snapshot whose
+// text is the owner's phrase (ignoring case, quotes, dashes and edge
+// punctuation), from the same digest-bound bytes as requestedTextCheck. It
+// names an inspection locator; it verifies nothing. Absent, duplicated,
+// script-rendered or unbound headings yield undefined.
+export function publishedHeadingName(text, preview, {receipt, trackedContent, workspaceRoot} = {}) {
+  try {
+    const key = relaxed(text);
+    if (!key || !preview || !/^[a-f0-9]{64}$/.test(preview.sha256 ?? '') || !Number.isSafeInteger(preview.files) ||
+        preview.files < 1 || preview.files > 128 || typeof preview.relativeDirectory !== 'string') return undefined;
+    const files = trackedSnapshot(preview, trackedContent) ?? workspaceSnapshot(preview, receipt, workspaceRoot);
+    const matches = files ? textCorpus(files).headings().filter(heading => heading.keys.includes(key)) : [];
+    return matches.length === 1 ? matches[0].name : undefined;
   } catch {
     return undefined;
   }

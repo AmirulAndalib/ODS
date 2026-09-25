@@ -224,6 +224,38 @@ generates"). The names bind to the published directory's name and are checked
 against the receipt's complete published path list.
 `tests/requested_published_files.test.mjs` replays that case.
 
+## Show/hide inspection coverage
+
+When the owner asks for show/hide behavior, delivery needs a passing
+`pixel_ods_workspace_preview_inspect` plan that asserts one element with
+opposite visibility before and after a click. Laptop round 100 (Qwen3.5-9B)
+inspected `assert-visible(button "Show sold out")`, `click(button)`,
+`assert-visible(".event-card.sold-out.revealed")`. Every step passed, the tool
+said "Preview inspection passed" with a caveat, the model answered "fully
+verified", and finalization then failed the delivery. The pinned harness drops
+a `before_agent_finalize` revision after any plugin tool call, so only the
+inspection result can steer the model.
+
+For such a request the run guard binds a requirement to the exact pending
+inspection call (a direct call, or the Tool Search child of a pending
+`tool_call`). A passing receipt whose plan has no such transition then returns
+`isError: true` with `details.status: "incomplete"` and
+`errorCode: "transition_untested"` (the capsule receipt stays in
+`details.receipt`). The text starts `Preview inspection INCOMPLETE - not
+verified.`, names the missing assertions, and gives ready-to-send arguments:
+the model's own first click locator (else the owner's quoted control name) and
+the target. The target is the owner-named element's heading, with its exact
+accessible name read from the digest-bound published bytes; else the model's
+own post-click assertion; else the owner's phrase as a heading name. The
+direction is hidden first unless the owner asked the click to hide something.
+A later turn that preserves the behavior keeps the earlier wording. A passing
+transition of the same snapshot earlier in the run, a failed receipt, page
+errors, and requests without show/hide behavior are unchanged. Incomplete is
+never interaction evidence. A Tool Search child inspection also keeps its
+parent's earlier proof, so a later read-only check still preserves it.
+`tests/inspection_transition_coverage.test.mjs` replays both round 100 turns
+and sends the suggested arguments back through the guard.
+
 ## Saved project delivery
 
 A model can successfully write an HTML project and then stop without calling
