@@ -1480,6 +1480,12 @@ function canonicalPendingProcessSessionId(params, pendingSessions) {
   return alias[1];
 }
 
+// The pinned runtime runs a Tool Search catalog tool under the child ID
+// `tool_search_code:<sanitized parent ID>:<tool>:<sequence>`.
+function toolSearchChildPrefix(parentId) {
+  return `tool_search_code:${String(parentId).trim().replace(/[^A-Za-z0-9_.:-]+/g, "_").slice(0, 120) || "call"}:`;
+}
+
 function toolCallFailed(event) {
   if (event?.error) return true;
   const result = event?.result;
@@ -9784,8 +9790,7 @@ export function createToolLoopGuard({
           if (pending.transport !== "tool_call" || pending.runId !== runId ||
               pending.selectedToolName !== directMutation.name ||
               !isDeepStrictEqual(pending.selectedParams, event.params)) return false;
-          const parent = parentId.trim().replace(/[^A-Za-z0-9_.:-]+/g, "_").slice(0, 120) || "call";
-          const prefix = `tool_search_code:${parent}:${directMutation.name}:`;
+          const prefix = `${toolSearchChildPrefix(parentId)}${directMutation.name}:`;
           return toolCallId.startsWith(prefix) && /^[1-9][0-9]*$/.test(toolCallId.slice(prefix.length));
         })
       : [];
@@ -9882,8 +9887,7 @@ export function createToolLoopGuard({
       typeof toolCallId === 'string' ? [...pendingToolRuns].filter(([parentId,pending]) => {
         if (pending.transport !== 'tool_call' || pending.runId !== runId ||
             pending.selectedToolName !== toolName || !isDeepStrictEqual(pending.selectedParams,event.params)) return false;
-        const parent = parentId.trim().replace(/[^A-Za-z0-9_.:-]+/g,'_').slice(0,120) || 'call';
-        const prefix = `tool_search_code:${parent}:${toolName}:`;
+        const prefix = `${toolSearchChildPrefix(parentId)}${toolName}:`;
         return toolCallId.startsWith(prefix) && /^[1-9][0-9]*$/.test(toolCallId.slice(prefix.length));
       }) : [];
     if (state.previewRevalidationCandidate && revalidationParents.length !== 1 && !noWorkspaceEffect) {
@@ -10902,6 +10906,15 @@ export function createToolLoopGuard({
     const toolCallId = context?.toolCallId ?? event?.toolCallId ?? event?.message?.toolCallId;
     const pending = pendingToolRuns.get(toolCallId);
     pendingToolRuns.delete(toolCallId);
+    // A Tool Search child's result is folded into this outer receipt and never
+    // persisted on its own, so its pending run ends here. Otherwise it stays
+    // pending and finalization can never compare the published bytes.
+    if (typeof toolCallId === 'string' && toolCallId && !toolCallId.startsWith('tool_search_code:')) {
+      const prefix = toolSearchChildPrefix(toolCallId);
+      for (const id of [...pendingToolRuns.keys()]) {
+        if (id.startsWith(prefix) && /^[A-Za-z0-9_-]+:[1-9][0-9]*$/.test(id.slice(prefix.length))) pendingToolRuns.delete(id);
+      }
+    }
     // Native validation/loop rejections skip before_tool_call and persist with
     // a sessionKey but no runId. Resolve only the currently owned session;
     // otherwise these failures never consume the run's progress budget.

@@ -16386,8 +16386,8 @@ for(const name of ['write','read','exec']) test(`nested core ${name} waits for i
   const childContext={...context,toolName:name,toolCallId:child};
   const childPrepared=guard.beforeToolCall({toolName:name,toolCallId:child,params:args},childContext);
   assert.notEqual(childPrepared?.block,true,childPrepared?.blockReason);
+  // As in production, only the outer tool_call result is persisted.
   guard.afterToolCall({toolName:name,toolCallId:child,params:childPrepared?.params??args,result},childContext);
-  guard.toolResultPersist({toolName:name,toolCallId:child,message:{role:'toolResult',toolName:name,toolCallId:child,...result}},childContext);
   assert.equal(await guard.revalidateWorkspacePreview({},context),false);
   assert.equal(probes,0);
   const outerResult=wrappedCoreResult(name,result);
@@ -16397,6 +16397,40 @@ for(const name of ['write','read','exec']) test(`nested core ${name} waits for i
   assert.equal(probes,1);
 });
 
+
+// strixy round 069: publication through Tool Search. OpenClaw runs the catalog
+// tool under a child ID with its own before/after hooks, but persists only the
+// outer tool_call result, so the child run must end with the outer receipt.
+for(const id of ['pixel_ods_workspace_preview','openclaw:pixel-ods:pixel_ods_workspace_preview']) test(`a Tool Search publication arms the host comparison: ${id}`,async()=>{
+  let probes=0;
+  const context={agentId:'pixel',runId:'run-1',sessionId:'session-1',sessionKey:'agent:pixel:test'};
+  const guard=createToolLoopGuard({verifyWorkspacePreview:async()=>{probes++;return true;}});
+  guard.observeRun(context,'pixel',{prompt:'Build and publish a website in existing signal-garden.'});
+  const call=(toolName,toolCallId,params,result,{persist=true}={})=>{
+    const ctx={...context,toolName,toolCallId};
+    const prepared=guard.beforeToolCall({toolName,toolCallId,params},ctx);
+    assert.notEqual(prepared?.block,true,prepared?.blockReason);
+    guard.afterToolCall({toolName,toolCallId,params:prepared?.params??params,result},ctx);
+    if(persist)guard.toolResultPersist({toolName,toolCallId,message:{role:'toolResult',toolName,toolCallId,...result}},ctx);
+  };
+  const write={path:'signal-garden/index.html',content:'<!doctype html><title>Model-authored garden</title>'};
+  call('write','write',write,{content:[{type:'text',text:'written'}],details:{status:'completed'}});
+  const snapshot=workspacePreviewSnapshot('signal-garden',[write]);
+  const args={relativeDirectory:'signal-garden'};
+  const published={content:[{type:'text',text:'published'}],details:{schemaVersion:1,kind:'ods-pixel-workspace-preview',status:'succeeded',relativeDirectory:'signal-garden',port:9437,url:`http://${snapshot.siteId}.localhost:9437/${snapshot.siteId}/`,...snapshot,httpStatus:200,readbackVerified:true,executable:false,overwritten:false}};
+  const outer={...context,toolName:'tool_call',toolCallId:'publish'};
+  guard.beforeToolCall({toolName:'tool_call',toolCallId:'publish',params:{id,args}},outer);
+  call('pixel_ods_workspace_preview','tool_search_code:publish:pixel_ods_workspace_preview:1',args,published,{persist:false});
+  const receipt=wrappedPluginResult('pixel-ods','pixel_ods_workspace_preview',published);
+  guard.afterToolCall({toolName:'tool_call',toolCallId:'publish',params:{id,args},result:receipt},outer);
+  guard.toolResultPersist({toolName:'tool_call',toolCallId:'publish',message:{role:'toolResult',toolName:'tool_call',toolCallId:'publish',...receipt}},outer);
+  assert.equal(guard.verificationForRun(context.runId).status,'passed');
+  call('exec','smoke',{command:"printf 'category,amount\\nfood,0.10\\n' > /tmp/smoke.csv && python3 report.py /tmp/smoke.csv"},{content:[{type:'text',text:'{"food": "0.10"}'}],details:{status:'completed',exitCode:0}});
+  assert.notEqual(guard.verificationForRun(context.runId).status,'passed');
+  assert.equal(await guard.revalidateWorkspacePreview({},context),true);
+  assert.equal(probes,1);
+  assert.equal(guard.verificationForRun(context.runId).status,'passed');
+});
 
 for(const wrapped of [false,true]) for(const fault of ['changed-params','outer-error','outer-result-error','event-run','event-call','event-tool','context-session','context-key']) test(`revalidation completion binding rejects ${fault}, wrapped=${wrapped}`,async()=>{
   let probes=0;const {guard,context,invoke}=revalidationGuardFixture(async()=>{probes++;return true;});
