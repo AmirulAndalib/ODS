@@ -6862,9 +6862,24 @@ def _enable_retry_work(service_id: str) -> None:
         # expected to be idempotent (check-then-create for secrets,
         # env vars, data dirs) so re-running repopulates anything an
         # earlier failed install may have left unset.
-        ok, _ = _run_post_install_hook(service_id, ext_dir)
+        # A failed library install is disabled (see _disable_unprepared_install);
+        # enabling it again for this retry must not leave an unresolvable
+        # definition in the merged Compose project either. Built-ins are not
+        # renamed here and keep the existing start path.
+        library_install = ext_dir == USER_EXTENSIONS_DIR / service_id
+        ok, hook_error = _run_post_install_hook(service_id, ext_dir)
         if not ok:
+            if library_install:
+                note = _disable_unprepared_install(service_id)
+                _write_progress(service_id, "error", "Setup failed",
+                                error=(hook_error or "Setup failed") + note)
             return
+        if library_install:
+            resolved, error = _resolve_install_compose(resolve_compose_flags())
+            if resolved is None:
+                error += _disable_unprepared_install(service_id)
+                _write_progress(service_id, "error", "Retry failed", error=error)
+                return
 
         _write_progress(service_id, "starting", "Starting container...")
         ok, err = docker_compose_action(service_id, "start")
@@ -7338,7 +7353,7 @@ BUILD_DIAGNOSTIC_LIMIT = 7600
 BUILD_ERROR_LINE_LIMIT = 300
 
 
-def _install_build_diagnostic(result, services: dict) -> str:
+def _install_build_diagnostic(result, services: dict, subject: str = 'build') -> str:
     """Bound untrusted build evidence and remove configured credential values.
 
     Redact before truncating so a tail cannot expose part of a credential.
@@ -7348,6 +7363,9 @@ def _install_build_diagnostic(result, services: dict) -> str:
     dashboard card and other bounded readers show the beginning of a message.
     Lead with the final error line (keeping its end, where Go error chains put
     the root cause), then the tail of the log, both within one bound.
+
+    ``subject`` names the failed step in the message (``build`` for source
+    builds, ``Compose`` when the configuration itself could not be resolved).
     """
     output = '\n'.join(str(getattr(result, stream, '') or '')
                        for stream in ('stdout', 'stderr'))
@@ -7363,7 +7381,7 @@ def _install_build_diagnostic(result, services: dict) -> str:
         collect(load_env(INSTALL_DIR / '.env'))
     except (OSError, UnicodeError):
         # Do not disclose output if persisted credentials cannot be checked.
-        return 'Build diagnostics unavailable: credential redaction could not be completed.'
+        return f'{subject[:1].upper()}{subject[1:]} diagnostics unavailable: credential redaction could not be completed.'
     for definition in services.values():
         if not isinstance(definition, dict):
             continue
@@ -7382,12 +7400,12 @@ def _install_build_diagnostic(result, services: dict) -> str:
     output = ''.join(c for c in output if c in '\n\t' or ord(c) >= 32)
     lines = [line.rstrip() for line in output.splitlines() if line.strip()]
     if not lines:
-        return 'No build diagnostic output was returned.'
+        return f'No {subject} diagnostic output was returned.'
     final = next((line.strip() for line in reversed(lines)
                   if not re.fullmatch(r'\s*[-=]+', line)), lines[-1].strip())
     if len(final) > BUILD_ERROR_LINE_LIMIT:
         final = '…' + final[-(BUILD_ERROR_LINE_LIMIT - 1):]
-    header = f'Untrusted build error: {final}\nUntrusted build diagnostic (tail):\n'
+    header = f'Untrusted {subject} error: {final}\nUntrusted {subject} diagnostic (tail):\n'
     budget = BUILD_DIAGNOSTIC_LIMIT - len(header)
     tail = '\n'.join(lines)
     if len(tail) > budget:
@@ -7398,6 +7416,66 @@ def _install_build_diagnostic(result, services: dict) -> str:
     return header + tail
 
 
+def _resolve_install_compose(flags: list[str]) -> tuple[str | None, str]:
+    """Resolve the Compose project for an install, or explain why it cannot be.
+
+    Returns ``(resolved_json, "")`` or ``(None, error)``. Compose's own error
+    names what to fix (for example ``required variable X is missing a
+    value``), so the error keeps its redacted, bounded stderr. Standard
+    output is never reported: on success it is the fully interpolated
+    configuration, including credential values.
+    """
+    command = ["docker", "compose", *flags, "config", "--format", "json"]
+    result = subprocess.run(command, cwd=str(INSTALL_DIR), capture_output=True, text=True, timeout=30)
+    if result.returncode:
+        stderr_only = subprocess.CompletedProcess(command, result.returncode, '',
+                                                  getattr(result, 'stderr', '') or '')
+        diagnostic = _install_build_diagnostic(stderr_only, {}, 'Compose')
+        # Name unset `${NAME:?}` settings up front. The generic credential
+        # redaction rewrites the word after `..._PASSWORD:` in Compose's
+        # sentence, so read the names from Compose's fixed message format;
+        # only identifier characters are taken, never a value.
+        missing = list(dict.fromkeys(re.findall(
+            r'required variable ([A-Za-z_][A-Za-z0-9_]{0,127}) is missing a value', stderr_only.stderr)))
+        summary = (f"Missing required setting{'s' if len(missing) > 1 else ''}: "
+                   f"{', '.join(missing[:8])}. ") if missing else ""
+        return None, ("Could not resolve installation Compose configuration; containers were not started. "
+                      + summary + diagnostic)
+    return result.stdout, ""
+
+
+def _disable_unprepared_install(service_id: str) -> str:
+    """Take a library extension that failed before start out of the Compose project.
+
+    Every enabled extension is merged into one Compose project, so a
+    definition that cannot be resolved (a missing ``${NAME:?}`` setting) or
+    whose image could not be built fails model switches, other installs and
+    every ``ods`` stack command, not just this extension. Renaming
+    ``compose.yaml`` to ``compose.yaml.disabled`` restores the state before
+    the attempt without deleting its files, settings or data. The caller keeps
+    the failure visible in the progress record; this returns the sentence to
+    append to it ("" when there is nothing to disable, e.g. built-ins).
+    """
+    ext_dir = USER_EXTENSIONS_DIR / service_id
+    active = ext_dir / "compose.yaml"
+    inactive = ext_dir / "compose.yaml.disabled"
+    unable = ("\nODS could not turn this extension off automatically. Disable or remove it; "
+              "until then other ODS stack operations can fail with the same error.")
+    try:
+        if ext_dir.is_symlink() or not ext_dir.is_dir() or active.is_symlink() or not active.exists():
+            return ""
+        if not active.is_file() or inactive.exists() or inactive.is_symlink():
+            return unable
+        os.replace(active, inactive)
+    except OSError:
+        logger.exception("Could not disable failed installation of %s", service_id)
+        return unable
+    invalidate_compose_cache()
+    logger.warning("Disabled %s after it failed before start; files and data were kept", service_id)
+    return ("\nODS turned this extension off so the rest of the stack keeps working; its files, "
+            "settings and data were kept. Resolve the error above, then retry or remove it.")
+
+
 def _prepare_install_images(flags: list[str], service_id: str) -> tuple[bool, str]:
     """Prepare only the requested service's effective Compose dependency graph.
 
@@ -7405,12 +7483,11 @@ def _prepare_install_images(flags: list[str], service_id: str) -> tuple[bool, st
     manifest or pull a locally built image from an unrelated registry.
     """
     base = ["docker", "compose", *flags]
-    result = subprocess.run(base + ["config", "--format", "json"],
-                            cwd=str(INSTALL_DIR), capture_output=True, text=True, timeout=30)
-    if result.returncode:
-        return False, "Could not resolve installation Compose configuration"
+    resolved, error = _resolve_install_compose(flags)
+    if resolved is None:
+        return False, error
     try:
-        services = json.loads(result.stdout)['services']
+        services = json.loads(resolved)['services']
         if not isinstance(services, dict):
             raise ValueError()
         pending, seen, pulls, builds = [service_id], set(), [], []
@@ -10694,9 +10771,17 @@ class AgentHandler(BaseHTTPRequestHandler):
                 # when no hook is declared — it does not pre-write any
                 # "Running setup..." progress, so extensions without a hook
                 # don't show a misleading setup phase in the dashboard.
+                #
+                # Until containers are requested, a failed step must not leave
+                # this definition enabled: its settings may be missing and
+                # Compose would then fail for the whole stack. Disable it
+                # first, then record the error the owner acts on.
                 if run_setup_hook:
-                    ok, _ = _run_post_install_hook(service_id, ext_dir)
+                    ok, hook_error = _run_post_install_hook(service_id, ext_dir)
                     if not ok:
+                        note = _disable_unprepared_install(service_id)
+                        _write_progress(service_id, "error", "Setup failed",
+                                        error=(hook_error or "Setup failed") + note)
                         return
 
                 # Step 2: Prepare images. Pulls may use a cached image on
@@ -10730,6 +10815,7 @@ class AgentHandler(BaseHTTPRequestHandler):
 
                 prepared, image_error = _prepare_install_images(pull_flags, service_id)
                 if not prepared:
+                    image_error += _disable_unprepared_install(service_id)
                     _write_progress(service_id, "error", "Installation failed", error=image_error)
                     return
 

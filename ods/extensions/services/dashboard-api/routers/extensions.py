@@ -1386,6 +1386,74 @@ def _installation_plan_service(service_id: str) -> dict:
     raise ValueError(f"Missing extension definition: {service_id}")
 
 
+# `${NAME:?message}` / `${NAME?message}`: Compose refuses to interpolate the
+# whole merged project while NAME is unset (or, with the colon, empty).
+_COMPOSE_REQUIRED_VARIABLE_RE = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*):?\?")
+
+
+def _compose_required_variables(extension_dir: Path) -> set[str]:
+    """Names the extension's base Compose file refuses to start without."""
+    names: set[str] = set()
+    for name in ("compose.yaml", "compose.yaml.disabled"):
+        path = extension_dir / name
+        if path.is_symlink() or not path.is_file():
+            continue
+        names.update(_COMPOSE_REQUIRED_VARIABLE_RE.findall(path.read_text(encoding="utf-8")))
+    return names
+
+
+def _missing_owner_configuration(service_id: str, *, installed: bool, setup_hook_runs: bool) -> tuple[str, list[dict]]:
+    """Required settings the owner must supply before ODS starts this extension.
+
+    Uses the same definition lookup, declaration rules and presence check as
+    the install plan; only presence is read, never a value. Before a fresh
+    installation every missing ``required`` declaration is collected. An
+    existing definition may already have initialized data with a Compose
+    default, so only the settings its Compose file cannot resolve without are
+    requested there. A setup hook that runs first writes its own settings.
+
+    Unreadable declarations are left to the operation itself: they must not
+    turn into a new refusal here, and the host agent disables a definition
+    that Compose cannot resolve instead of leaving it in the merged project.
+    """
+    from config import _read_env_value
+    from extension_install_plan import configuration_fields, declares_setup_hook
+
+    try:
+        service = _installation_plan_service(service_id)
+        if not isinstance(service, dict) or (setup_hook_runs and declares_setup_hook(service)):
+            return service_id, []
+        fields = configuration_fields(service_id, service, lambda key: bool(_read_env_value(key)))
+        missing = [field for field in fields if field["required"] and not field["configured"]]
+        if installed and missing:
+            enforced = _compose_required_variables(USER_EXTENSIONS_DIR / service_id)
+            missing = [field for field in missing if field["key"] in enforced]
+    except (ValueError, OSError, UnicodeError, yaml.YAMLError):
+        return service_id, []
+    name = service.get("name")
+    name = name.strip()[:80] if isinstance(name, str) and name.strip() else service_id
+    return name, [{"key": field["key"], "secret": field["secret"], "description": field["description"]}
+                  for field in missing]
+
+
+def _refuse_missing_owner_configuration(service_id: str, *, installed: bool, setup_hook_runs: bool,
+                                        outcome: str) -> None:
+    """Fail before any file or container change when required settings are absent."""
+    name, missing = _missing_owner_configuration(
+        service_id, installed=installed, setup_hook_runs=setup_hook_runs)
+    if not missing:
+        return
+    keys = [field["key"] for field in missing]
+    raise HTTPException(status_code=400, detail={
+        "code": "missing_configuration",
+        "service_id": service_id,
+        "message": (f"{name} needs required settings before it can be {outcome}: "
+                    f"{', '.join(keys)}. Nothing was changed."),
+        "missing_configuration": keys,
+        "configuration": missing,
+    })
+
+
 @router.get("/api/extensions/{service_id}/install-plan")
 async def extension_install_plan(service_id: str, api_key: str = Depends(verify_api_key)):
     """Inspect dependency order and missing settings without starting installation."""
@@ -2934,6 +3002,13 @@ def _install_extension(service_id: str, api_key: str, operation_id: str | None =
         # Preserve existing files. The locked helper verifies whether this
         # failed definition can be retried without replacing owner data.
 
+    # Compose interpolates every enabled extension into one project, so an
+    # unresolvable `${NAME:?}` would fail the host's asynchronous install and
+    # every later stack operation. Ask for the settings before anything is
+    # copied or started, instead of acknowledging an install that cannot run.
+    _refuse_missing_owner_configuration(
+        service_id, installed=dest.exists(), setup_hook_runs=True, outcome="installed")
+
     # NOTE: pre_install hook is deferred to a future version. On fresh library
     # installs, the extension directory doesn't exist yet, so the host agent
     # cannot resolve the hook script. The call site is intentionally omitted
@@ -3561,6 +3636,14 @@ def enable_extension(
     disabled_compose = ext_dir / "compose.yaml.disabled"
     enabled_compose = ext_dir / "compose.yaml"
 
+    # Enabling (or retrying a failed install of) a library extension whose
+    # Compose file cannot resolve would put it back into the merged project
+    # and fail every stack operation. A setup hook only runs again on retry.
+    if ext_dir.is_relative_to(USER_EXTENSIONS_DIR.resolve()):
+        _refuse_missing_owner_configuration(
+            service_id, installed=True, setup_hook_runs=_has_error_progress(service_id),
+            outcome="started")
+
     already_enabled = enabled_compose.exists()
     # A stopped target still needs the same dependency preflight as a disabled
     # target. Preserve its compose scan without bypassing that shared plan.
@@ -3597,6 +3680,14 @@ def enable_extension(
                 "auto_enable_available": True,
             },
         )
+    if missing_deps and auto_enable_deps:
+        for dep in missing_deps:
+            _validate_service_id(dep)
+            dep_dir = USER_EXTENSIONS_DIR / dep
+            if dep_dir.is_dir() and not dep_dir.is_symlink():
+                _refuse_missing_owner_configuration(
+                    dep, installed=True, setup_hook_runs=_has_error_progress(dep),
+                    outcome="started")
 
     enabled_services: list[str] = []
 
