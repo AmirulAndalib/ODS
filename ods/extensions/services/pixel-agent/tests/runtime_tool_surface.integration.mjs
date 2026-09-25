@@ -219,3 +219,48 @@ test('offering or hiding the optional Perplexica tool leaves the visible surface
   assert.equal(resolveExact({agentId:'pixel',catalogRef:offered.catalogRef},'pixel_ods_research')?.name,'pixel_ods_research');
   assert.equal(resolveExact({agentId:'pixel',catalogRef:without.catalogRef},'pixel_ods_research'),undefined);
 });
+
+// Tool Search is the research tool's only path. Its tool_call result is one
+// text block holding the catalog entry and the whole result, escaped again.
+// OpenClaw keeps a block of at most the tool-result cap unchanged and cuts
+// the middle of a longer one, which drops sources and the closing marker.
+test('a Perplexica result fits the tool-result cap as the real tool_call returns it', async () => {
+  const { createPerplexicaResearchTool, researchOutputChars } = await import('../plugin/perplexica-research.mjs');
+  const { o: setPluginToolMeta } = await import(pathToFileURL(join(dirname(file), 'tools-D5HS8Q_I.js')));
+  const configured = {values: {preferences: {defaultChatProvider: 'c', defaultChatModel: 'm',
+    defaultEmbeddingProvider: 'e', defaultEmbeddingModel: 'x'}}};
+  const sources = Array.from({length: 25}, (_, i) => ({
+    content: 'The festival runs from "October 3" to October 12 at venues across Center City.\n'.repeat(6),
+    metadata: {title: `Event listing ${i + 1} "official" ${'T'.repeat(120)}`,
+      url: `https://www.visitphilly.com/events/2026/event-slug-${i + 1}/?utm_source=search&x="q"`}}));
+  const answer = Array.from({length: 40}, (_, i) =>
+    `- **Event ${i}**: A "description" [${(i % 25) + 1}]. See https://invented-${i}.example.org/events/${i}/details.`).join('\n');
+  for (const cap of [4000, 8000, 12000]) {
+    let requests = 0;
+    const research = createPerplexicaResearchTool({env: {},
+      outputChars: () => researchOutputChars({agents: {list: [{id: 'pixel', contextLimits: {toolResultMaxChars: cap}}]}}, 'pixel'),
+      fetch: async () => ++requests === 1 ? Response.json(configured) : new Response([{type: 'sources', data: sources},
+        {type: 'response', data: answer}, {type: 'done'}].map(event => JSON.stringify(event)).join('\n'))});
+    // As in production: the plugin tool OpenClaw builds from its cached
+    // descriptor, labelled with its name and owned by the pixel-ods plugin.
+    const catalogued = {...research, label: research.name};
+    setPluginToolMeta(catalogued, {pluginId: 'pixel-ods'});
+    const { catalogRef } = run([catalogued]);
+    const ctx = { agentId: 'pixel', catalogRef, config: { tools: { toolSearch: { enabled: true, mode: 'tools' } } } };
+    const call = createControls(ctx).find(t => t.name === 'tool_call');
+    const delivered = await call.execute('research', { id: 'pixel_ods_research', args: { query: 'Philadelphia public events' } });
+    assert.equal(requests, 2);
+    assert.equal(delivered.content.length, 1);
+    const text = delivered.content[0].text;
+    assert.ok(text.length <= cap, `${cap}: ${text.length} characters`);
+    const payload = JSON.parse(text);
+    assert.equal(payload.tool.id, 'openclaw:pixel-ods:pixel_ods_research');
+    assert.equal(payload.tool.label, 'pixel_ods_research');
+    assert.equal(payload.tool.description, research.description);
+    assert.equal(Object.hasOwn(payload.result.details, 'unsourcedLinkHosts'), false);
+    const inner = payload.result.content[0].text;
+    assert.match(inner, /\n<\/perplexica_evidence_[0-9a-f]{24}>$/);
+    const evidence = JSON.parse(inner.slice(inner.indexOf('>\n') + 2, inner.lastIndexOf('\n</perplexica_evidence_')));
+    assert.ok(JSON.stringify(evidence.answer).length >= 900, `${cap}: answer ${evidence.answer.length}`);
+  }
+});

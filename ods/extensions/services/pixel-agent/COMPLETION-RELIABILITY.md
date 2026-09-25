@@ -102,18 +102,40 @@ orientation only:
 - The model sees Perplexica's answer, and each returned source with its title
   and a capped search snippet (300 characters for cited sources, 160 for the
   first eight uncited ones, 3,500 in total, at most 20 sources, cited sources
-  kept first). The whole result fits the agent's configured
-  `contextLimits.toolResultMaxChars` minus a margin, between 3,400 and 10,000
-  characters. `details` carries only each source's index and URL.
+  kept first).
+- The result is sized for Tool Search, the tool's only path. There the model
+  reads one text block, `JSON.stringify({tool, result}, null, 2)`: the catalog
+  entry with the full description, then the result with `details`, all escaped
+  a second time. OpenClaw keeps a block within the agent's
+  `contextLimits.toolResultMaxChars` unchanged and cuts the middle of a longer
+  one, which drops sources and the closing evidence marker. So that whole
+  block fits the cap minus 200 characters, at most 12,000 (the 4,000-character
+  installer floor when the cap is unknown). For the test's large answer (40
+  lines citing 25 sources with snippets), a 4,000 cap keeps about 1,400
+  characters of answer and no sources, 8,192 the minimum answer and 13
+  sources, and 12,000 the minimum answer, 20 sources and 5 snippets; the
+  header says what was left out. `details` carries only the URLs of up to five
+  cited sources, each at most 300 characters, and counts.
 - Every `http(s)` link in the answer that is not among the returned sources,
   including private addresses, is replaced with
   `[link not in Perplexica sources]` before the model sees it. Source matching
   ignores http/https, a leading `www.` and one trailing slash. Links written
   without a scheme are not checked, and the result says so.
-- The brief is at most 1,000 characters. URLs, IP literals, `host:port`,
-  `localhost` and local-only names such as `.internal` are removed before it is
-  sent, because Vane's `scrape_url` action opens addresses from its container
-  without validation. A brief that was only addresses is refused.
+- Vane's `scrape_url` action opens any URL its model names, without address
+  validation, from the Perplexica container on the ODS network, and Vane
+  offers it in every mode. ODS disables it when the container starts
+  (`extensions/services/perplexica/docker-entrypoint.sh`); that, not the
+  brief, is what keeps a brief or a search result from making Perplexica open
+  an internal address.
+- The brief is at most 1,000 characters, and common address forms are removed
+  before it is sent: URLs with any scheme, `www.` names, IP literals
+  (including short, integer and hexadecimal IPv4 with a port or path),
+  `host:port`, `localhost`, local-only names such as `.internal`, dotted names
+  with a path, and lowercase single-label names with two or more path
+  segments. Full-width and ideographic forms are folded first. This is a
+  heuristic with known gaps (a single-label name with one path segment, a bare
+  short or integer IPv4), not a guarantee. A brief that was only addresses is
+  refused.
 - One call uses one search and one page-reading unit, and needs two units of the
   total web allowance. A response may call it once; a repeat, like an unusable
   brief, is refused before it runs and uses no allowance. The call does not
@@ -127,9 +149,15 @@ orientation only:
 
 `tests/perplexica_research.test.mjs` replays the measured answers
 (`tests/fixtures/perplexica-answers.mjs`: 24 of 25 speed and balanced links and
-37 of 37 quality links are replaced). `tests/perplexica_availability.test.mjs`
+37 of 37 quality links are replaced), checks the Tool Search size from 4,000
+to 131,072 characters of cap and the brief filter.
+`runtime_tool_surface.integration.mjs` checks the size through the real
+`tool_call` at 4,000, 8,000 and 12,000. `tests/perplexica_availability.test.mjs`
 covers the probe and the not-installed case, and
 `tests/perplexica_research_budget.test.mjs` the allowance and the read rule.
+`ods/tests/test-perplexica-entrypoint.py` runs the `scrape_url` patch on the
+action objects from the current and the previous pinned image and executes
+them.
 
 ## Owner-requested text
 

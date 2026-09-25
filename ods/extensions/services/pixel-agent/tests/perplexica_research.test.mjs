@@ -119,7 +119,7 @@ test("result excerpts remain bounded without aborting successful longer research
   assert.equal(result.details.status, "completed");
   assert.equal(result.details.answerChars, 30000);
   assert.equal(result.details.truncated, true);
-  assert.ok(result.content[0].text.length <= RESEARCH_LIMITS.maxOutputChars);
+  assert.ok(toolSearchText(result).length <= RESEARCH_LIMITS.maxResultChars);
   assert.equal(evidence(result).answer, "a".repeat(RESEARCH_LIMITS.answerChars));
 });
 
@@ -131,6 +131,23 @@ function evidence(result) {
   const text = result.content[0].text;
   return JSON.parse(text.slice(text.indexOf(">\n") + 2, text.lastIndexOf("\n</perplexica_evidence_")));
 }
+
+// What the model reads when it calls the tool through Tool Search, its only
+// path: OpenClaw 2026.6.33 tool_call returns jsonResult({tool, result}), that
+// is JSON.stringify(payload, null, 2), where tool is the catalog entry
+// (compactEntry: id, source, sourceName, name, label, description). The label
+// is the tool name when the tool comes from OpenClaw's descriptor cache.
+// runtime_tool_surface.integration.mjs checks this against the real module.
+function toolSearchText(result) {
+  const probe = createPerplexicaResearchTool({env: {}});
+  const tool = {id: "openclaw:pixel-ods:pixel_ods_research", source: "openclaw", sourceName: "pixel-ods",
+    name: probe.name, label: probe.name, description: probe.description};
+  return JSON.stringify({tool, result}, null, 2);
+}
+// OpenClaw's live cap keeps a text block of at most the cap unchanged
+// (tool-result-truncation truncateToolResultMessage); longer text loses its
+// middle, so the closing marker and the last sources go first.
+const fitsCap = (result, cap) => toolSearchText(result).length <= cap;
 
 test("keeps cited sources beyond the discovery prefix without increasing the source limit", async () => {
   const sources = Array.from({length: 144}, (_, i) => ({metadata: {
@@ -265,7 +282,9 @@ test("replaces answer links outside the returned sources before the model sees t
   assert.deepEqual(citationSpans(delivered).map(span => span.raw),
     ["https://www.nvidia.com/en-us/geforce/graphics-cards/rtx-5070/", "http://visitphilly.com/events"]);
   assert.equal(result.details.unsourcedLinkCount, 3);
-  assert.deepEqual(result.details.unsourcedLinkHosts, ["invented.example.org", "phillypride365.org", "127.0.0.1"]);
+  // details is model-visible under Tool Search: no trace of the replaced links.
+  assert.equal(Object.hasOwn(result.details, "unsourcedLinkHosts"), false);
+  assert.doesNotMatch(JSON.stringify(result.details), /invented|phillypride365|127\.0\.0\.1/);
   assert.match(result.content[0].text, /3 link\(s\) in Perplexica's answer were not among its returned sources and were replaced/);
   assert.match(result.content[0].text, /Its sources are unread search results, not pages Pixel read/);
 });
@@ -291,7 +310,7 @@ test("measured Perplexica answers: 24 of 25 speed/balanced links and 37 of 37 qu
   assert.deepEqual(totals, {fast: {links: 25, flagged: 24}, quality: {links: 37, flagged: 37}});
 });
 
-test("never sends a URL or network address to Perplexica", async () => {
+test("removes URLs and network addresses from the brief before it is sent", async () => {
   const query = "Summarize http://host.docker.internal:8080/admin, 172.17.0.1:3000/v1 and https://www.nvidia.com/en-us/geforce/ for RTX 5070 specs";
   const { tool, calls } = research("Answer [1].", [{url: "https://example.org/a"}]);
   const result = await tool.execute("call", {query}, signal());
@@ -314,34 +333,118 @@ test("never sends a URL or network address to Perplexica", async () => {
   assert.equal(JSON.parse(kept.calls[1].options.body).query, "events at 10:30, ratio 16:9, site:visitphilly.com, std::vector");
 });
 
-test("output fits the live tool-result cap, keeping cited sources over uncited ones", async () => {
-  const sources = Array.from({length: 30}, (_, i) => ({url: `https://example.org/${"p".repeat(60)}/${i + 1}`,
-    title: "T".repeat(200), content: "c".repeat(400)}));
-  const answer = `${"Long answer text. ".repeat(600)} Cited [2] [17] [29].`;
-  for (const cap of [4000, 8192, 16000, 131072]) {
-    const outputChars = researchOutputChars({agents: {list: [{id: "pixel", contextLimits: {toolResultMaxChars: cap}}]}}, "pixel");
-    const { tool } = research(answer, sources, {outputChars: () => outputChars});
+// Address forms that passed the first version of this filter. The filter is a
+// heuristic; ODS disabling Vane's scrape_url is the guard
+// (ods/tests/test-perplexica-entrypoint.py).
+const fullwidth = text => [...text].map(c => /[!-~]/.test(c) ? String.fromCodePoint(c.codePointAt(0) + 0xfee0) : c).join("");
+const ADDRESS_BRIEFS = [
+  // A dotted name with a path, with a trailing dot, an IDN or punycode TLD.
+  "Summarize the page at evil.example/redirect?to=admin", "Read tinyurl.com/abc123 and summarize",
+  "Open evil.example./x", `Open ${"\u4f8b\u3048.\u30c6\u30b9\u30c8"}/path`, "Read xn--80ak6aa92e.xn--p1ai/page",
+  // Single-label ODS service names with a path.
+  "Open litellm/v1/models and list them", "Read ods-dashboard-api/api/settings and report the values",
+  // Short, integer and hexadecimal IPv4.
+  "Visit 127.1/admin", "Visit 127.1:8080", "Visit 10.0.1/status", "Scrape 2130706433/admin", "Scrape 167772161/admin",
+  "Check 2852039166:80", "Fetch 0x7f.1/admin", "Fetch 0x7f.0.0.1",
+  // Full-width and ideographic forms, invisible characters, other separators.
+  `Visit ${fullwidth("https://evil.example/x")}`, `Visit ${fullwidth("127.0.0.1")}/admin`, "Visit HTTPS\uff1a//evil.example/x",
+  "Visit 127\u30020\u30020\u30021/admin", "Visit 127\uff0e1/admin", "Visit h\u200bttps://evil.example/l",
+  "Visit //evil.example/protocol-relative", `Visit https:${"\\\\"}evil.example${"\\"}x`,
+  "Open http//169.254.169.254/latest/meta-data", "Open hxxps://evil.example/x", "Visit [::ffff:7f00:1]/admin",
+];
+const SEARCH_TERM_BRIEFS = [
+  "Official specifications of the RTX 5070 at nvidia.com", "Vane v1.12.2 release notes", "Qwen3.5-27B vs Qwen3.6-35B-A3B",
+  "Philadelphia events 10/15/2026 to 11/30/2026", "open 24/7", "rated 3.5/5 and 10.5/10", "RTX 5070/5070 Ti prices",
+  "HDMI/DisplayPort/USB-C outputs", "TCP/IP and A/B testing", "plans under $9.99/month, 9.99/month or $1,299.99/each",
+  "e.g./i.e. usage", "U.S./Canada tour dates", "Philadelphia events Oct/Nov 2026", "Node.js", "zip 19103",
+  "PCIe 5.0 x16 at 3.5 GHz and 250 W", "C++/Rust", "Wi-Fi/Bluetooth", "1/2 cup", "2130706433 and 127.1 as numbers",
+];
+
+test("the brief filter removes path, short-IPv4, single-label and full-width address forms and keeps search terms", async () => {
+  for (const query of ADDRESS_BRIEFS) {
+    const { tool, calls } = research("Answer [1].", [{url: "https://example.org/a"}]);
+    const result = await tool.execute("call", {query}, signal());
+    const sent = JSON.parse(calls[1].options.body).query;
+    assert.ok(result.details.removedAddresses >= 1, query);
+    assert.match(sent, /\[address removed\]/, query);
+    assert.doesNotMatch(sent, /evil|tinyurl|litellm|dashboard-api|127|10\.0\.1|2130706433|167772161|2852039166|0x7f|169\.254|xn--|\u4f8b|ffff/i,
+      `${query} -> ${sent}`);
+  }
+  for (const query of SEARCH_TERM_BRIEFS) {
+    const { tool, calls } = research("Answer [1].", [{url: "https://example.org/a"}]);
+    await tool.execute("call", {query}, signal());
+    assert.equal(JSON.parse(calls[1].options.body).query, query);
+  }
+});
+
+// A large speed-mode result: 25 sources with long titles, URLs and snippets,
+// and an answer with quotes, newlines, citations and invented links, which the
+// Tool Search envelope escapes a second time.
+const LARGE_SOURCES = Array.from({length: 25}, (_, i) => ({
+  url: `https://www.visitphilly.com/events/philadelphia/2026/some-longer-event-slug-${i + 1}/?utm_source=search&x="q"`,
+  title: `Event listing page number ${i + 1} - Visit Philly "official" guide ${"T".repeat(120)}`,
+  content: "The festival runs from \"October 3\" to October 12 at venues across Center City.\n".repeat(6)}));
+const LARGE_ANSWER = Array.from({length: 40}, (_, i) =>
+  `- **Event ${i}**: A "description" with dates and venue details [${(i % 25) + 1}]. ` +
+  `See https://invented-${i}.example.org/events/2026/${i}/details for tickets.`).join("\n");
+
+test("the Tool Search result fits the tool-result cap with its closing marker", async () => {
+  const pixel = cap => ({agents: {list: [{id: "pixel", contextLimits: {toolResultMaxChars: cap}}]}});
+  for (const cap of [4000, 4096, 8000, 8192, 12000, 16000, 131072]) {
+    const outputChars = researchOutputChars(pixel(cap), "pixel");
+    const { tool } = research(LARGE_ANSWER, LARGE_SOURCES, {outputChars: () => outputChars});
     const result = await tool.execute("call", {query: "Budget check"}, signal());
+    const wrapped = toolSearchText(result);
+    assert.ok(fitsCap(result, cap), `${cap}: wrapped ${wrapped.length}`);
+    assert.ok(wrapped.length <= outputChars, `${cap}: wrapped ${wrapped.length} > budget ${outputChars}`);
+    // Nothing is cut, so the evidence closes and parses, and the header
+    // reports what the fit left out.
     const text = result.content[0].text;
-    assert.ok(text.length <= outputChars, `${cap}: ${text.length} > ${outputChars}`);
+    assert.match(text, /\n<\/perplexica_evidence_[0-9a-f]{24}>$/);
+    assert.equal(JSON.parse(wrapped).result.content[0].text, text);
     const output = evidence(result);
-    assert.ok(output.answer.length >= Math.min(RESEARCH_LIMITS.minAnswerChars, answer.length), `${cap}: answer ${output.answer.length}`);
-    for (const index of [2, 17, 29]) assert.ok(output.sources.some(source => source.index === index), `${cap}: cited ${index}`);
     assert.ok(output.sources.every(source => source.title.length <= RESEARCH_LIMITS.titleChars));
     assert.equal(result.details.truncated, true);
-    assert.equal(result.details.omittedCitationCount, 0);
+    assert.equal(result.details.retainedSourceCount, output.sources.length);
+    if (result.details.omittedCitationCount) {
+      assert.match(text, new RegExp(`${result.details.omittedCitationCount} cited source entries are not included`));
+    }
+    // At least the minimum answer, as JSON text, once the cap leaves room.
+    assert.ok(JSON.stringify(output.answer).length >= (cap >= 8000 ? RESEARCH_LIMITS.minAnswerChars : 900),
+      `${cap}: answer ${output.answer.length}`);
+    if (cap >= 8000) {
+      const cited = new Set(Array.from({length: 25}, (_, i) => i + 1));
+      assert.ok(output.sources.filter(source => cited.has(source.index)).length >= 10, `${cap}: ${output.sources.length} sources`);
+    }
+    if (cap >= 12000) assert.ok(output.sources.some(source => source.snippet), `${cap}: snippets`);
   }
+});
+
+test("details stay small: cited source URLs only, no replaced-link hosts", async () => {
+  const sources = Array.from({length: 12}, (_, i) => ({url: i === 3 ? `https://example.org/${"long/".repeat(80)}` : `https://example.org/s${i + 1}`}));
+  const { tool } = research("Claims [2] [4] [5] [7] [8] [9] [11] and https://invented.example.org/x.", sources);
+  const result = await tool.execute("call", {query: "Details check"}, signal());
+  assert.deepEqual(Object.keys(result.details).sort(), ["answerChars", "boundary", "omittedCitationCount", "retainedSourceCount",
+    "sourceCount", "sources", "status", "truncated", "unsourcedLinkCount"]);
+  // Cited, delivered, at most five, and no URL over 300 characters ([4] is 420).
+  assert.deepEqual(result.details.sources.map(source => source.index), [2, 5, 7, 8, 9]);
+  assert.ok(result.details.sources.every(source => Object.keys(source).join() === "index,url" && source.url.length <= RESEARCH_LIMITS.detailUrlChars));
+  assert.doesNotMatch(JSON.stringify(result.details), /invented/);
+  // Uncited sources stay in the evidence the model reads.
+  assert.equal(evidence(result).sources.length, 12);
 });
 
 test("the output budget follows the agent's configured tool-result cap", () => {
   const pixel = cap => ({agents: {list: [{id: "pixel", contextLimits: {toolResultMaxChars: cap}}]}});
-  assert.equal(researchOutputChars(pixel(16000), "pixel"), RESEARCH_LIMITS.maxOutputChars);
-  assert.equal(researchOutputChars(pixel(8192), "pixel"), 8192 - RESEARCH_LIMITS.outputMargin);
-  assert.equal(researchOutputChars(pixel(4000), "pixel"), RESEARCH_LIMITS.minOutputChars);
-  assert.equal(researchOutputChars({agents: {defaults: {contextLimits: {toolResultMaxChars: 6000}}, list: [{id: "pixel"}]}}, "pixel"), 5400);
+  assert.equal(researchOutputChars(pixel(16000), "pixel"), RESEARCH_LIMITS.maxResultChars);
+  assert.equal(researchOutputChars(pixel(12000), "pixel"), 12000 - RESEARCH_LIMITS.resultMargin);
+  assert.equal(researchOutputChars(pixel(8192), "pixel"), 8192 - RESEARCH_LIMITS.resultMargin);
+  assert.equal(researchOutputChars(pixel(4000), "pixel"), 4000 - RESEARCH_LIMITS.resultMargin);
+  assert.equal(researchOutputChars({agents: {defaults: {contextLimits: {toolResultMaxChars: 6000}}, list: [{id: "pixel"}]}}, "pixel"), 5800);
   // An agent's contextLimits object replaces the defaults', as in OpenClaw.
-  assert.equal(researchOutputChars({agents: {defaults: {contextLimits: {toolResultMaxChars: 6000}}, list: [{id: "pixel", contextLimits: {}}]}}, "pixel"), RESEARCH_LIMITS.minOutputChars);
-  assert.equal(researchOutputChars(undefined, "pixel"), RESEARCH_LIMITS.minOutputChars);
+  // Unknown caps use the installer's 4,000-character floor.
+  assert.equal(researchOutputChars({agents: {defaults: {contextLimits: {toolResultMaxChars: 6000}}, list: [{id: "pixel", contextLimits: {}}]}}, "pixel"), 3800);
+  assert.equal(researchOutputChars(undefined, "pixel"), 3800);
 });
 
 test("tool definition is static text and the default wait is bounded", () => {

@@ -11,8 +11,10 @@
 // - nothing it returns is a page Pixel read: completion-assurance grants this
 //   tool no read receipt, so a cited fact still needs web_fetch or
 //   pixel_ods_web_extract;
-// - no URL or network address is sent: Vane's scrape_url action drives a
-//   browser with no address validation from a container on the ODS network.
+// - Vane's scrape_url action opens model-chosen addresses from a container on
+//   the ODS network without validation. ODS disables it in the Perplexica
+//   entrypoint (extensions/services/perplexica/docker-entrypoint.sh); that is
+//   the guard. The brief filter below only removes common address forms.
 import { randomBytes } from "node:crypto";
 import { citationKey, citationSpans, unwrapMarker } from "./completion-assurance.mjs";
 
@@ -33,10 +35,14 @@ export const RESEARCH_LIMITS = Object.freeze({
   snippetChars: 3500,
   answerChars: 6000,
   minAnswerChars: 1200,
-  minOutputChars: 3400,
-  maxOutputChars: 10000,
-  outputMargin: 600,
-  unsourcedHosts: 12,
+  // Budget for the whole result as Tool Search delivers it (see
+  // toolSearchResultChars): the live tool-result cap minus a margin, at most
+  // maxResultChars.
+  maxResultChars: 12000,
+  resultMargin: 200,
+  // Source URLs kept in details (model-visible under Tool Search), cited first.
+  detailSources: 5,
+  detailUrlChars: 300,
 });
 export const PERPLEXICA_PROBE_LIMITS = Object.freeze({ ttlMs: 60_000, timeoutMs: 2_000 });
 export const UNSOURCED_LINK_MARKER = "[link not in Perplexica sources]";
@@ -45,7 +51,7 @@ export const REMOVED_ADDRESS_MARKER = "[address removed]";
 export const RESEARCH_REQUEST_HINT =
   'Set query to a self-contained public research brief of 1–1,000 characters, for example {"query":"Official specifications of the RTX 5070"}. Optional mode is "speed" or "balanced". Do not include URLs or network addresses; read a specific page with web_fetch or pixel_ods_web_extract.';
 export const RESEARCH_ADDRESS_ONLY_HINT =
-  "The research brief contained only web or network addresses. Perplexica is never sent addresses. Describe the topic in words, or read a specific page with web_fetch or pixel_ods_web_extract.";
+  "The research brief contained only web or network addresses, and addresses are removed before a brief is sent. Describe the topic in words, or read a specific page with web_fetch or pixel_ods_web_extract.";
 
 const DESCRIPTION = "Optional: ask the owner's installed Perplexica service for a quick synthesized overview with search-result sources. Orientation only: it answers from search snippets without reading pages, and its facts and links are often wrong; links outside its returned sources are replaced. Nothing it returns counts as a page Pixel read: open pages with web_fetch or pixel_ods_web_extract before citing its facts or links. Slow: it runs extra model calls on this host and delays Pixel. Send a self-contained public brief without URLs; addresses are removed. Uses 1 search and 1 page read from this response's web allowance, once per response. If stopped, Pixel stops waiting; Perplexica may continue in the background.";
 
@@ -190,35 +196,85 @@ export function researchToolWhenAvailable(availability, tool) {
   };
 }
 
-// The live per-result cap OpenClaw applies to this agent's tool results
-// (agent contextLimits replace the defaults' object), minus a margin, within
-// fixed bounds. Unknown caps use the installer's 4000-character floor.
+// The character budget for one result as Tool Search delivers it: the live
+// per-result cap OpenClaw applies to this agent's tool results (agent
+// contextLimits replace the defaults' object) minus a margin, at most
+// maxResultChars. Unknown caps use the installer's 4000-character floor.
 export function researchOutputChars(config, agentId) {
   const agent = Array.isArray(config?.agents?.list) ? config.agents.list.find((entry) => entry?.id === agentId) : undefined;
   const cap = (agent?.contextLimits ?? config?.agents?.defaults?.contextLimits)?.toolResultMaxChars;
   const limit = Number.isSafeInteger(cap) && cap > 0 ? cap : 4000;
-  return Math.max(RESEARCH_LIMITS.minOutputChars, Math.min(RESEARCH_LIMITS.maxOutputChars, limit - RESEARCH_LIMITS.outputMargin));
+  return Math.max(1, Math.min(RESEARCH_LIMITS.maxResultChars, limit - RESEARCH_LIMITS.resultMargin));
 }
 
-// Web and network addresses in a brief: URLs with a scheme, www. names, IP
-// literals, host:port, localhost and local-only name suffixes. Public or not,
-// each is replaced, because Perplexica's researcher can hand any address in
-// the brief to its unguarded page scraper. Plain words and bare public domain
-// names, useful as search terms, stay. This is defense in depth for Pixel's
-// own brief, not a guard on what Perplexica's search results lead it to.
+// This tool is deferred, so the model reaches it only through Tool Search.
+// OpenClaw 2026.6.33 returns a catalog call as one text block,
+// JSON.stringify({tool: <catalog entry>, result}, null, 2) (tool-search
+// toolCallResultEnvelope -> jsonResult), with the entry's full description
+// and the result's details, and caps that text at the tool-result limit before
+// Pixel's persist hook compacts the entry (session-tool-result-guard). The
+// cap cuts the middle of the text, so an oversized result loses snippets and
+// the closing evidence marker. Measure that form. The label is the tool name
+// once OpenClaw builds the tool from its cached descriptor.
+export function toolSearchResultChars(tool, result) {
+  const entry = { id: `openclaw:pixel-ods:${tool.name}`, source: "openclaw", sourceName: "pixel-ods",
+    name: tool.name, label: tool.label ?? tool.name, description: tool.description };
+  return JSON.stringify({ tool: entry, result }, null, 2).length;
+}
+
+// Web and network addresses in a brief, public or not. This is a heuristic
+// that keeps Pixel's own brief free of common address forms; it is not the
+// guard against Perplexica opening addresses (ODS disables Vane's scrape_url,
+// see the file header). The brief is first folded to the form a URL parser
+// reads: NFKC (full-width letters, colon, slash and full stop), the
+// ideographic full stops host parsing accepts as dots, and no invisible format
+// characters. Then these are replaced:
+// - URLs with a scheme, protocol-relative //host, www. names;
+// - IP literals, including hexadecimal IPv4 (0x7f.1), and short or integer
+//   IPv4 written with a port or a path (127.1/admin, 10.0.1:80,
+//   2130706433/admin);
+// - host:port, localhost and local-only name suffixes;
+// - a dotted name with a path (example.org/page, tinyurl.com/x);
+// - a lowercase single-label name with two or more path segments
+//   (litellm/v1/models).
+// Plain words, versions, prices, dates, times, ratios and bare domain names,
+// useful as search terms, stay. Known gaps: a single-label name with one path
+// segment (service/path), and short or integer IPv4 without a port or path.
+const TOKEN_START = String.raw`(?<![\p{L}\p{N}_.@\/\\:-])`;
+const REST = String.raw`[^\s<>"'\x60]*`;
+// Short IPv4: three dotted parts, or two whose first is a loopback, private or
+// link-local first octet and whose second is not a two-digit price fraction.
+const NUMERIC_HOST = String.raw`(?:0x[0-9a-f]+(?:\.(?:0x[0-9a-f]+|\d+)){0,3}|\d+(?:\.(?:0x[0-9a-f]+|\d+)){2,3}|(?:0|10|127|169|172|192)\.(?!\d{2}(?!\d))\d+|\d{8,10})`;
+const NUMERIC_START = String.raw`(?<![\p{L}\p{N}_.@\/\\:,$\u20ac\u00a3\u00a5\u20b9-])`;
 const ADDRESS_PATTERNS = [
-  /\b[a-z][a-z0-9+.-]{1,31}:\/\/[^\s<>"'`]*/gi,
-  /\b(?:https?|file|ftp|wss?|data|javascript|blob|view-source|gopher|dict|ldap|smb|jar):[^\s<>"'`]+/gi,
-  /\bwww\d{0,3}\.[^\s<>"'`]+/gi,
-  /\[[0-9a-f.]*(?::[0-9a-f.]*){2,}\](?::\d{1,5})?[^\s<>"'`]*/gi,
-  /(?<![\w:.])(?:[0-9a-f]{1,4}(?::[0-9a-f]{1,4}){0,6}::(?:[0-9a-f]{1,4}(?::[0-9a-f]{1,4}){0,6})?|::[0-9a-f]{1,4}(?::[0-9a-f]{1,4}){0,6})(?![\w:])/gi,
-  /\b\d{1,3}(?:\.\d{1,3}){3}\b(?::\d{1,5})?[^\s<>"'`]*/g,
-  /\b(?:localhost|(?:[a-z0-9-]+\.)+(?:localhost|local|internal|lan|home|arpa|test|invalid|corp|intranet|docker))\b(?::\d{1,5})?[^\s<>"'`]*/gi,
-  /\b(?=[a-z0-9-]*[a-z])[a-z0-9-]+(?:\.[a-z0-9-]+)*:\d{2,5}\b[^\s<>"'`]*/gi,
+  /\b[a-z][a-z0-9+.-]{1,31}:\/\/[^\s<>"'`]*/giu,
+  /\b(?:https?|file|ftp|wss?|data|javascript|blob|view-source|gopher|dict|ldap|smb|jar):[^\s<>"'`]+/giu,
+  new RegExp(String.raw`(?<![\p{L}\p{N}_:\/\\])[\/\\]{2}[\p{L}\p{N}_\[]${REST}`, "giu"),
+  /\bwww\d{0,3}\.[^\s<>"'`]+/giu,
+  /\[[0-9a-f.]*(?::[0-9a-f.]*){2,}\](?::\d{1,5})?[^\s<>"'`]*/giu,
+  /(?<![\w:.])(?:[0-9a-f]{1,4}(?::[0-9a-f]{1,4}){0,6}::(?:[0-9a-f]{1,4}(?::[0-9a-f]{1,4}){0,6})?|::[0-9a-f]{1,4}(?::[0-9a-f]{1,4}){0,6})(?![\w:])/giu,
+  /\b\d{1,3}(?:\.\d{1,3}){3}\b(?::\d{1,5})?[^\s<>"'`]*/gu,
+  // Short, integer and hexadecimal IPv4 with a port, or a path with a letter
+  // (not a date or ratio such as 10/15/2026 or 3.5/5).
+  new RegExp(String.raw`${NUMERIC_START}${NUMERIC_HOST}(?::\d{1,5}(?!\d)|[\/\\](?=[^\s\/\\]*\p{L}))${REST}`, "giu"),
+  new RegExp(String.raw`${TOKEN_START}0x[0-9a-f]+(?:\.(?:0x[0-9a-f]+|\d+)){1,3}(?![\p{L}\p{N}_])`, "giu"),
+  /\b(?:localhost|(?:[a-z0-9-]+\.)+(?:localhost|local|internal|lan|home|arpa|test|invalid|corp|intranet|docker))\b(?::\d{1,5})?[^\s<>"'`]*/giu,
+  /\b(?=[a-z0-9-]*[a-z])[a-z0-9-]+(?:\.[a-z0-9-]+)*:\d{2,5}\b[^\s<>"'`]*/giu,
+  // A dotted name ending in a label of two or more characters that starts
+  // with a letter (an IDN top-level domain included), with an optional
+  // trailing dot and port, then a path.
+  new RegExp(String.raw`${TOKEN_START}(?:[\p{L}\p{N}_](?:[\p{L}\p{N}_-]*[\p{L}\p{N}_])?\.)+\p{L}[\p{L}\p{N}-]+\.?(?::\d{1,5})?[\/\\]${REST}`, "giu"),
+  // A lowercase single-label name with at least two path segments.
+  new RegExp(String.raw`${TOKEN_START}(?=[a-z0-9_-]*[a-z])[a-z0-9_-]+[\/\\][^\s\/\\<>"'\x60]+[\/\\]${REST}`, "gu"),
 ];
 
+// Text a URL parser reads the same way: see ADDRESS_PATTERNS.
+function foldAddressForms(text) {
+  return text.normalize("NFKC").replace(/[\u3002\uff0e\uff61]/g, ".").replace(/\p{Cf}/gu, "").replace(/\p{Cc}/gu, " ");
+}
+
 export function researchBrief(query) {
-  let brief = String(query ?? ""), removedAddresses = 0;
+  let brief = foldAddressForms(String(query ?? "")), removedAddresses = 0;
   for (const pattern of ADDRESS_PATTERNS) {
     brief = brief.replace(pattern, () => { removedAddresses++; return REMOVED_ADDRESS_MARKER; });
   }
@@ -319,20 +375,21 @@ function flagUnsourcedLinks(answer, rawSources) {
     const key = sourceLinkKey(span.raw);
     return !key || !returned.has(key);
   });
-  const flagged = new Set(), hosts = new Set();
-  for (const span of spans) {
-    flagged.add(sourceLinkKey(span.raw) ?? span.raw);
-    try {
-      const host = new URL(span.raw).hostname;
-      if (/^[a-z0-9.-]{1,253}$/.test(host) && hosts.size < RESEARCH_LIMITS.unsourcedHosts) hosts.add(host);
-    } catch { /* The count still records an unparsable link. */ }
-  }
+  const flagged = new Set(spans.map((span) => sourceLinkKey(span.raw) ?? span.raw));
   let text = answer;
   for (const span of [...spans].reverse()) {
     text = text.slice(0, span.index) + UNSOURCED_LINK_MARKER + text.slice(span.index + span.raw.length);
   }
-  return { text: spans.length ? unwrapMarker(text, UNSOURCED_LINK_MARKER) : text,
-    unsourcedLinkCount: flagged.size, unsourcedLinkHosts: [...hosts] };
+  return { text: spans.length ? unwrapMarker(text, UNSOURCED_LINK_MARKER) : text, unsourcedLinkCount: flagged.size };
+}
+
+// Source URLs for details, which the model also sees under Tool Search: only
+// delivered sources the answer cites, at most detailSources, each URL short
+// enough to keep details small. They feed only activity display and the
+// weaker "research returned sources" check, never a read receipt.
+function detailSources(sources, cited) {
+  return sources.filter((entry) => cited.has(entry.index - 1) && entry.url && entry.url.length <= RESEARCH_LIMITS.detailUrlChars)
+    .slice(0, RESEARCH_LIMITS.detailSources).map(({ index, url }) => ({ index, url }));
 }
 
 // The longest answer prefix whose JSON string, quotes included, fits `room`,
@@ -385,9 +442,9 @@ export function createPerplexicaResearchTool(deps = {}) {
   const availability = deps.availability;
   const outputChars = () => {
     const value = typeof deps.outputChars === "function" ? deps.outputChars() : deps.outputChars;
-    return Number.isSafeInteger(value) && value > 0 ? value : RESEARCH_LIMITS.maxOutputChars;
+    return Number.isSafeInteger(value) && value > 0 ? value : RESEARCH_LIMITS.maxResultChars;
   };
-  return {
+  const tool = {
     name: "pixel_ods_research",
     description: DESCRIPTION,
     parameters: {
@@ -456,24 +513,34 @@ export function createPerplexicaResearchTool(deps = {}) {
         const flagged = flagUnsourcedLinks(neutralised(answer), rawSources);
         const marker = randomBytes(12).toString("hex");
         const open = `<perplexica_evidence_${marker}>`, close = `</perplexica_evidence_${marker}>`;
-        const longest = contentHeader({ sourceCount, truncated: true, omitted: cited.size,
-          unsourced: flagged.unsourcedLinkCount, removedAddresses });
-        const fitted = fitEvidence(flagged.text, selectSources(rawSources, cited), cited,
-          outputChars() - longest.length - open.length - close.length - 3);
-        const sources = fitted.sources;
-        const retained = new Set(sources.map((entry) => entry.index - 1));
-        const omittedCitationCount = [...cited].filter((index) => !retained.has(index)).length;
-        const truncated = answerChars > MAX_ANSWER || fitted.answer.length < flagged.text.length || sourceCount > sources.length;
-        const header = contentHeader({ sourceCount, truncated, omitted: omittedCitationCount,
-          unsourced: flagged.unsourcedLinkCount, removedAddresses });
-        const text = `${header}\n${open}\n${JSON.stringify({ answer: fitted.answer, sources })}\n${close}`;
-        // Model-visible under Tool Search: keep details compact. URLs feed only
-        // the weaker "research returned sources" set, never a read receipt.
-        return result(text, { status: "completed", answerChars, sourceCount, truncated,
-          retainedSourceCount: sources.length, omittedCitationCount,
-          unsourcedLinkCount: flagged.unsourcedLinkCount, unsourcedLinkHosts: flagged.unsourcedLinkHosts,
-          ...(removedAddresses ? { removedAddresses } : {}),
-          sources: sources.filter((entry) => entry.url).map(({ index, url }) => ({ index, url })) });
+        const selected = selectSources(rawSources, cited);
+        const complete = (room) => {
+          const fitted = fitEvidence(flagged.text, selected, cited, room);
+          const sources = fitted.sources;
+          const retained = new Set(sources.map((entry) => entry.index - 1));
+          const omittedCitationCount = [...cited].filter((index) => !retained.has(index)).length;
+          const truncated = answerChars > MAX_ANSWER || fitted.answer.length < flagged.text.length || sourceCount > sources.length;
+          const header = contentHeader({ sourceCount, truncated, omitted: omittedCitationCount,
+            unsourced: flagged.unsourcedLinkCount, removedAddresses });
+          const text = `${header}\n${open}\n${JSON.stringify({ answer: fitted.answer, sources })}\n${close}`;
+          return result(text, { status: "completed", answerChars, sourceCount, truncated,
+            retainedSourceCount: sources.length, omittedCitationCount,
+            unsourcedLinkCount: flagged.unsourcedLinkCount,
+            ...(removedAddresses ? { removedAddresses } : {}),
+            sources: detailSources(sources, cited) });
+        };
+        // The largest evidence room whose Tool Search form
+        // (toolSearchResultChars) fits the budget. Escaping makes the wrapped
+        // size depend on the text, so search the room; it grows with the room.
+        // A budget below the fixed text and envelope (under about 2,500
+        // characters) leaves an empty excerpt, and OpenClaw then cuts it.
+        const budget = outputChars();
+        let best = complete(0);
+        for (let low = 1, high = budget; low <= high;) {
+          const room = Math.floor((low + high) / 2), candidate = complete(room);
+          if (toolSearchResultChars(tool, candidate) <= budget) { best = candidate; low = room + 1; } else high = room - 1;
+        }
+        return best;
       } catch {
         const interrupted = controller.signal.aborted;
         return result(interrupted
@@ -488,4 +555,5 @@ export function createPerplexicaResearchTool(deps = {}) {
       }
     },
   };
+  return tool;
 }
