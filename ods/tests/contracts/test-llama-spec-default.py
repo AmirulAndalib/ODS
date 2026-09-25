@@ -65,6 +65,9 @@ ENV_NAMES_BY_BUILD = {
         "LLAMA_ARG_CACHE_TYPE_V",
         "LLAMA_ARG_N_CPU_MOE",
         "LLAMA_ARG_CHECKPOINT_EVERY_NT",
+        # common_arg.cpp:1308 and :1323 at b9014.
+        "LLAMA_ARG_CTX_CHECKPOINTS",
+        "LLAMA_ARG_CACHE_RAM",
         "LLAMA_ARG_SPEC_TYPE",
         "LLAMA_ARG_SPEC_DRAFT_N_MAX",
         "LLAMA_ARG_SPEC_DRAFT_CACHE_TYPE_K",
@@ -321,6 +324,14 @@ def main() -> int:
                 errors.append(f"{stack}: {native_key} reaches the container, but llama.cpp reads {upstream_key}")
             if stack in defaulted and resolved.get(upstream_key) != "q8_0":
                 errors.append(f"{stack}: {upstream_key} is not passed to llama-server")
+    # CPU runtime profiles cap host RAM with these; unset keeps b9014 defaults
+    # (32 checkpoints, 8192 MiB prompt cache), so they must not be passed empty.
+    for key, value in (("LLAMA_ARG_CTX_CHECKPOINTS", "4"), ("LLAMA_ARG_CACHE_RAM", "1024")):
+        for stack in sorted(defaulted):
+            if container_env(stacks[stack], {key: value}).get(key) != value:
+                errors.append(f"{stack}: {key} is not passed to llama-server")
+            if key in container_env(stacks[stack], {}):
+                errors.append(f"{stack}: {key} must be absent unless set")
 
     # 4. The opt-out is documented, validated and survives installer reruns.
     schema = json.loads((ROOT_DIR / ".env.schema.json").read_text(encoding="utf-8"))["properties"]

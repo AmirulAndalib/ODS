@@ -79,6 +79,25 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
     for `off`, adds `--reasoning-budget 0`, which is what turns thinking off
     there. Before this change, b8248 installs returned Qwen3.5's reasoning
     inside every reply.
+- Model selection ranks installable models by a curated priority per memory
+  class and checks fit with a memory estimate built from each model's
+  attention layout, instead of picking the largest file that fits. Fleet
+  hosts keep their models. Off-fleet hardware that received phi-4,
+  DeepSeek-R1 or Qwen3-30B-A3B (served past its 40,960-token limit) now gets
+  Qwen3.5 9B, Qwen3.5 27B or Qwen3.6 35B-A3B at 64K-128K; Apple 8 GB gets
+  Nemotron 3 Nano 4B at 64K, and CPU-only hosts get Q8-KV runtime profiles
+  sized for the llama-server container. Each pick serves the 64K context
+  Hermes needs where a model fits at 64K; the installers re-check the fit
+  before raising a smaller context, and record the served context so a
+  Dashboard restore of the installer's pick no longer drops to 32K. A
+  Dashboard model switch uses the same context rule as the installer and
+  never asks for more than a model's native context, and ODS Talk says up
+  front when the context llama-server actually serves is below 64K instead
+  of failing in Hermes. An installer rerun keeps a previously active model
+  (clamped to its native context) rather than replacing it; when that model
+  cannot serve 64K, Talk is shown as unavailable with the reason.
+- Gemma 4 26B-A4B, E2B and E4B now run at 64K: their sliding-window layers
+  keep the KV cache small, so the context no longer rules them out of Hermes.
 - Perplexica now runs upstream release v1.12.2, published under its new name
   Vane (`itzcrazykns1337/vane:slim-v1.12.2`, digest-pinned). The UI shows the
   Vane name; ODS keeps the `perplexica` service, port and volumes, so settings

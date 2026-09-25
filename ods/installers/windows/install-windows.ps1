@@ -805,6 +805,8 @@ if ($dryRun) {
                 $_checkpointArgs = Get-ODSNativeCheckpointIntervalArgs -Executable $script:LLAMA_SERVER_EXE -Value $_llamaEnv["LLAMA_ARG_CHECKPOINT_EVERY_NT"]
                 if ($_checkpointArgs.Warning) { Write-AIWarn $_checkpointArgs.Warning }
                 $llamaArgs += @($_checkpointArgs.Arguments)
+                if ($_llamaEnv["LLAMA_ARG_CTX_CHECKPOINTS"]) { $llamaArgs += @("--ctx-checkpoints", $_llamaEnv["LLAMA_ARG_CTX_CHECKPOINTS"]) }
+                if ($_llamaEnv["LLAMA_ARG_CACHE_RAM"]) { $llamaArgs += @("--cache-ram", $_llamaEnv["LLAMA_ARG_CACHE_RAM"]) }
                 if ($_llamaEnv["LLAMA_ARG_NO_CACHE_PROMPT"] -and $_llamaEnv["LLAMA_ARG_NO_CACHE_PROMPT"] -notin @("0", "false", "off", "no")) { $llamaArgs += @("--no-cache-prompt") }
                 if ($_llamaEnv["LLAMA_ARG_SPEC_TYPE"]) { $llamaArgs += @("--spec-type", $_llamaEnv["LLAMA_ARG_SPEC_TYPE"]) }
                 if ($_llamaEnv["LLAMA_ARG_SPEC_DRAFT_N_MAX"]) { $llamaArgs += @("--spec-draft-n-max", $_llamaEnv["LLAMA_ARG_SPEC_DRAFT_N_MAX"]) }

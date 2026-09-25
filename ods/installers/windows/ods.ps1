@@ -2038,6 +2038,8 @@ function Start-NativeInferenceServer {
             $checkpointArgs = Get-ODSNativeCheckpointIntervalArgs -Executable $llamaExecutable -Value $envVars["LLAMA_ARG_CHECKPOINT_EVERY_NT"]
             if ($checkpointArgs.Warning) { Write-AIWarn $checkpointArgs.Warning }
             $llamaArgs += @($checkpointArgs.Arguments)
+            if ($envVars["LLAMA_ARG_CTX_CHECKPOINTS"]) { $llamaArgs += @("--ctx-checkpoints", $envVars["LLAMA_ARG_CTX_CHECKPOINTS"]) }
+            if ($envVars["LLAMA_ARG_CACHE_RAM"]) { $llamaArgs += @("--cache-ram", $envVars["LLAMA_ARG_CACHE_RAM"]) }
             if ($envVars["LLAMA_ARG_NO_CACHE_PROMPT"] -and $envVars["LLAMA_ARG_NO_CACHE_PROMPT"] -notin @("0", "false", "off", "no")) { $llamaArgs += @("--no-cache-prompt") }
             if ($envVars["LLAMA_ARG_SPEC_TYPE"]) { $llamaArgs += @("--spec-type", $envVars["LLAMA_ARG_SPEC_TYPE"]) }
             if ($envVars["LLAMA_ARG_SPEC_DRAFT_N_MAX"]) { $llamaArgs += @("--spec-draft-n-max", $envVars["LLAMA_ARG_SPEC_DRAFT_N_MAX"]) }
@@ -3607,10 +3609,10 @@ function Invoke-Model {
                 Write-Host '  T0         - qwen3.5-2b (< 8GB RAM, any GPU)'
                 Write-Host '  T1         - qwen3.5-9b (<12GB VRAM)'
                 Write-Host '  T2         - qwen3.5-9b (12-19GB, larger context)'
-                Write-Host '  T3         - qwen3-30b-a3b (20-47GB)'
-                Write-Host '  T4         - qwen3-30b-a3b (48GB+)'
-                Write-Host '  SH         - qwen3-30b-a3b (Strix Halo unified)'
-                Write-Host '  SH_LARGE   - qwen3-coder-next (90GB+ unified)'
+                Write-Host '  T3         - qwen3.5-27b (20-39GB)'
+                Write-Host '  T4         - qwen3.6-35b-a3b (40GB+)'
+                Write-Host '  SH         - qwen3.6-35b-a3b (Strix Halo unified)'
+                Write-Host '  SH_LARGE   - qwen3.6-35b-a3b (90GB+ unified)'
                 Write-Host '  NV_ULTRA   - qwen3-coder-next (amd64) / qwen3.6-35b-a3b (arm64 Spark)'
                 Write-Host ''
                 Write-Host 'Usage: .\ods.ps1 model swap <tier>'
