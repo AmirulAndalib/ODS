@@ -1089,6 +1089,40 @@ class TestEnableExtension:
         assert resp.status_code == 400
         assert "local build" in resp.json()["detail"]
 
+    @pytest.mark.parametrize('enabled', [False, True], ids=['activate', 'stopped'])
+    @pytest.mark.parametrize('marker, allowed', [
+        (None, True),
+        ('{"repository": "https://github.com/owner/project"}', True),
+        ('{"origin": "github-proposal"}', False),
+        ('{"origin": ', False),
+    ], ids=['curated-no-marker', 'curated-marker', 'imported', 'invalid-marker'])
+    def test_enable_applies_the_imported_bind_namespace(self, test_client, monkeypatch, tmp_path,
+                                                        enabled, marker, allowed):
+        """The enable/activate re-scan refuses what the compose resolver would
+        drop: an imported recipe binding outside ./data/<id> and ./config/<id>.
+        Curated recipes keep their reviewed binds (label-studio's ./upload)."""
+        compose = ("services:\n  fx-upload:\n    image: test\n    volumes:\n"
+                   "      - ./data/fx-upload/state:/ok\n      - ./upload:/app/upload\n")
+        user_dir = tmp_path / "user"
+        ext_dir = user_dir / "fx-upload"
+        ext_dir.mkdir(parents=True)
+        (ext_dir / ("compose.yaml" if enabled else "compose.yaml.disabled")).write_text(compose)
+        (ext_dir / "manifest.yaml").write_text(
+            "schema_version: ods.services.v1\nservice:\n  id: fx-upload\n  name: fx-upload\n")
+        if marker is not None:
+            (ext_dir / "upstream.json").write_text(marker)
+        _patch_mutation_config(monkeypatch, tmp_path, user_dir=user_dir)
+
+        resp = test_client.post(
+            "/api/extensions/fx-upload/enable",
+            headers=test_client.auth_headers,
+        )
+        if allowed:
+            assert resp.status_code == 200, resp.json()
+        else:
+            assert resp.status_code == 400
+            assert "outside its own ./data/fx-upload and ./config/fx-upload" in resp.json()["detail"]
+
 
 class TestEnableExtensionHookReturnHandling:
     """pre_start failures must block start; post_start failures surface as warnings."""

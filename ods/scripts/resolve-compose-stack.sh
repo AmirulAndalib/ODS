@@ -504,18 +504,30 @@ _COMPOSE_POLICY_RESERVATION_KEYS = frozenset({"cpus", "memory", "devices"})
 _COMPOSE_POLICY_NETWORK_KEYS = frozenset({"external", "name", "internal", "labels"})
 _COMPOSE_POLICY_VOLUME_KEYS = frozenset({"labels"})
 _COMPOSE_POLICY_MARKER_MAX_BYTES = 524288
+# A Compose file with every alias expanded; ODS's largest is a few hundred
+# nodes. Bounds alias bombs before anything walks the parsed document.
+_COMPOSE_POLICY_MAX_NODES = 100000
 
 
 class _ComposePolicyLoader(yaml.SafeLoader):
     """SafeLoader that refuses duplicate mapping keys, as Compose does."""
 
     def _refuse_duplicate_keys(self, node):
+        # SafeConstructor.flatten_mapping rewrites a mapping node in place
+        # (merged keys first, then its own), so judge each node once, on the
+        # keys its author wrote, before that happens. A layered merge
+        # (x-b: {<<: *a, restart: always}) then merged again is not a
+        # duplicate.
+        checked = self.__dict__.setdefault("_compose_policy_checked", set())
+        if id(node) in checked:
+            return
+        checked.add(id(node))
         seen = set()
         for key_node, value_node in node.value:
             if key_node.tag == "tag:yaml.org,2002:merge":
                 merged = value_node.value if isinstance(value_node, yaml.SequenceNode) else [value_node]
                 for item in merged:
-                    if isinstance(item, yaml.MappingNode) and item is not node:
+                    if isinstance(item, yaml.MappingNode):
                         self._refuse_duplicate_keys(item)
                 continue
             if not isinstance(key_node, yaml.ScalarNode):
@@ -533,18 +545,42 @@ class _ComposePolicyLoader(yaml.SafeLoader):
         return super().construct_mapping(node, deep=deep)
 
 
+def _compose_policy_bound_expansion(data):
+    """ValueError when data refers to itself or, with every alias expanded,
+    exceeds _COMPOSE_POLICY_MAX_NODES. Linear in the parsed (shared) size."""
+    sizes, active, pending = {}, set(), [(data, False)]
+    while pending:
+        item, finished = pending.pop()
+        if not isinstance(item, (dict, list)) or (not finished and id(item) in sizes):
+            continue
+        children = [*item.keys(), *item.values()] if isinstance(item, dict) else item
+        if finished:
+            active.discard(id(item))
+            sizes[id(item)] = 1 + sum(sizes[id(child)] if isinstance(child, (dict, list)) else 1
+                                      for child in children)
+            if sizes[id(item)] > _COMPOSE_POLICY_MAX_NODES:
+                raise ValueError("document expands beyond %d nodes (excessive aliasing)"
+                                 % _COMPOSE_POLICY_MAX_NODES)
+            continue
+        if id(item) in active:
+            raise ValueError("self-referencing anchor")
+        active.add(id(item))
+        pending.append((item, True))
+        pending.extend((child, False) for child in children if isinstance(child, (dict, list)))
+
+
 def _compose_policy_load(text):
     """Parse one Compose document; ValueError for anything not judgeable.
 
     That is invalid YAML, several documents, a duplicate key, Compose's own
-    !reset/!override tags (unknown to SafeLoader) and self-referencing or
-    unboundedly nested structures.
+    !reset/!override tags (unknown to SafeLoader), self-referencing anchors,
+    alias bombs and unboundedly nested structures.
     """
     try:
         data = yaml.load(text, Loader=_ComposePolicyLoader)  # noqa: S506 - SafeLoader subclass
-        json.dumps(data, default=str, skipkeys=True)  # refuses reference cycles
-    except (yaml.YAMLError, RecursionError, ValueError) as exc:
-        raise ValueError(str(exc)) from None
+        _compose_policy_bound_expansion(data)
+    except (yaml.YAMLError, RecursionError, MemoryError, ValueError) as exc:
+        raise ValueError(str(exc) or type(exc).__name__) from None
     return data
 
 
@@ -1164,6 +1200,24 @@ if ext_dir.exists():
                 # Unexpected error — re-raise to crash visibly
                 raise
 
+# Services a refused user-extension fragment would have declared, with the
+# reason, so dependents dropped by _drop_unresolvable_user_extensions() can say
+# why their dependency is missing.
+_refused_services = {}
+
+
+def _note_refused_fragment(service_dir, compose_path, warnings):
+    try:
+        data = _compose_policy_load(compose_path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return
+    services = data.get("services") if isinstance(data, dict) else None
+    reason = (f"which {service_dir.name}/{compose_path.name} declares but was refused: "
+              f"{warnings[0] if warnings else 'compose policy'}")
+    for name in (services if isinstance(services, dict) else ()):
+        _refused_services.setdefault(str(name), reason)
+
+
 # Discover enabled user-installed extensions (from dashboard portal)
 user_ext_dir = script_dir / "data" / "user-extensions"
 if user_ext_dir.exists():
@@ -1228,6 +1282,7 @@ if user_ext_dir.exists():
                 for w in warnings:
                     print(f"WARNING: {service_dir.name}: {w}", file=sys.stderr)
                 if not ok:
+                    _note_refused_fragment(service_dir, compose_path, warnings)
                     continue
                 resolved.append(str(compose_path.relative_to(script_dir)))
                 # GPU-specific overlay (filesystem discovery — not in manifest)
@@ -1239,7 +1294,9 @@ if user_ext_dir.exists():
                                                               extension_id=service_dir.name)
                     for w in warnings:
                         print(f"WARNING: {service_dir.name}: {w}", file=sys.stderr)
-                    if ok:
+                    if not ok:
+                        _note_refused_fragment(service_dir, gpu_overlay, warnings)
+                    else:
                         managed_local_inference = (
                             ods_mode in ("local", "hybrid")
                             and tier != "CLOUD"
@@ -1282,6 +1339,8 @@ if user_ext_dir.exists():
                             print(f"WARNING: {service_dir.name}: {w}", file=sys.stderr)
                         if ok:
                             resolved.append(str(local_mode_overlay.relative_to(script_dir)))
+                        else:
+                            _note_refused_fragment(service_dir, local_mode_overlay, warnings)
 
                 # Multi-GPU overlay if we have more than 1 GPU
                 if gpu_count > 1:
@@ -1295,6 +1354,8 @@ if user_ext_dir.exists():
                             print(f"WARNING: {service_dir.name}: {w}", file=sys.stderr)
                         if ok:
                             resolved.append(str(multi_gpu_overlay.relative_to(script_dir)))
+                        else:
+                            _note_refused_fragment(service_dir, multi_gpu_overlay, warnings)
 
             except Exception as e:
                 # Narrow exception handling to specific parse/structure errors
@@ -1388,6 +1449,86 @@ if os.path.lexists(native_activation):
     except (ValueError, OSError, ImportError):
         print('ERROR: Native Pixel Compose selection needs recovery; retain its installation receipts.', file=sys.stderr)
         sys.exit(1)
+
+def _service_references(service):
+    """Services Compose requires to be declared for this service to load."""
+    references = set()
+    depends_on = service.get("depends_on")
+    if isinstance(depends_on, (dict, list)):
+        references.update(str(name) for name in depends_on if isinstance(name, str))
+    for key in ("network_mode", "pid", "ipc"):
+        mode = service.get(key)
+        if isinstance(mode, str) and mode.startswith("service:"):
+            references.add(mode.split(":", 1)[1])
+    for key in ("links", "volumes_from"):
+        entries = service.get(key)
+        for entry in entries if isinstance(entries, list) else ():
+            if isinstance(entry, str) and not entry.startswith("container:"):
+                references.add(entry.split(":", 1)[0])
+    return references
+
+
+def _drop_unresolvable_user_extensions(files):
+    """Drop user extensions that need a service no remaining file declares.
+
+    Compose refuses the WHOLE project when one service depends on an
+    undefined service (required or not), so a refused provider would
+    otherwise take every `ods` command down with its dependents. Drops
+    cascade transitively; each is reported with the chain back to the
+    refusal. ODS's own files are never dropped here. Profiles are not
+    modelled: a declared but profiled-out dependency still fails in Compose.
+    """
+    def extension_of(rel):
+        parts = pathlib.PurePath(rel).parts
+        return parts[2] if len(parts) > 3 and parts[:2] == ("data", "user-extensions") else None
+
+    declared_by, needs = {}, {}
+    for rel in files:
+        owner = extension_of(rel)
+        try:
+            text = (script_dir / rel).read_text(encoding="utf-8")
+        except FileNotFoundError:
+            continue  # declares nothing; Compose reports the missing file itself
+        except OSError:
+            if owner is None:
+                return files  # the stack itself is unreadable; Compose reports it
+            continue
+        try:
+            data = _compose_policy_load(text) if owner else yaml.safe_load(text)
+        except (ValueError, yaml.YAMLError):
+            if owner is None:
+                return files
+            data = None
+        services = data.get("services") if isinstance(data, dict) else None
+        for name, service in (services.items() if isinstance(services, dict) else ()):
+            declared_by.setdefault(str(name), set()).add(owner)
+            if owner is not None and isinstance(service, dict):
+                for reference in _service_references(service):
+                    needs.setdefault(owner, {}).setdefault(reference, str(name))
+    unavailable = dict(_refused_services)
+    dropped = set()
+    changed = True
+    while changed:
+        changed = False
+        for owner in sorted(needs):
+            if owner in dropped:
+                continue
+            for reference, dependent in sorted(needs[owner].items()):
+                if declared_by.get(reference, set()) - dropped:
+                    continue
+                why = unavailable.get(reference, "which no enabled extension or ODS service declares")
+                cause = f"service '{dependent}' needs '{reference}', {why}"
+                print(f"WARNING: {owner}: skipped because {cause}", file=sys.stderr)
+                dropped.add(owner)
+                changed = True
+                for name, owners in declared_by.items():
+                    if owner in owners:
+                        unavailable.setdefault(name, f"which {owner} declares but was skipped because {cause}")
+                break
+    return [rel for rel in files if extension_of(rel) not in dropped]
+
+
+resolved = _drop_unresolvable_user_extensions(resolved)
 
 # Each extension owns its projection so narrowed installs cannot accidentally
 # include unrelated services or require their missing configuration.

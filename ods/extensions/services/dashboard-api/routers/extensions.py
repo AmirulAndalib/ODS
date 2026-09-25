@@ -674,18 +674,30 @@ _COMPOSE_POLICY_RESERVATION_KEYS = frozenset({"cpus", "memory", "devices"})
 _COMPOSE_POLICY_NETWORK_KEYS = frozenset({"external", "name", "internal", "labels"})
 _COMPOSE_POLICY_VOLUME_KEYS = frozenset({"labels"})
 _COMPOSE_POLICY_MARKER_MAX_BYTES = 524288
+# A Compose file with every alias expanded; ODS's largest is a few hundred
+# nodes. Bounds alias bombs before anything walks the parsed document.
+_COMPOSE_POLICY_MAX_NODES = 100000
 
 
 class _ComposePolicyLoader(yaml.SafeLoader):
     """SafeLoader that refuses duplicate mapping keys, as Compose does."""
 
     def _refuse_duplicate_keys(self, node):
+        # SafeConstructor.flatten_mapping rewrites a mapping node in place
+        # (merged keys first, then its own), so judge each node once, on the
+        # keys its author wrote, before that happens. A layered merge
+        # (x-b: {<<: *a, restart: always}) then merged again is not a
+        # duplicate.
+        checked = self.__dict__.setdefault("_compose_policy_checked", set())
+        if id(node) in checked:
+            return
+        checked.add(id(node))
         seen = set()
         for key_node, value_node in node.value:
             if key_node.tag == "tag:yaml.org,2002:merge":
                 merged = value_node.value if isinstance(value_node, yaml.SequenceNode) else [value_node]
                 for item in merged:
-                    if isinstance(item, yaml.MappingNode) and item is not node:
+                    if isinstance(item, yaml.MappingNode):
                         self._refuse_duplicate_keys(item)
                 continue
             if not isinstance(key_node, yaml.ScalarNode):
@@ -703,18 +715,42 @@ class _ComposePolicyLoader(yaml.SafeLoader):
         return super().construct_mapping(node, deep=deep)
 
 
+def _compose_policy_bound_expansion(data):
+    """ValueError when data refers to itself or, with every alias expanded,
+    exceeds _COMPOSE_POLICY_MAX_NODES. Linear in the parsed (shared) size."""
+    sizes, active, pending = {}, set(), [(data, False)]
+    while pending:
+        item, finished = pending.pop()
+        if not isinstance(item, (dict, list)) or (not finished and id(item) in sizes):
+            continue
+        children = [*item.keys(), *item.values()] if isinstance(item, dict) else item
+        if finished:
+            active.discard(id(item))
+            sizes[id(item)] = 1 + sum(sizes[id(child)] if isinstance(child, (dict, list)) else 1
+                                      for child in children)
+            if sizes[id(item)] > _COMPOSE_POLICY_MAX_NODES:
+                raise ValueError("document expands beyond %d nodes (excessive aliasing)"
+                                 % _COMPOSE_POLICY_MAX_NODES)
+            continue
+        if id(item) in active:
+            raise ValueError("self-referencing anchor")
+        active.add(id(item))
+        pending.append((item, True))
+        pending.extend((child, False) for child in children if isinstance(child, (dict, list)))
+
+
 def _compose_policy_load(text):
     """Parse one Compose document; ValueError for anything not judgeable.
 
     That is invalid YAML, several documents, a duplicate key, Compose's own
-    !reset/!override tags (unknown to SafeLoader) and self-referencing or
-    unboundedly nested structures.
+    !reset/!override tags (unknown to SafeLoader), self-referencing anchors,
+    alias bombs and unboundedly nested structures.
     """
     try:
         data = yaml.load(text, Loader=_ComposePolicyLoader)  # noqa: S506 - SafeLoader subclass
-        json.dumps(data, default=str, skipkeys=True)  # refuses reference cycles
-    except (yaml.YAMLError, RecursionError, ValueError) as exc:
-        raise ValueError(str(exc)) from None
+        _compose_policy_bound_expansion(data)
+    except (yaml.YAMLError, RecursionError, MemoryError, ValueError) as exc:
+        raise ValueError(str(exc) or type(exc).__name__) from None
     return data
 
 
@@ -3998,6 +4034,20 @@ def _get_missing_deps_transitive(
     return _order
 
 
+def _imported_extension_namespace(service_id: str, ext_dir: Path, is_builtin: bool) -> str | None:
+    """The bind-mount namespace the enable/activate re-scan enforces.
+
+    These scans run untrusted for every user extension, so pass the
+    extension id only where the install gate and the compose resolver apply
+    the imported-recipe namespace (./data/<id>, ./config/<id>): not for
+    built-ins or curated library recipes, always for an imported or
+    unclassifiable upstream.json marker.
+    """
+    if is_builtin or _compose_policy_library_origin(ext_dir) == "curated":
+        return None
+    return service_id
+
+
 def _activate_service(service_id: str) -> dict:
     """Core enable logic â€” NO lock acquisition. Called inside _extensions_lock.
 
@@ -4037,6 +4087,7 @@ def _activate_service(service_id: str) -> dict:
         skip_gpu_passthrough_check=is_builtin,
         skip_root_user_check=is_builtin,
         builtin=is_builtin,
+        extension_id=_imported_extension_namespace(service_id, ext_dir, is_builtin),
     )
 
     # Reject symlinks
@@ -4119,6 +4170,7 @@ def enable_extension(
                 skip_gpu_passthrough_check=is_builtin,
                 skip_root_user_check=is_builtin,
                 builtin=is_builtin,
+                extension_id=_imported_extension_namespace(service_id, ext_dir, is_builtin),
             )
     elif not disabled_compose.exists():
         raise HTTPException(

@@ -113,6 +113,13 @@ MUST_REJECT = [
      svc(AMD + "    <<: [*a, *b]\n",
          head="x-a: &a\n  group_add: ['44']\nx-b: &b\n  cap_add: [SYS_ADMIN]\n"), None),
     ("recursive-alias", "compose.amd.yaml", True, "x-a: &a [*a]\n" + svc(AMD + "    cap_add: *a\n"), None),
+    ("recursive-mapping-alias", "compose.yaml", True, "x-a: &a {b: *a}\n" + svc("    labels: *a\n"), None),
+    # Nine levels of ten aliases expand to 10^9 nodes (used to exhaust memory
+    # in the resolver and abort the whole stack, not just this extension).
+    ("alias-bomb", "compose.yaml", True,
+     "x-0: &x0 [a, a, a, a, a, a, a, a, a, a]\n"
+     + "".join(f"x-{level}: &x{level} [{', '.join([f'*x{level - 1}'] * 10)}]\n" for level in range(1, 9))
+     + svc("    labels: *x8\n"), None),
     # --- duplicate keys (was: both accepted, PyYAML keeps the last) --------
     ("duplicate-key-privileged-last-false", "compose.nvidia.yaml", True,
      svc(NV + "    privileged: true\n    privileged: false\n"), None),
@@ -124,6 +131,8 @@ MUST_REJECT = [
      "services:\n  recipe:\n    image: example:fixture\n  recipe:\n    image: example:other\n", None),
     ("duplicate-key-inline-merge", "compose.yaml", True,
      svc("    <<: {privileged: false, privileged: true}\n"), None),
+    ("duplicate-key-in-layered-anchor", "compose.yaml", True,
+     "x-a: &a {init: true}\nx-b: &b {<<: *a, privileged: false, privileged: true}\n" + svc("    <<: *b\n"), None),
     # --- explicit tags and Compose booleans (was: both accepted) -----------
     ("tag-bool-privileged", "compose.nvidia.yaml", True,
      svc(NV + "    privileged: !!bool 'true'\n"), None),
@@ -409,6 +418,20 @@ MUST_ACCEPT = [
     ("merge-key-then-explicit-override", "compose.yaml", False,
      "x-defaults: &defaults\n  restart: always\n  privileged: false\n"
      + svc("    <<: *defaults\n    restart: unless-stopped\n")),
+    # PyYAML flattens a merged mapping in place; a layered anchor merged
+    # again is not a duplicate key (Compose renders these).
+    ("layered-merge-then-override", "compose.yaml", False,
+     "x-a: &a {restart: 'no', init: true}\nx-b: &b {<<: *a, restart: always}\n" + svc("    <<: *b\n")),
+    ("layered-merge-three-deep", "compose.yaml", False,
+     "x-a: &a {restart: 'no'}\nx-b: &b {<<: *a, restart: always}\nx-c: &c {<<: *b, restart: on-failure}\n"
+     + svc("    <<: *c\n    restart: unless-stopped\n")),
+    ("environment-anchor-reused", "compose.yaml", False,
+     "x-common: &common {TZ: UTC}\nservices:\n  recipe:\n    image: example:fixture\n"
+     "    environment: &env\n      <<: *common\n      LOG: debug\n"
+     "  recipe-worker:\n    image: example:fixture\n    environment: *env\n"),
+    ("service-template-reused-twice", "compose.yaml", False,
+     "x-svc: &svc\n  image: example:fixture\n  restart: unless-stopped\n"
+     "services:\n  recipe: {<<: *svc}\n  recipe-worker: {<<: *svc, restart: always}\n"),
     ("ods-network-external-without-name", "compose.yaml", False,
      svc("    networks: [ods-network]\n", tail="networks:\n  ods-network:\n    external: true\n")),
     ("project-default-network-is-ods", "compose.yaml", False,

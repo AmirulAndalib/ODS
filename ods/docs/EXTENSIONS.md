@@ -547,6 +547,14 @@ Compose resolves them, and anything the file alone cannot decide is refused:
   records `origin: github-proposal`. A linked, oversized (over 512 KiB),
   non-JSON or duplicate-key marker is never curated: staging refuses the
   install and the resolver treats the recipe as imported.
+- **Refusals do not take the stack down:** the resolver leaves a refused
+  file out with a `WARNING`. Compose rejects the whole project when a service
+  depends on an undefined one, so the resolver also leaves out every user
+  extension that needs (`depends_on`, `links`, `service:` namespaces) a
+  service no remaining file declares, transitively, naming the chain back to
+  the refusal. `ods enable`, `ods disable` and `ods mode` print these
+  warnings. The dashboard's enable/activate re-scan applies the same
+  imported-recipe bind namespace as the install gate.
 
 ### 4. Enable / Disable
 
