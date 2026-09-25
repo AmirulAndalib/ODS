@@ -17,7 +17,12 @@ def talk_client(test_client, signed_talk_cookie, monkeypatch):
     async def no_loaded_model():
         return None
 
+    async def no_live_context(model_hint=None):
+        return None
+
     monkeypatch.setattr("routers.talk.get_loaded_model", no_loaded_model)
+    # Never reach a real llama-server /props from the test process.
+    monkeypatch.setattr("routers.talk.get_llama_context_size", no_live_context)
     test_client.cookies.set("ods-session", signed_talk_cookie)
     return test_client
 
@@ -1834,16 +1839,21 @@ def _context_catalog():
     ]
 
 
-def _patch_context_talk(monkeypatch, *, gguf, env):
+def _patch_context_talk(monkeypatch, *, gguf, env, live_context=None):
     async def fake_state(service_id):
         return {"configured": True, "status": "healthy", "id": service_id}
 
     async def live_model():
         return gguf
 
+    async def live_n_ctx(model_hint=None):
+        assert model_hint == gguf
+        return live_context
+
     catalog = _context_catalog()
     monkeypatch.setattr("routers.talk._service_state", fake_state)
     monkeypatch.setattr("routers.talk.get_loaded_model", live_model)
+    monkeypatch.setattr("routers.talk.get_llama_context_size", live_n_ctx)
     monkeypatch.setattr("routers.talk.load_model_catalog", lambda _install_dir: catalog)
     monkeypatch.setattr("routers.talk.read_env_file_value", lambda key, _install_dir: env.get(key, ""))
     monkeypatch.setattr("routers.talk.read_env_value", lambda key, _install_dir: env.get(key, ""))
@@ -1892,3 +1902,47 @@ def test_talk_status_names_a_native_context_limit(talk_client, monkeypatch):
 
     assert data["capabilities"]["text_chat"] is False
     assert "supports only 16K" in data["reason"]
+
+
+def test_talk_status_uses_the_live_context_over_the_launch_configuration(talk_client, monkeypatch):
+    """The live n_ctx is what Hermes checks, so it decides over the launch
+    configuration. They can disagree: llama.cpp caps a slot at the model's
+    training context whatever CTX_SIZE asks for (#6712: 131072 requested,
+    n_ctx 40960), and below 64K Hermes refuses every turn with a 502."""
+    _patch_context_talk(
+        monkeypatch, gguf="Qwen3.5-27B-Q4_K_M.gguf", env={"CTX_SIZE": "65536"}, live_context=32768,
+    )
+
+    data = talk_client.get("/api/talk/status").json()
+
+    assert data["capabilities"]["text_chat"] is False
+    assert data["modelCompatibility"]["hermesTalk"]["code"] == "context_below_hermes_minimum"
+    assert "runs at 32K" in data["reason"]
+
+
+def test_talk_status_allows_a_live_context_at_the_floor(talk_client, monkeypatch):
+    _patch_context_talk(
+        monkeypatch, gguf="Qwen3.5-27B-Q4_K_M.gguf", env={"CTX_SIZE": "32768"}, live_context=65536,
+    )
+
+    data = talk_client.get("/api/talk/status").json()
+
+    assert data["capabilities"]["text_chat"] is True
+    assert data["reason"] is None
+
+
+def test_talk_status_judges_an_import_on_its_live_context_only(talk_client, monkeypatch):
+    # A model outside the catalog (an import) served below the floor is
+    # reported up front too; without a live value its launch configuration
+    # is not used (a cloud or external backend has none to go by).
+    _patch_context_talk(
+        monkeypatch, gguf="my-import-Q4_K_M.gguf", env={"CTX_SIZE": "32768"}, live_context=32768,
+    )
+    data = talk_client.get("/api/talk/status").json()
+    assert data["modelCompatibility"]["hermesTalk"]["code"] == "context_below_hermes_minimum"
+
+    _patch_context_talk(
+        monkeypatch, gguf="my-import-Q4_K_M.gguf", env={"CTX_SIZE": "32768"}, live_context=None,
+    )
+    data = talk_client.get("/api/talk/status").json()
+    assert data["modelCompatibility"]["hermesTalk"].get("code") != "context_below_hermes_minimum"
