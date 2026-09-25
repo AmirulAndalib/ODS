@@ -49,7 +49,8 @@ import {
   privateBrowserAccessForAgent,
 } from "./tool-loop-guard.mjs";
 import { withPixelCronDeliveryDefault } from "./cron-delivery-default.mjs";
-import { createPublicWebExtractTool } from "./web-extract.mjs";
+import { createPublicPageReader, createPublicWebExtractTool } from "./web-extract.mjs";
+import { citationPageReadsAllowed, createHostCitationVerifier } from "./citation-verification.mjs";
 import { createExtensionRepositoryContext } from './extension-repository-context.mjs';
 
 const extensionRepositoryContext = createExtensionRepositoryContext({
@@ -310,7 +311,17 @@ export default definePluginEntry({
       publishWorkspacePreview: previewRecoveryAllowed(api.config) ? (params, {signal}) =>
         createWorkspacePreviewTool({transport:api.pluginConfig?.workspacePreviewTransport})
           .execute('ods-preview-delivery', params, signal) : undefined,
+      // Cited pages the model never opened are read once by the host through
+      // the same strict guard as pixel_ods_web_extract, only where the
+      // operator's configuration permits page reads.
+      hostCitationVerifier: createHostCitationVerifier({
+        readPage: createPublicPageReader({
+          guardedFetch: fetchWithWebToolsNetworkGuard, readResponseText, extractBasicHtmlContent,
+        }),
+        allowed: () => citationPageReadsAllowed(api.runtime?.config?.current?.() ?? api.config, AGENT_ID),
+      }),
       warn: (message) => api.logger.warn(message),
+      info: (message) => api.logger.info?.(message),
     });
     const bundleExecution = createWorkspaceBundleExecution({
       readConfig: () => api.runtime?.config?.current?.() ?? api.config,
@@ -461,6 +472,7 @@ export default definePluginEntry({
     api.on("before_agent_finalize", async (event, context) => {
       await toolLoopGuard.revalidateWorkspacePreview(event, context, AGENT_ID);
       await toolLoopGuard.recoverWorkspacePreview(event, context, AGENT_ID);
+      await toolLoopGuard.verifyCitedPages(event, context, AGENT_ID);
       const guardDecision = toolLoopGuard.beforeAgentFinalize(event, context, AGENT_ID);
       const verification = toolLoopGuard.deliveryVerificationForRun(context?.runId ?? event?.runId);
       return goalProgress.finalize(event, context, {guardDecision,

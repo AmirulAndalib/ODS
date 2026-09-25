@@ -23,6 +23,7 @@ import { captureNativeWebSearchResult, projectNativeWebSearchResult, projectWebR
 import { SEARCH_PACING_STREAK, SEARCH_PACING_REASON, searchTerms, nearDuplicateSearch, searchLeadUrls,
   duplicateSearchReason, ownerResearchDate, staleSearchDate, staleSearchDateGuidance } from "./research-pacing.mjs";
 import { createCompletionAssurance } from "./completion-assurance.mjs";
+import { HOST_CITATION_LIMITS } from './citation-verification.mjs';
 import { createExtensionCompletionGate } from "./extension-completion-gate.mjs";
 import { parseQuestions, questionsText, requestsChoiceQuestion, choiceQuestionFromText } from "./ask-user.mjs";
 import { createRunProgressBudget, failedToolOutcome, isLiteralEcho, progressLaneStopReason, RUN_PROGRESS_STOP_REASON } from "./run-progress-budget.mjs";
@@ -6745,9 +6746,11 @@ export function createToolLoopGuard({
   verifyWorkspacePreview,
   workspacePreviewInspectionAvailable = false,
   publishWorkspacePreview,
+  hostCitationVerifier,
   execMarkerCleanupDelayMs = 5000,
   limits,
   warn = () => {},
+  info = () => {},
 } = {}) {
   const effective = normalizedLimits(limits);
   // This intentionally stays plugin-local. OpenClaw's runContext write API is
@@ -11266,6 +11269,65 @@ export function createToolLoopGuard({
     return true;
   }
 
+  // Before the answer is judged, the host may read up to four cited public
+  // pages the model never opened (citation-verification.mjs). Each read counts
+  // against this response's page-reading and total web allowances; nothing is
+  // read when they cannot cover every candidate, when the operator disabled or
+  // denied page reads, when the owner excluded web access or a private-network
+  // denial occurred, or when the run was cancelled or stopped for good. A URL
+  // is never host-read twice in a run. A verified page becomes a distinct
+  // host-verification receipt, never a model read.
+  async function verifyCitedPages(event, context, agentId = 'pixel') {
+    if (context?.agentId !== agentId || typeof hostCitationVerifier?.verify !== 'function') return undefined;
+    const runId = context?.runId ?? event?.runId;
+    const state = typeof runId === 'string' && runId ? runs.get(runId) : undefined;
+    if (!state || state.clientCancelled || state.webLoopAborted || state.recursiveDeleteDenied || state.ownerQuestions ||
+        state.privateNetworkExhausted || state.privateNetworkRequestDenied || state.workspacePreviewRestrictions?.web ||
+        state.extensionCompletionGate?.active ||
+        // After a tool-limit stop only a still-pending answer turn is judged.
+        (state.progressBudget.exhausted && !['pending', 'instructed', 'turn'].includes(progressFinalization(state).phase))) {
+      return undefined;
+    }
+    const answer = event?.lastAssistantMessage;
+    const candidates = state.completionAssurance.hostVerificationCandidates(answer);
+    if (!candidates) return undefined;
+    const {urls, portuguese} = candidates;
+    const attempted = state.hostCitationAttempted ??= new Set();
+    const records = state.hostCitationVerifications ??= [];
+    const remaining = Math.min(effective.fetch - state.fetch, effective.total - state.total);
+    const skip = reason => {
+      const record = {urls, skipped: reason, fetched: 0, verified: [], elapsedMs: 0};
+      if (records.length < 8) records.push(record);
+      return record;
+    };
+    if (urls.length > HOST_CITATION_LIMITS.maxUrls) return skip('too-many-citations');
+    if (urls.some(url => attempted.has(url)) ||
+        attempted.size + urls.length > HOST_CITATION_LIMITS.maxUrlsPerRun) return skip('already-attempted');
+    if (urls.length > remaining) return skip('web-allowance');
+    if (!hostCitationVerifier.allowed()) return skip('web-disabled');
+    let outcome;
+    try {
+      outcome = await hostCitationVerifier.verify({answer, urls, portuguese});
+    } catch (error) {
+      // Best effort: a verifier fault leaves the ordinary citation checks.
+      warn(`Pixel host citation verification failed for run ${runId}: ${String(error)}`);
+      for (const url of urls) attempted.add(url);
+      state.fetch += urls.length;
+      state.total += urls.length;
+      return skip('verifier-error');
+    }
+    if (outcome.fetched) for (const url of urls) attempted.add(url);
+    state.fetch += outcome.fetched;
+    state.total += outcome.fetched;
+    if (runs.get(runId) !== state || state.clientCancelled) return undefined;
+    for (const receipt of outcome.verified) state.completionAssurance.observeHostVerification(receipt.url);
+    if (records.length < 8) records.push({urls, ...outcome});
+    if (outcome.fetched) {
+      info(`Pixel host-verified ${outcome.verified.length}/${urls.length} cited page(s) for run ${runId} in ${outcome.elapsedMs} ms`);
+    }
+    return outcome;
+  }
+
   function endPreviewRevalidation(event, context) {
     const state = runs.get(context?.runId ?? event?.runId);
     if (state) {state.previewRevalidationCandidate=undefined;state.previewVerificationGeneration=(state.previewVerificationGeneration ?? 0)+1;}
@@ -11789,6 +11851,9 @@ export function createToolLoopGuard({
     beforeAgentFinalize,
     recoverWorkspacePreview,
     revalidateWorkspacePreview,
+    verifyCitedPages,
+    // Read-only host-verification records for one run (diagnostics and tests).
+    citationVerificationForRun: runId => [...(runs.get(runId)?.hostCitationVerifications ?? [])],
     endPreviewRevalidation,
     replyPayloadSending,
     observeRun,
