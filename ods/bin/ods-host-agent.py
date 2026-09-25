@@ -6942,6 +6942,7 @@ def _enable_retry_work(service_id: str) -> None:
                 msg = f"Container did not reach running state within {startup_timeout}s (state={state or 'unknown'})"
                 if state_error:
                     msg += f": {state_error}"
+                msg += _container_start_diagnostic(container_name, retry_service_def)
                 _write_progress(service_id, "error", "Start failed", error=msg)
                 return
 
@@ -7373,6 +7374,117 @@ def _build_install_sources(base, builds, services):
 
 BUILD_DIAGNOSTIC_LIMIT = 7600
 BUILD_ERROR_LINE_LIMIT = 300
+STARTUP_LOG_TAIL_LINES = 12
+STARTUP_DIAGNOSTIC_LIMIT = 2000
+
+
+def _redact_untrusted_output(output: str, services: dict, extra_secrets=()) -> str | None:
+    """Remove configured credential values and credential-shaped text.
+
+    Collects the values of credential-named variables from the agent's
+    environment, the persisted .env and the given Compose service
+    definitions, plus ``extra_secrets`` (such as an extension's declared
+    secret settings, however they are named). Returns None when the .env
+    cannot be read, so callers disclose nothing they could not check.
+    """
+    secrets = {value for value in extra_secrets if isinstance(value, str) and value}
+    sensitive = re.compile(r'(?i)(secret|token|password|passwd|credential|api.?key|private.?key|authorization)')
+    def collect(values):
+        if isinstance(values, dict):
+            for key, value in values.items():
+                if sensitive.search(str(key)) and isinstance(value, str) and value:
+                    secrets.add(value)
+    collect(dict(os.environ))
+    try:
+        collect(load_env(INSTALL_DIR / '.env'))
+    except (OSError, UnicodeError):
+        return None
+    for definition in services.values():
+        if not isinstance(definition, dict):
+            continue
+        collect(definition.get('environment'))
+        build = definition.get('build')
+        if isinstance(build, dict):
+            collect(build.get('args'))
+    output = re.sub(r'\x1b\[[0-?]*[ -/]*[@-~]', '', output)
+    if secrets:
+        output = re.sub('|'.join(re.escape(value) for value in sorted(secrets, key=len, reverse=True)),
+                        '[REDACTED]', output)
+    output = re.sub(r'(?i)(bearer\s+)[^\s\x22\x27]+', r'\1[REDACTED]', output)
+    output = re.sub(r'([a-zA-Z][a-zA-Z0-9+.-]*://)[^/\s@]+@', r'\1[REDACTED]@', output)
+    output = re.sub(r'(?im)((?:[\w-]*(?:token|password|passwd|secret|api[_-]?key|credential)[\w-]*)[\x22\x27]?\s*[:=]\s*)(?:\x22[^\x22]*\x22|\x27[^\x27]*\x27|[^\s,;]+)',
+                    r'\1[REDACTED]', output)
+    return ''.join(c for c in output if c in '\n\t' or ord(c) >= 32)
+
+
+def _declared_secret_values(service_def: dict) -> list[str]:
+    """Current .env values of the settings an extension declares secret."""
+    declarations = service_def.get('env_vars') if isinstance(service_def, dict) else None
+    keys = {item.get('key') for item in declarations or [] if isinstance(item, dict) and item.get('secret') is True}
+    if not keys:
+        return []
+    env = load_env(INSTALL_DIR / '.env')
+    return [env[key] for key in keys if isinstance(key, str) and env.get(key)]
+
+
+def _container_start_diagnostic(container_name: str, service_def: dict) -> str:
+    """Why a container did not stay running: exit code, health check, log tail.
+
+    Appended to the install/retry error so the owner sees the service's own
+    reason (for example a rejected setting) instead of only its state. The
+    container's output is untrusted: configured credentials and the
+    extension's declared secret settings are redacted before the tail is
+    bounded, and the container's environment is never read.
+    """
+    try:
+        inspected = subprocess.run(['docker', 'inspect', '--format', '{{json .State}}', container_name],
+                                   capture_output=True, text=True, timeout=10)
+        state = json.loads(inspected.stdout) if inspected.returncode == 0 else {}
+    except (subprocess.SubprocessError, OSError, ValueError):
+        state = {}
+    state = state if isinstance(state, dict) else {}
+    health = state.get('Health') if isinstance(state.get('Health'), dict) else {}
+    probes = health.get('Log') if isinstance(health.get('Log'), list) else []
+    probe = probes[-1] if probes and isinstance(probes[-1], dict) else {}
+    health_output = probe.get('Output') if isinstance(probe.get('Output'), str) else ''
+    if health.get('Status') in (None, 'healthy'):
+        health_output = ''
+    try:
+        logged = subprocess.run(['docker', 'logs', '--tail', str(STARTUP_LOG_TAIL_LINES), container_name],
+                                stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
+                                errors='replace', timeout=10)
+        log_text = logged.stdout if logged.returncode == 0 and isinstance(logged.stdout, str) else ''
+    except (subprocess.SubprocessError, OSError):
+        log_text = ''
+
+    notes = []
+    exit_code = state.get('ExitCode')
+    if type(exit_code) is int and exit_code != 0:
+        notes.append(f'Last exit code: {exit_code}.')
+    if health_output.strip() or log_text.strip():
+        try:
+            declared = _declared_secret_values(service_def)
+        except (OSError, UnicodeError):
+            declared = None
+        # Redact each part before bounding it, so a cut never exposes part
+        # of a credential.
+        parts = [(f"Last health check ({str(health.get('Status'))[:20]}):", health_output, 600),
+                 ('Last container log lines:', log_text, STARTUP_DIAGNOSTIC_LIMIT)]
+        for title, output, limit in parts:
+            if not output.strip():
+                continue
+            redacted = None if declared is None else _redact_untrusted_output(output, {}, declared)
+            if redacted is None:
+                notes.append('Container output withheld: credential redaction could not be completed.')
+                break
+            lines = [line.rstrip()[:BUILD_ERROR_LINE_LIMIT] for line in redacted.splitlines() if line.strip()]
+            while len(lines) > 1 and len('\n'.join(lines)) > limit:
+                lines.pop(0)  # Keep the most recent lines, whole.
+            if lines:
+                notes.append(title + '\n' + '\n'.join(lines))
+    if not notes:
+        return ''
+    return '\nUntrusted container output, credentials redacted:\n' + '\n'.join(notes)
 
 
 def _install_build_diagnostic(result, services: dict, subject: str = 'build') -> str:
@@ -7391,35 +7503,10 @@ def _install_build_diagnostic(result, services: dict, subject: str = 'build') ->
     """
     output = '\n'.join(str(getattr(result, stream, '') or '')
                        for stream in ('stdout', 'stderr'))
-    secrets = set()
-    sensitive = re.compile(r'(?i)(secret|token|password|passwd|credential|api.?key|private.?key|authorization)')
-    def collect(values):
-        if isinstance(values, dict):
-            for key, value in values.items():
-                if sensitive.search(str(key)) and isinstance(value, str) and value:
-                    secrets.add(value)
-    collect(dict(os.environ))
-    try:
-        collect(load_env(INSTALL_DIR / '.env'))
-    except (OSError, UnicodeError):
+    output = _redact_untrusted_output(output, services)
+    if output is None:
         # Do not disclose output if persisted credentials cannot be checked.
         return f'{subject[:1].upper()}{subject[1:]} diagnostics unavailable: credential redaction could not be completed.'
-    for definition in services.values():
-        if not isinstance(definition, dict):
-            continue
-        collect(definition.get('environment'))
-        build = definition.get('build')
-        if isinstance(build, dict):
-            collect(build.get('args'))
-    output = re.sub(r'\x1b\[[0-?]*[ -/]*[@-~]', '', output)
-    if secrets:
-        output = re.sub('|'.join(re.escape(value) for value in sorted(secrets, key=len, reverse=True)),
-                        '[REDACTED]', output)
-    output = re.sub(r'(?i)(bearer\s+)[^\s\x22\x27]+', r'\1[REDACTED]', output)
-    output = re.sub(r'([a-zA-Z][a-zA-Z0-9+.-]*://)[^/\s@]+@', r'\1[REDACTED]@', output)
-    output = re.sub(r'(?im)((?:[\w-]*(?:token|password|passwd|secret|api[_-]?key|credential)[\w-]*)[\x22\x27]?\s*[:=]\s*)(?:\x22[^\x22]*\x22|\x27[^\x27]*\x27|[^\s,;]+)',
-                    r'\1[REDACTED]', output)
-    output = ''.join(c for c in output if c in '\n\t' or ord(c) >= 32)
     lines = [line.rstrip() for line in output.splitlines() if line.strip()]
     if not lines:
         return f'No {subject} diagnostic output was returned.'
@@ -10925,6 +11012,10 @@ class AgentHandler(BaseHTTPRequestHandler):
                         msg = f"Container did not reach running state within {startup_timeout}s (state={state or 'unknown'})"
                         if state_error:
                             msg += f": {state_error}"
+                        # The generic state rarely says why; the service's own
+                        # last words (a rejected setting, a failed health check)
+                        # usually do.
+                        msg += _container_start_diagnostic(container_name, install_service_def)
                         _write_progress(service_id, "error", "Installation failed",
                                         error=msg)
                         return
