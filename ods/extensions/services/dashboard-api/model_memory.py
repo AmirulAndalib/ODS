@@ -90,7 +90,7 @@ def memory_metadata(model: dict[str, Any]) -> dict[str, Any]:
     return {key: model[key] for key in MEMORY_METADATA_KEYS if key in model}
 
 
-def _positive_number(value: object) -> float:
+def _positive_number(value: Any) -> float:
     try:
         number = float(value)
     except (TypeError, ValueError):
@@ -98,7 +98,7 @@ def _positive_number(value: object) -> float:
     return number if math.isfinite(number) and number > 0 else 0.0
 
 
-def _non_negative_number(value: object) -> float | None:
+def _non_negative_number(value: Any) -> float | None:
     if isinstance(value, bool):
         return None
     try:
