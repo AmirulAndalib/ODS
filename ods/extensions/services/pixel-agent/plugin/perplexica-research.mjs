@@ -144,7 +144,6 @@ export function createPerplexicaAvailability(deps = {}) {
     try { base = serviceBase(deps.port, env); } catch { return "absent"; }
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), timeoutMs);
-    timer.unref?.();
     try {
       let response;
       try {
