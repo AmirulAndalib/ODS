@@ -16120,9 +16120,9 @@ test('invalid JSON publication stays failed until repaired files are republished
   assert.equal(guard.verificationForRun(context.runId).status,'passed');
 });
 
-for(const fault of ['unknown-exec','failed','running','env','pending-read','wrong-run','wrong-session','wrong-key','ended']) test(`final preview revalidation fails closed: ${fault}`,async()=>{
+for(const fault of ['detached-exec','failed','running','env','pending-read','wrong-run','wrong-session','wrong-key','ended']) test(`final preview revalidation fails closed: ${fault}`,async()=>{
   let probes=0;const {guard,context,invoke}=revalidationGuardFixture(async()=>{probes++;return true;});
-  const params={command:fault==='unknown-exec'?'python3 test.py':'ls -la signal-garden/'};
+  const params={command:fault==='detached-exec'?'python3 test.py &':'ls -la signal-garden/'};
   if(fault==='env')params.env={PATH:'/workspace'};
   const result={content:[{type:'text',text:'observed'}],details:{status:'completed',exitCode:0}};
   if(fault==='failed'){result.isError=true;result.details.exitCode=1;}
@@ -16394,12 +16394,35 @@ for(const wrapped of [false,true]) for(const fault of ['changed-params','outer-e
 });
 
 
-for(const command of ['python3 report.py test-data.csv','sh -c "sleep 1; touch site/index.html" >/dev/null 2>&1 &','setsid sh -c "sleep 1; touch site/index.html" >/dev/null 2>&1 &']) test(`arbitrary exec cannot regain publication currency: ${command}`,async()=>{
+for(const command of ['sh -c "sleep 1; touch site/index.html" >/dev/null 2>&1 &','setsid sh -c "sleep 1; touch site/index.html" >/dev/null 2>&1 &','nohup python3 watch.py >/dev/null 2>&1']) test(`detached exec cannot regain publication currency: ${command}`,async()=>{
   let probes=0;const {guard,context,invoke}=revalidationGuardFixture(async()=>{probes++;return true;});
   invoke('exec',{command},{content:[{type:'text',text:'shell exited'}],details:{status:'completed',exitCode:0}},'unsafe-exec');
   assert.equal(await guard.revalidateWorkspacePreview({},context),false);
   assert.equal(probes,0,'shell success does not attest descendant quiescence');
   assert.notEqual(guard.verificationForRun(context.runId).status,'passed');
+});
+
+// Tower2 coding-v1 round 060: publish, one read-only CLI demo, final answer.
+// Production wraps exec for cancellation, so the receipt binds to executed
+// params; only the host's re-derived snapshot digest decides currency.
+for(const deferred of [false,true]) for(const matched of [true,false]) test(`completed foreground exec requests host equality under production exec wrapping, deferred=${deferred}, matched=${matched}`,async()=>{
+  let probes=0;
+  const {guard,context,invoke}=revalidationGuardFixture(async()=>{probes++;return matched;},
+    {guard:{execControl:{prepare:(_run,command)=>`/control/wrapper ${Buffer.from(command).toString('base64')}`}}});
+  const args={command:'python3 report.py /tmp/test.csv && python3 report.py /tmp/header_only.csv',workdir:'/workspace/signal-garden'};
+  const result={content:[{type:'text',text:'{"food": "15.75"}\n{}'}],details:{status:'completed',exitCode:0}};
+  invoke(deferred?'tool_call':'exec',deferred?{id:'openclaw:core:exec',args}:args,deferred?wrappedCoreResult('exec',result):result,'cli-demo');
+  assert.notEqual(guard.verificationForRun(context.runId).status,'passed','immediate invalidation preserved');
+  // Read-only calls, even blocked or failed, neither advance nor revoke it.
+  const list={toolName:'process',toolCallId:'sessions',params:{action:'list'}},listContext={...context,toolName:'process',toolCallId:'sessions'};
+  const blocked=guard.beforeToolCall(list,listContext);assert.equal(blocked?.block,true);
+  const receipt={isError:true,content:[{type:'text',text:blocked.blockReason}],details:{status:'blocked'}};
+  guard.afterToolCall({...list,error:blocked.blockReason,result:receipt},listContext);
+  guard.toolResultPersist({toolName:'process',toolCallId:'sessions',message:{role:'toolResult',toolName:'process',toolCallId:'sessions',...receipt}},listContext);
+  invoke('read',{path:'signal-garden/missing.txt'},{isError:true,content:[{type:'text',text:'ENOENT'}]},'missing-read');
+  assert.equal(await guard.revalidateWorkspacePreview({},context),matched);
+  assert.equal(probes,1);
+  assert.equal(guard.verificationForRun(context.runId).status,matched?'passed':'failed');
 });
 
 for(const wrapped of [false,true]) for(const name of ['edit','apply_patch']) for(const matched of [false,true]) test(`completed ${name} outside publication requires host equality, wrapped=${wrapped}, matched=${matched}`,async()=>{

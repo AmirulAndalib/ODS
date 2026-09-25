@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import {inspectionRevalidationCandidate, workspaceRevalidationCandidate, boundedPreviewVerification} from '../plugin/preview-revalidation.mjs';
+import {inspectionRevalidationCandidate, workspaceRevalidationCandidate, workspaceReadOnlyCall, boundedPreviewVerification} from '../plugin/preview-revalidation.mjs';
 import {createWorkspacePreviewVerifier} from '../plugin/workspace-preview.mjs';
 
 test('only bounded inspection syntax opts into real host verification',()=>{
@@ -57,8 +57,22 @@ test('internal verifier accepts only exact bounded host receipt equality',async(
 });
 
 
-test('synchronous file tools may request equality while detached or arbitrary exec stays ineligible',()=>{
+test('synchronous file tools and foreground exec may request equality while detached exec stays ineligible',()=>{
   for(const tool of ['read','write','edit','apply_patch']) assert.equal(workspaceRevalidationCandidate(tool,{}),true);
-  for(const command of ['python3 report.py test-data.csv','sh -c "sleep 1; touch site/index.html" >/dev/null 2>&1 &','setsid sh -c "sleep 1; touch site/index.html" >/dev/null 2>&1 &']) assert.equal(workspaceRevalidationCandidate('exec',{command}),false,command);
-  for(const command of ['ls -la site/','pwd']) assert.equal(workspaceRevalidationCandidate('exec',{command}),true,command);
+  for(const command of ['sh -c "sleep 1; touch site/index.html" >/dev/null 2>&1 &','setsid sh -c "sleep 1; touch site/index.html" >/dev/null 2>&1 &',
+    'python3 -m http.server & sleep 1','(python3 watch.py &)','nohup python3 watch.py','python3 worker.py & disown','coproc python3 worker.py','python3 worker.py &>/dev/null','']) assert.equal(workspaceRevalidationCandidate('exec',{command}),false,command);
+  for(const extra of [{background:true},{pty:true},{env:{BASH_ENV:'detach.sh'}}]) assert.equal(workspaceRevalidationCandidate('exec',{command:'python3 report.py data.csv',...extra}),false);
+  for(const command of ['ls -la site/','pwd','python3 report.py test-data.csv','python3 -m unittest -v 2>&1 | tee test-results.txt',
+    'python3 report.py a.csv && python3 report.py b.csv','python3 report.py x.csv >out.json 2>&1; echo "exit=$?"','python3 report.py x.csv 1>&2']) assert.equal(workspaceRevalidationCandidate('exec',{command}),true,command);
+});
+
+test('read-only calls are recognized directly and through Tool Search, never mutating tools',()=>{
+  for(const [tool,params] of [['read',{path:'site/index.html'}],['web_search',{query:'x'}],['web_fetch',{url:'https://example.com'}],
+    ['pixel_ods_web_extract',{}],['tool_describe',{id:'openclaw:core:exec'}],['process',{action:'list'}],['process',{action:'poll',sessionId:'s'}],
+    ['tool_call',{id:'openclaw:core:read',args:{path:'site/index.html'}}],['tool_call',{id:'openclaw:core:process',args:{action:'log',sessionId:'s'}}]])
+    assert.equal(workspaceReadOnlyCall(tool,params),true,tool+JSON.stringify(params));
+  for(const [tool,params] of [['exec',{command:'ls'}],['write',{}],['edit',{}],['apply_patch',{}],['process',{action:'write',sessionId:'s'}],
+    ['process',{action:'kill',sessionId:'s'}],['process',{}],['tool_call',{id:'openclaw:core:exec',args:{command:'ls'}}],
+    ['tool_call',{id:'openclaw:core:process',args:{action:'send-keys'}}],['tool_call',{id:'openclaw:other:read',args:{}}],['tool_call',{id:'tool_call',args:{}}],['tool_call',{}],['pixel_ods_workspace_preview',{}]])
+    assert.equal(workspaceReadOnlyCall(tool,params),false,tool+JSON.stringify(params));
 });

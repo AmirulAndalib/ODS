@@ -33,7 +33,7 @@ import { workspaceMutationFiles } from "./workspace-projects.mjs";
 import {WORKSPACE_BUNDLE_TOOL, normalizeWorkspaceBundle} from './workspace-bundle.mjs';
 import { PREVIEW_INSPECTION_TOOL, requestsVisibilityInteraction, requestsBehaviorPreservation, boundVisibilityInspection, boundStaticPreviewInspection,
   boundInspectionPageErrors, pageErrorRepairInstruction, visibilityInspectionMatches, visibilityInspectionInstruction } from './preview-interaction-assurance.mjs';
-import { workspaceRevalidationCandidate, completedPreviewInspection, boundedPreviewVerification } from "./preview-revalidation.mjs";
+import { workspaceRevalidationCandidate, workspaceReadOnlyCall, completedPreviewInspection, boundedPreviewVerification } from "./preview-revalidation.mjs";
 import { boundedPreviewDelivery } from './preview-delivery-recovery.mjs';
 
 export const DEFAULT_WEB_TOOL_LIMITS = Object.freeze({
@@ -7083,7 +7083,7 @@ export function createToolLoopGuard({
     // policy and deterministic routing active from runId alone; operations
     // that truly need a session still fail closed on the optional sessionId.
     const state = runId ? stateFor(runId) : undefined;
-    if (state) {
+    if (state && !workspaceReadOnlyCall(toolName, event?.params)) {
       state.previewVerificationGeneration = (state.previewVerificationGeneration ?? 0) + 1;
       const selected = toolName === 'tool_call'
         ? /^(?:openclaw:core:)?(?:exec|read|write|edit|apply_patch)$/.test(event?.params?.id ?? '')
@@ -9419,7 +9419,8 @@ export function createToolLoopGuard({
           ? boundInspectionPageErrors(inspected.params, inspected.result, state.workspacePreview) : undefined;
       }
     }
-    state.previewVerificationGeneration = (state.previewVerificationGeneration ?? 0) + 1;
+    const readOnlyCall = workspaceReadOnlyCall(toolName, event?.params);
+    if (!readOnlyCall) state.previewVerificationGeneration = (state.previewVerificationGeneration ?? 0) + 1;
     // Nested Tool Search executions also emit hooks. Count only the outer
     // call (or an ordinary direct call), never both receipts for one action.
     if ((event?.result || event?.error) && !String(toolCallId).startsWith('tool_search_code:')) {
@@ -9618,7 +9619,7 @@ export function createToolLoopGuard({
         const prefix = `tool_search_code:${parent}:${toolName}:`;
         return toolCallId.startsWith(prefix) && /^[1-9][0-9]*$/.test(toolCallId.slice(prefix.length));
       }) : [];
-    if (state.previewRevalidationCandidate && revalidationParents.length !== 1) {
+    if (state.previewRevalidationCandidate && revalidationParents.length !== 1 && !readOnlyCall) {
       const selectedName = pendingToolRun?.selectedToolName;
       const completed = toolName === 'tool_call'
         ? selectedName === PREVIEW_INSPECTION_TOOL
@@ -9632,7 +9633,9 @@ export function createToolLoopGuard({
         (context?.sessionId === undefined || context.sessionId === candidate.sessionId) &&
         (context?.sessionKey === undefined || context.sessionKey === candidate.sessionKey) &&
         state.currentSessionId === candidate.sessionId && state.currentSessionKey === candidate.sessionKey &&
-        isDeepStrictEqual(completed?.params,pendingToolRun.selectedParams) &&
+        // An exec receipt carries the executed (cancellation-wrapped) params;
+        // eligibility still classifies the model's original command.
+        isDeepStrictEqual(completed?.params,selectedName === 'exec' ? pendingToolRun.executedParams : pendingToolRun.selectedParams) &&
         workspaceRevalidationCandidate(selectedName, pendingToolRun.selectedParams);
       const terminal = paired && !failedToolOutcome(event) && completed?.result && !toolCallFailed(completed) &&
         (selectedName !== PREVIEW_INSPECTION_TOOL ||
