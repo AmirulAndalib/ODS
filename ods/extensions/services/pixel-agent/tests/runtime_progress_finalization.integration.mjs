@@ -12,7 +12,7 @@ import assert from 'node:assert/strict';
 import {createServer} from 'node:http';
 import {once} from 'node:events';
 import {spawn} from 'node:child_process';
-import {mkdtempSync,mkdirSync,writeFileSync,cpSync,symlinkSync,readFileSync,rmSync,existsSync} from 'node:fs';
+import {mkdtempSync,mkdirSync,writeFileSync,cpSync,symlinkSync,readFileSync,rmSync,existsSync,readdirSync} from 'node:fs';
 import {tmpdir} from 'node:os';
 import {join} from 'node:path';
 import {setTimeout as delay} from 'node:timers/promises';
@@ -20,11 +20,25 @@ import {createIngressServer} from '../host/pixel_ingress.mjs';
 import {RUN_PROGRESS_STOP_REASON} from '../plugin/run-progress-budget.mjs';
 import {PROGRESS_FINALIZATION_INSTRUCTION,PROGRESS_FINALIZATION_NOTE} from '../plugin/progress-finalization.mjs';
 const pkg=process.env.OPENCLAW_PACKAGE;
+// ODS installs OpenClaw with its completion-recovery repair
+// (host/openclaw-completion-recovery.json); upstream discards a response that
+// is followed by a post-turn compaction. The 'compaction' variant therefore
+// needs the repaired runtime (CI applies it with openclaw_tool_recovery.py).
+function completionRecoveryRepaired(dir) {
+  try {
+    const [[,repaired]]=JSON.parse(readFileSync(new URL('../host/openclaw-completion-recovery.json',import.meta.url),'utf8')).replacements;
+    return readdirSync(join(dir,'dist')).some(name=>name.startsWith('agent-command-') &&
+      readFileSync(join(dir,'dist',name),'utf8').includes(repaired));
+  } catch { return false; }
+}
+const repairedRuntime=Boolean(pkg) && completionRecoveryRepaired(pkg);
 const ANSWER='```json\n{"name":"RTX 5070","vramGB":12,"boardPowerW":250,"retail":null}\n```\n\n' +
   'The NVIDIA page returned 12 GB and 250 W. Retail price and benchmark results are unverified because later fetches failed.';
 
 for (const finalTurn of ['answer','tool','direct','compaction']) test(`real harness graceful finalization: final turn ${finalTurn}`,
-  {skip:!pkg,timeout:90000}, async () => {
+  {skip:!pkg ? true : finalTurn==='compaction' && !repairedRuntime
+    ? 'needs the ODS completion-recovery repair (host/openclaw_tool_recovery.py --completion-recovery)' : false,
+  timeout:90000}, async () => {
   const root=mkdtempSync(join(tmpdir(),'ods-progress-finalization-'));
   let rounds=0,summaries=0,log='',child,ingress;
   const seen=[];
