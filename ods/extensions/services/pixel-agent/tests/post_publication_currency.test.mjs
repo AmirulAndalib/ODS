@@ -1,12 +1,12 @@
-// Replays Tower2 coding-v1 (round 060) against the real host snapshot code:
-// publish, one later tool call, final answer. The host re-derives the
-// published directory's digest; only real byte changes may make it stale.
+// Replays Tower2 fleet runs (rounds 060 and 061) against the real host
+// snapshot code: publish, later tool calls, final answer. The host re-derives
+// the published directory's digest; only real byte changes may make it stale.
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {spawnSync} from 'node:child_process';
-import {mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync} from 'node:fs';
+import {mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync} from 'node:fs';
 import {tmpdir} from 'node:os';
-import {join} from 'node:path';
+import {dirname, join} from 'node:path';
 import {fileURLToPath} from 'node:url';
 import {createToolLoopGuard} from '../plugin/tool-loop-guard.mjs';
 import {createWorkspacePreviewVerifier} from '../plugin/workspace-preview.mjs';
@@ -35,11 +35,12 @@ const MODEL_ANSWER = 'All tests pass and CLI works correctly.';
 const REPORT = 'import csv, json, sys\nrows = list(csv.DictReader(open(sys.argv[1], encoding="utf-8")))\n' +
   'print(json.dumps({r["category"]: r["amount"] for r in rows}))\n';
 
-function fleetFixture(t, {wrapped}) {
-  const dir = realpathSync(mkdtempSync(join(tmpdir(), 'pixel-currency-')));
+const EXEC_CONTROL = {prepare: (_run, command) => `/control/wrapper ${Buffer.from(command).toString('base64')}`};
+function hostFixture(t, prefix) {
+  const dir = realpathSync(mkdtempSync(join(tmpdir(), prefix)));
   t.after(() => { spawnSync('chmod', ['-R', 'u+rwX', dir]); rmSync(dir, {recursive: true, force: true}); });
   const workspace = join(dir, 'workspace'), previews = join(dir, 'previews');
-  for (const path of [workspace, previews, join(workspace, 'expense-report'), join(workspace, 'expense-report/public')]) mkdirSync(path, {mode: 0o700});
+  for (const path of [workspace, previews]) mkdirSync(path, {mode: 0o700});
   const host = request => {
     const run = spawnSync('python3', ['-c', DRIVER, HOST, workspace, previews], {input: JSON.stringify(request), encoding: 'utf8'});
     assert.equal(run.status, 0, run.stderr);
@@ -47,9 +48,14 @@ function fleetFixture(t, {wrapped}) {
   };
   let probes = 0;
   const verify = createWorkspacePreviewVerifier({request: async request => { probes++; return host(request); }});
+  return {dir, workspace, host, verify, probes: () => probes};
+}
+
+function fleetFixture(t, {wrapped}) {
+  const {workspace, host, verify, probes} = hostFixture(t, 'pixel-currency-');
+  for (const path of [join(workspace, 'expense-report'), join(workspace, 'expense-report/public')]) mkdirSync(path, {mode: 0o700});
   const context = {agentId: 'pixel', runId: 'run-060', sessionId: 'session-060', sessionKey: 'agent:pixel:fleet'};
-  const guard = createToolLoopGuard({verifyWorkspacePreview: verify,
-    ...(wrapped ? {execControl: {prepare: (_run, command) => `/control/wrapper ${Buffer.from(command).toString('base64')}`}} : {})});
+  const guard = createToolLoopGuard({verifyWorkspacePreview: verify, ...(wrapped ? {execControl: EXEC_CONTROL} : {})});
   guard.observeRun(context, 'pixel', {prompt: 'Build and publish a website in existing expense-report.'});
   const invoke = (name, params, result, id, {blockable = false} = {}) => {
     const ctx = {...context, toolName: name, toolCallId: id};
@@ -60,7 +66,8 @@ function fleetFixture(t, {wrapped}) {
       guard.afterToolCall({toolName: name, params, error: prepared.blockReason, result, toolCallId: id}, ctx);
     } else {
       assert.notEqual(prepared?.block, true, prepared?.blockReason);
-      guard.afterToolCall({toolName: name, params: prepared?.params ?? params, result, toolCallId: id}, ctx);
+      guard.afterToolCall({toolName: name, params: prepared?.params ?? params, result,
+        ...(result.isError ? {error: resultText(result)} : {}), toolCallId: id}, ctx);
     }
     guard.toolResultPersist({toolName: name, toolCallId: id, message: {role: 'toolResult', toolName: name, toolCallId: id, ...result}}, ctx);
   };
@@ -71,7 +78,7 @@ function fleetFixture(t, {wrapped}) {
   // The exec tool runs the model's command; production wraps it only for cancellation.
   const exec = (command, id) => {
     const run = spawnSync('sh', ['-c', command], {cwd: workspace, encoding: 'utf8'});
-    invoke('exec', {command}, {content: [{type: 'text', text: run.stdout + run.stderr}],
+    invoke('exec', {command}, {content: [{type: 'text', text: run.stdout + run.stderr}], ...(run.status ? {isError: true} : {}),
       details: {status: 'completed', exitCode: run.status, durationMs: 1, aggregated: run.stdout + run.stderr, cwd: workspace}}, id);
     return run;
   };
@@ -84,7 +91,7 @@ function fleetFixture(t, {wrapped}) {
   invoke('pixel_ods_workspace_preview', {relativeDirectory: 'expense-report/public'}, {content: [{type: 'text', text: `Verified browser URL: ${url}`}],
     details: {...published, port: 9437, url, httpStatus: 200, readbackVerified: true}}, 'publish');
   assert.equal(guard.verificationForRun(context.runId).status, 'passed', 'fresh publication is verified');
-  return {guard, context, invoke, write, exec, url, probes: () => probes};
+  return {guard, context, invoke, write, exec, url, probes};
 }
 
 async function finalAnswer({guard, context, url}) {
@@ -98,15 +105,18 @@ const STALE = /has not been verified again since later tool activity/;
 const scenarios = {
   // Tower2 round 060: the extra CLI demo read files and wrote only stdout.
   'read-only exec': f => assert.equal(f.exec('python3 expense-report/report.py expense-report/data.csv', 'demo').status, 0),
+  // Tower2 round 061: error-handling demos exit non-zero and change nothing.
+  'failing CLI demo': f => assert.equal(f.exec('python3 expense-report/report.py missing.csv', 'demo-error').status, 1),
   'exec rewrites identical bytes': f => f.exec('cp expense-report/public/index.html index.tmp && cat index.tmp > expense-report/public/index.html', 'same'),
   'write outside published dir': f => f.write('expense-report/notes.txt', 'CLI demo passed', 'notes'),
   'exec modifies public/index.html': f => f.exec(`python3 -c "import pathlib; p = pathlib.Path('expense-report/public/index.html'); p.write_text(p.read_text().replace('Expense', 'Changed'))"`, 'modify'),
   'write inside published dir': f => f.write('expense-report/public/index.html', '<!doctype html><title>Changed</title>', 'rewrite'),
   'exec adds a published file': f => f.exec('echo extra > expense-report/public/extra.txt', 'add'),
+  'failing exec modifies public/index.html': f => assert.equal(f.exec("sed -i 's/Expense/Changed/' expense-report/public/index.html; exit 3", 'modify-fail').status, 3),
   'symlink swap to identical bytes': f => f.exec('cp expense-report/public/index.html same.html && rm expense-report/public/index.html && ln -s ../../same.html expense-report/public/index.html', 'swap'),
   'read error': f => f.exec('chmod 000 expense-report/public/report.py.txt', 'unreadable'),
 };
-const verified = new Set(['read-only exec', 'exec rewrites identical bytes', 'write outside published dir']);
+const verified = new Set(['read-only exec', 'failing CLI demo', 'exec rewrites identical bytes', 'write outside published dir']);
 
 for (const wrapped of [false, true]) for (const [name, act] of Object.entries(scenarios)) {
   test(`post-publication ${name} is ${verified.has(name) ? 'still verified' : 'stale'} (wrapped exec=${wrapped})`,
@@ -140,3 +150,65 @@ test('read-only calls after the fleet exec neither advance nor revoke the pendin
   assert.equal(delivered.status, 'passed');
   assert.doesNotMatch(delivered.text, STALE);
 });
+
+// Tower2 round 061 (main 17dfce8a, #6673 installed): website-create and
+// coding-v1 replayed call by call from the recorded session. Writes, execs and
+// publication really run against a temporary workspace and the real host code;
+// each publication must reproduce the recorded snapshot digest, and the guard
+// must refuse exactly the calls it refused in production.
+const ROUND061 = JSON.parse(readFileSync(new URL('./post-publication-tower2-round061.json', import.meta.url), 'utf8'));
+const resultText = result => result.content.filter(item => item.type === 'text').map(item => item.text).join('\n');
+
+async function replay(t, run, {wrapped}) {
+  const {dir, workspace, host, verify, probes} = hostFixture(t, 'pixel-replay-');
+  const scratch = join(dir, 'tmp');
+  mkdirSync(scratch, {mode: 0o700});
+  const context = {agentId: 'pixel', runId: 'run-061', sessionId: 'session-061', sessionKey: 'agent:pixel:fleet'};
+  const guard = createToolLoopGuard({verifyWorkspacePreview: verify, workspacePreviewInspectionAvailable: true,
+    ...(wrapped ? {execControl: EXEC_CONTROL} : {})});
+  guard.observeRun(context, 'pixel', {prompt: run.prompt}, {workspaceRoot: workspace, executionHost: 'sandbox', privateBrowserAccess: false});
+  // The sandbox mounts the workspace at /workspace, its cwd, and a private tmpfs at /tmp.
+  const sandboxed = command => command.replace(/(^|[\s'"=(>])\/(workspace|tmp)\//g,
+    (_, before, mount) => `${before}${mount === 'workspace' ? workspace : scratch}/`);
+  for (const call of run.calls) {
+    const ctx = {...context, toolName: call.tool, toolCallId: call.id};
+    const prepared = guard.beforeToolCall({toolName: call.tool, params: call.args, toolCallId: call.id}, ctx);
+    assert.equal(prepared?.block === true, call.blocked === true, `${call.tool} ${call.id}: ${prepared?.blockReason}`);
+    const result = structuredClone(call.result);
+    if (!call.blocked && call.tool === 'write') {
+      mkdirSync(dirname(join(workspace, call.args.path)), {recursive: true, mode: 0o755});
+      writeFileSync(join(workspace, call.args.path), call.args.content, {mode: 0o600});
+    } else if (!call.blocked && call.tool === 'exec') {
+      const done = spawnSync('sh', ['-c', `umask 022\n${sandboxed(call.args.command)}`], {cwd: workspace, encoding: 'utf8'});
+      assert.equal(done.status, call.result.details.exitCode, `${call.id}: ${done.stderr}`);
+      const text = resultText(result);
+      result.details.aggregated = text === '(no output)' ? '' : text;
+    } else if (call.tool === 'pixel_ods_workspace_preview') {
+      const published = host({schemaVersion: 1, action: 'publish', relativeDirectory: call.args.relativeDirectory});
+      for (const key of ['siteId', 'sha256', 'files', 'bytes', 'entrySha256']) assert.equal(published[key], call.result.details[key], key);
+    } else assert.ok(call.blocked || ['read', 'pixel_ods_workspace_preview_inspect'].includes(call.tool), call.tool);
+    // As OpenClaw reports it: a refused call keeps the model's params.
+    guard.afterToolCall({toolName: call.tool, params: call.blocked ? call.args : prepared?.params ?? call.args, result,
+      ...(result.isError ? {error: resultText(result)} : {}), toolCallId: call.id}, ctx);
+    guard.toolResultPersist({toolName: call.tool, toolCallId: call.id, message: {role: 'toolResult', toolName: call.tool, toolCallId: call.id, ...result}}, ctx);
+  }
+  // before_agent_finalize, then reply_payload_sending with the model's recorded answer.
+  await guard.revalidateWorkspacePreview({}, context);
+  guard.beforeAgentFinalize({}, context);
+  const delivered = guard.replyPayloadSending({runId: context.runId, kind: 'final', payload: {text: run.final}});
+  return {status: guard.verificationForRun(context.runId).status, text: delivered?.payload?.text ?? run.final, probes: probes()};
+}
+const PREVIEW_READY = /\n\nYour preview is ready\.\n\n\[Open preview\]\((http:\/\/[^)]+)\)/;
+
+for (const wrapped of [false, true]) for (const [name, run] of Object.entries(ROUND061.runs)) {
+  test(`tower2 round 061 ${name} replay delivers the model's verified answer (wrapped exec=${wrapped})`,
+    {skip: !python && 'python3 unavailable'}, async t => {
+      const delivered = await replay(t, run, {wrapped});
+      assert.equal(delivered.probes, 1, 'one bounded host comparison at finalization');
+      assert.equal(delivered.status, 'passed');
+      assert.ok(delivered.text.startsWith(run.final), delivered.text);
+      assert.doesNotMatch(delivered.text, STALE);
+      const published = run.calls.findLast(call => call.tool === 'pixel_ods_workspace_preview');
+      assert.equal(PREVIEW_READY.exec(delivered.text)?.[1], published.result.details.url);
+    });
+}
