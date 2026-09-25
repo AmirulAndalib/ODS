@@ -51,6 +51,7 @@ import {
 import { withPixelCronDeliveryDefault } from "./cron-delivery-default.mjs";
 import { createPublicPageReader, createPublicWebExtractTool } from "./web-extract.mjs";
 import { citationPageReadsAllowed, createHostCitationVerifier } from "./citation-verification.mjs";
+import { createStopSynthesisClient } from "./stop-synthesis.mjs";
 import { createExtensionRepositoryContext } from './extension-repository-context.mjs';
 
 const extensionRepositoryContext = createExtensionRepositoryContext({
@@ -320,6 +321,9 @@ export default definePluginEntry({
         }),
         allowed: () => citationPageReadsAllowed(api.runtime?.config?.current?.() ?? api.config, AGENT_ID),
       }),
+      // After a tool-limit stop without an answer: one tool-free completion by
+      // the same configured model, from the pages the run read.
+      stopSynthesis: createStopSynthesisClient({runtime: api.runtime, agentId: AGENT_ID}),
       warn: (message) => api.logger.warn(message),
       info: (message) => api.logger.info?.(message),
     });

@@ -29,6 +29,7 @@ import { parseQuestions, questionsText, requestsChoiceQuestion, choiceQuestionFr
 import { createRunProgressBudget, failedToolOutcome, isLiteralEcho, progressLaneStopReason, RUN_PROGRESS_STOP_REASON } from "./run-progress-budget.mjs";
 import { assistantMessageText, composeProgressFinalization, composeReadPages, createProgressFinalization, partialFinalizationAnswer,
   PROGRESS_FINALIZATION_INSTRUCTION } from "./progress-finalization.mjs";
+import { STOP_SYNTHESIS_LIMITS, STOP_SYNTHESIS_NOTE, synthesisAnswer, synthesisRequest } from "./stop-synthesis.mjs";
 import { OWNER_VISIBLE_REPLY_INSTRUCTION, OWNER_VISIBLE_REPLY_REASON, ownerInteractiveTurn, silentReplyText } from "./owner-visible-reply.mjs";
 import { canonicalWorkspaceParams, extensionlessHtmlWrite, workspaceFileParent, nativeExecWorkdir, sandboxHostWorkspaceFailure, malformedRelativeWorkspacePath } from "./workspace-path-contract.mjs";
 import { routePlaygroundTool, requestsNewPlaygroundProject } from "./playground-projects.mjs";
@@ -6763,6 +6764,7 @@ export function createToolLoopGuard({
   workspacePreviewInspectionAvailable = false,
   publishWorkspacePreview,
   hostCitationVerifier,
+  stopSynthesis,
   execMarkerCleanupDelayMs = 5000,
   limits,
   warn = () => {},
@@ -6779,6 +6781,8 @@ export function createToolLoopGuard({
   // next owner message in that chat must start clean from.
   const sessionKeyRuns = new Map();
   const sessionCancellations = new Map();
+  // Process-wide: a failed or timed-out stop synthesis pauses further ones.
+  let stopSynthesisFailedAt = -Infinity;
   const pendingToolRuns = new Map();
   const sessionPreviews = new Map();
   // A prior owner requirement is not a passing inspection. Bind it to the
@@ -9599,6 +9603,9 @@ export function createToolLoopGuard({
     if (!state || !context?.sessionId || context.sessionId !== state.currentSessionId) return;
     const compaction = state.compactionWindow;
     if (compaction?.calls.delete(event?.callId) && compaction.calls.size === 0) state.compactionWindow = undefined;
+    if (event?.outcome === 'completed') state.modelRouteFailed = false;
+    else if (event?.outcome === 'error' && !state.progressAbortAttempted && !state.webLoopAborted &&
+        ['timeout', 'connection_closed', 'connection_reset', 'terminated'].includes(event.failureKind)) state.modelRouteFailed = true;
     if (state.extensionPendingHandoff && !state.workspaceLaneRequested && !state.extensionPendingAbortAcknowledged &&
         !state.clientCancelled && !state.progressBudget.exhausted &&
         sessionRuns.get(context.sessionId) === runId) {
@@ -11447,9 +11454,10 @@ export function createToolLoopGuard({
     if (!state || state.clientCancelled || state.webLoopAborted || state.recursiveDeleteDenied || state.ownerQuestions ||
         state.privateNetworkExhausted || state.privateNetworkRequestDenied || state.workspacePreviewRestrictions?.web ||
         state.extensionCompletionGate?.active ||
-        // After a tool-limit stop only a still-pending answer turn, or the
-        // partial answer kept from it, is judged.
-        (state.progressBudget.exhausted && !['pending', 'instructed', 'turn', 'partial'].includes(progressFinalization(state).phase))) {
+        // After a tool-limit stop only a still-pending answer turn, the
+        // partial answer kept from it, or the stop synthesis is judged.
+        (state.progressBudget.exhausted && !state.stopSynthesisJudging &&
+          !['pending', 'instructed', 'turn', 'partial'].includes(progressFinalization(state).phase))) {
       return undefined;
     }
     const answer = event?.lastAssistantMessage;
@@ -11510,8 +11518,94 @@ export function createToolLoopGuard({
   }
 
   async function settleDelivery(runId) {
-    const pending = typeof runId === 'string' ? runs.get(runId)?.partialAnswerVerification : undefined;
-    if (pending) await pending;
+    const state = typeof runId === 'string' ? runs.get(runId) : undefined;
+    if (!state) return;
+    if (state.partialAnswerVerification) await state.partialAnswerVerification;
+    // Decided once per run: a request is never retried, and a skip stands.
+    if (!state.stopSynthesis && !state.stopSynthesisOutcome) {
+      const skip = stopSynthesisSkip(state, runId);
+      if (!skip) state.stopSynthesis = runStopSynthesis(state, runId);
+      else if (!['unavailable', 'no-stop', 'answered'].includes(skip)) {
+        state.stopSynthesisOutcome = {status: 'skipped', reason: skip};
+        info(`Pixel tool-limit synthesis skipped for run ${runId}: ${skip}`);
+      }
+    }
+    if (state.stopSynthesis) await state.stopSynthesis;
+  }
+
+  // Stop synthesis (stop-synthesis.mjs): after a progress, research-loop or
+  // failure stop that left no answer text, one tool-free completion by the same
+  // model from the pages the run read. The reason it does not run, if any.
+  function stopSynthesisSkip(state, runId) {
+    if (typeof stopSynthesis?.complete !== 'function' ||
+        (typeof stopSynthesis.available === 'function' && !stopSynthesis.available())) return 'unavailable';
+    if (!state.progressBudget.exhausted) return 'no-stop';
+    if (state.clientCancelled) return 'cancelled';
+    if (state.recursiveDeleteDenied || state.webLoopAborted || progressFinalization(state).phase === 'unavailable') return 'strict-stop';
+    if (state.progressFinalization.answer) return 'answered';
+    if (stopSynthesisSuperseded(state, runId)) return 'new-owner-message';
+    if (state.modelRouteFailed) return 'route-failed';
+    if (Date.now() - stopSynthesisFailedAt < (stopSynthesis.limits ?? STOP_SYNTHESIS_LIMITS).cooldownMs) return 'route-cooldown';
+    if (state.completionAssurance.synthesisSources().length < (stopSynthesis.limits ?? STOP_SYNTHESIS_LIMITS).minPages) return 'too-few-pages';
+    if (typeof stopSynthesis.ready === 'function' && !stopSynthesis.ready()) return 'not-default-agent';
+    return undefined;
+  }
+
+  // A newer run owns the chat (session key) or the session: the owner has sent
+  // a new message.
+  function stopSynthesisSuperseded(state, runId) {
+    const newer = (map, key) => typeof key === 'string' && key && map.has(key) && map.get(key) !== runId;
+    return newer(sessionKeyRuns, state.currentSessionKey) || newer(sessionRuns, state.currentSessionId);
+  }
+
+  async function runStopSynthesis(state, runId) {
+    const limits = stopSynthesis.limits ?? STOP_SYNTHESIS_LIMITS;
+    const agentId = stopSynthesis.agentId ?? 'pixel';
+    const skip = reason => { state.stopSynthesisOutcome = {status: 'skipped', reason}; return undefined; };
+    try {
+      if (typeof stopSynthesis.routeHealthy === 'function' && !(await stopSynthesis.routeHealthy())) return skip('route-unhealthy');
+      const sources = state.completionAssurance.synthesisSources().slice(0, limits.maxPages);
+      const request = synthesisRequest({request: state.ownerRequestText ?? '', pages: sources, limits});
+      if (request.pages < limits.minPages) return skip('too-few-pages');
+      const used = sources.filter(source => request.messages[0].content.includes(`URL: ${source.url}\n`));
+      const started = Date.now();
+      let result;
+      try {
+        result = await stopSynthesis.complete({systemPrompt: request.systemPrompt, messages: request.messages,
+          maxTokens: limits.maxTokens, temperature: limits.temperature, purpose: 'pixel-ods tool-limit synthesis',
+          signal: AbortSignal.timeout(limits.timeoutMs)});
+      } catch (error) {
+        stopSynthesisFailedAt = Date.now();
+        warn(`Pixel tool-limit synthesis failed for run ${runId} after ${Date.now() - started} ms: ${String(error?.name ?? 'error')}`);
+        state.stopSynthesisOutcome = {status: 'failed', reason: error?.name === 'TimeoutError' ? 'timeout' : 'error', elapsedMs: Date.now() - started};
+        return undefined;
+      }
+      const elapsedMs = Date.now() - started;
+      if (runs.get(runId) !== state || state.clientCancelled) return skip('cancelled');
+      if (stopSynthesisSuperseded(state, runId)) return skip('new-owner-message');
+      if (typeof result?.agentId === 'string' && result.agentId !== agentId) return skip('not-default-agent');
+      const preview = progressStopPreview(state);
+      const answer = synthesisAnswer(result?.text, {localUrlsForbidden: Boolean(state.workspacePreviewRequired || state.workspacePreviewAttempted),
+        allowedUrls: preview?.url ? [preview.url] : []});
+      if (!answer) {
+        state.stopSynthesisOutcome = {status: 'rejected', reason: 'invalid-answer', elapsedMs};
+        return undefined;
+      }
+      // The same citation rules as a tool-free answer: bounded host
+      // verification of cited pages the run never opened, then any cited link
+      // without a read receipt or host verification is labelled.
+      state.stopSynthesisJudging = true;
+      try { await verifyCitedPages({lastAssistantMessage: answer}, {agentId, runId}, agentId); }
+      finally { state.stopSynthesisJudging = false; }
+      if (runs.get(runId) !== state || state.clientCancelled || stopSynthesisSuperseded(state, runId)) return skip('superseded');
+      state.stopSynthesisOutcome = {status: 'answered', answer, pages: used.map(({url, title}) => (title ? {url, title} : {url})),
+        unlisted: state.completionAssurance.unlistedCitations(answer), elapsedMs};
+      info(`Pixel wrote a tool-limit answer from ${used.length} read page(s) for run ${runId} in ${elapsedMs} ms`);
+    } catch (error) {
+      warn(`Pixel tool-limit synthesis skipped for run ${runId}: ${String(error)}`);
+      state.stopSynthesisOutcome = {status: 'failed', reason: 'error'};
+    }
+    return undefined;
   }
 
   // before_message_write (synchronous, transcript order). After a tool-limit
@@ -11973,8 +12067,9 @@ export function createToolLoopGuard({
     if (state?.ownerQuestions && !state.clientCancelled) return {status:'pending',text:questionsText(state.ownerQuestions),questions:state.ownerQuestions};
     // Completion assurance arms its terminal before a revision and is not
     // consulted after a stop, so a tool-limit answer is always the newer one.
+    const synthesized = state?.stopSynthesisOutcome?.status === 'answered' ? state.stopSynthesisOutcome : undefined;
     const stopAnswer = state?.progressBudget.exhausted && !state.clientCancelled
-      ? state.progressFinalization.answer : undefined;
+      ? state.progressFinalization.answer ?? synthesized?.answer : undefined;
     if (state?.completionAssurance.terminal && verification.status === 'none' && !stopAnswer) {
       return {status:state.completionAssurance.terminalStatus, text:state.completionAssurance.terminal};
     }
@@ -11984,14 +12079,18 @@ export function createToolLoopGuard({
       // The request is still incomplete ('failed'); only the finalization
       // turn's validated answer replaces the canned stop text, followed by
       // host facts that the model cannot alter.
-      const answer = !state.clientCancelled ? state.progressFinalization.answer : undefined;
+      const modelAnswer = !state.clientCancelled ? state.progressFinalization.answer : undefined;
+      const answer = modelAnswer ?? (!state.clientCancelled ? synthesized?.answer : undefined);
       if (answer) {
+        const unverified = [...new Set([...state.completionAssurance.unverifiedCitations(answer),
+          ...(modelAnswer ? [] : synthesized.unlisted)])];
         return {status: 'failed', text: composeProgressFinalization(answer, {preview,
           previewExpected: Boolean(state.workspacePreviewRequired && !state.workspacePreviewForbidden),
           verificationStatus: state.latestVerificationStatus, researchLimit: state.researchStopped,
-          unverifiedLinks: state.completionAssurance.unverifiedCitations(answer),
+          unverifiedLinks: unverified,
           refusedToolCalls: state.progressFinalization.partial,
-          requestedTextMissing: requestedTextDeliveryNote(preview, state.workspaceRequestedTextCheck)}), ...receipt};
+          requestedTextMissing: requestedTextDeliveryNote(preview, state.workspaceRequestedTextCheck),
+          ...(modelAnswer ? {} : {synthesis: {note: STOP_SYNTHESIS_NOTE, pages: synthesized.pages}})}), ...receipt};
       }
       // Without an answer, the fixed stop text is followed by the host's list
       // of pages read successfully, when this run could have been finalized
@@ -12104,6 +12203,11 @@ export function createToolLoopGuard({
     observeCompaction,
     observeAssistantMessage,
     settleDelivery,
+    stopSynthesisForRun: runId => {
+      const outcome = typeof runId === 'string' ? runs.get(runId)?.stopSynthesisOutcome : undefined;
+      return outcome ? {status: outcome.status, ...(outcome.reason ? {reason: outcome.reason} : {}),
+        ...(outcome.elapsedMs !== undefined ? {elapsedMs: outcome.elapsedMs} : {}), ...(outcome.pages ? {pages: outcome.pages.length} : {})} : undefined;
+    },
     abortUserRun,
     verificationForRun,
     deliveryVerificationForRun,

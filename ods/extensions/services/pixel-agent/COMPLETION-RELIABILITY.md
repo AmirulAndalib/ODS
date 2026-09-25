@@ -194,6 +194,52 @@ Only the list varies. Operations, exact downloads, managed extension requests
 and team coordination keep the strict stop text, with no list. The instruction
 is constant text at the end of the conversation, never system-prompt content.
 
+### Stop synthesis
+
+Some models keep calling tools until the stop although the pages they read
+already hold most of the answer (tower1 round 069, tower2 round 061). When a
+progress, research-loop or failure stop leaves no answer text, the owner did
+not cancel, and at least two pages have read receipts, `stop-synthesis.mjs`
+makes ONE extra model request before delivery, then never retries. It uses
+OpenClaw's plugin LLM runtime (`api.runtime.llm.complete`): the same
+configured provider and model as Pixel's turns, a request with no tools,
+`max_completion_tokens` 1200, temperature 0.2, and a 75-second timeout. The
+runtime targets the default agent and a plugin may not override the agent or
+model, so the synthesis runs only when Pixel is the default agent. The request
+carries one fixed system instruction and a user message with the owner's
+request and up to eight page excerpts, in read order:
+
+- **Instruction:** answer only from the excerpts, cite only their URLs, use
+  `null` or "not found" for anything they do not establish, never substitute a
+  related figure, and no process narration.
+- **Excerpts:** at most 1,800 characters per page and 12,000 in total, taken
+  from the read ledger and selected around the request's terms and quantities.
+  A page's `web_fetch` and targeted extraction are merged, the extraction
+  first.
+- **Page data:** unwrapped from OpenClaw's untrusted-content markers, rewrapped
+  in numbered data blocks, and neutralized so page text cannot open or close a
+  block.
+
+The synthesis is skipped when:
+
+- the owner sent a new message (a newer run owns the session, checked again
+  when the reply arrives);
+- the loopback route's `/health` probe fails;
+- the run's last model call failed in transport;
+- an earlier synthesis in the process failed within five minutes;
+- the stop was receipt-based (Operations, exact downloads, managed extension
+  requests, team coordination);
+- an answer, tool-free or partial, already exists.
+
+The reply must pass the partial-answer checks (substantive, not narration,
+not tool-like, no unverified localhost URL). The #6680 host citation
+verification applies to it, and cited links without a read receipt are listed
+as unverified. The owner then receives it as the `failed` partial answer, with
+the tool-limit note, a note that ODS asked the same model once more without
+tools, the other host facts, and the pages it was given. Otherwise the
+fallback and page list above apply. `/pixel-ods/verification` waits for this
+bounded step; on tower2 (qwen3-coder-next) it took 3–9 seconds.
+
 ## Silent owner replies
 
 An owner-authored dashboard or Portal message (a `user`-triggered run in the
@@ -206,8 +252,10 @@ once before this hook runs; heartbeat, cron and team turns keep `NO_REPLY`
 semantics, and the harness still refuses a revision after side effects.
 
 `tests/progress_finalization.test.mjs`, `tests/partial_finalization.test.mjs`,
-`tests/owner_visible_reply.test.mjs` and the real-harness fixtures `tests/runtime_progress_finalization.integration.mjs`
-and `tests/runtime_owner_visible_reply.integration.mjs` cover both paths.
+`tests/stop_synthesis.test.mjs`, `tests/owner_visible_reply.test.mjs` and the
+real-harness fixtures `tests/runtime_progress_finalization.integration.mjs`,
+`tests/runtime_stop_synthesis.integration.mjs` and
+`tests/runtime_owner_visible_reply.integration.mjs` cover these paths.
 
 ## Owner cancellation
 
