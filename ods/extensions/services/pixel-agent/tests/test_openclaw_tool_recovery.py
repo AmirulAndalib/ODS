@@ -321,6 +321,29 @@ def test_foreign_patch_set_is_restored_and_archived(installation, patch_root, li
         "status": "unchanged", "foreign": []}
 
 
+def test_group_writable_state_root_from_owner_umask_is_tightened(installation, patch_root):
+    # A user-private-group umask (002) left roots created by earlier builds
+    # group-writable; that is the owner's own state, not a foreign directory.
+    runtime = installation[0]
+    patch_root.chmod(0o775)
+    module, original, _, _ = write_foreign_set(runtime, patch_root, "file-operations")
+    assert repair_module.restore_foreign(runtime, patch_root, {"tool-recovery"})["status"] == "changed"
+    assert module.read_bytes() == original
+    assert patch_root.stat().st_mode & 0o777 == 0o755
+
+
+def test_repair_creates_owner_only_state_root_under_group_umask(installation, tmp_path):
+    runtime, _, manifest, *_ = installation
+    root = tmp_path / "fresh-patches"
+    previous = os.umask(0o002)
+    try:
+        repair_module.repair(runtime, root / "tool-recovery", manifest_path=manifest)
+    finally:
+        os.umask(previous)
+    assert root.stat().st_mode & 0o777 == 0o700
+    assert (root / "tool-recovery").stat().st_mode & 0o777 == 0o700
+
+
 @pytest.mark.parametrize("damage", [
     "tampered-backup", "missing-backup", "unexpected-live", "other-version", "shared-module",
     "public-state"])

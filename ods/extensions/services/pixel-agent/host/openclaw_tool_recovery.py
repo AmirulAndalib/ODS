@@ -128,7 +128,10 @@ def repair(runtime_root, state_dir, *, restore=False, manifest_path=MANIFEST,
         raise ValueError("runtime repair target is not OpenClaw")
     if package.get("version") != VERSION:
         return {"status": "not-applicable", "version": package.get("version")}
-    state_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
+    # The shared state root is created here first; keep it owner-only
+    # whatever the owner's umask (user-private-group systems use 002).
+    state_dir.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    state_dir.mkdir(mode=0o700, exist_ok=True)
     info = state_dir.lstat()
     if (not stat.S_ISDIR(info.st_mode) or info.st_uid != os.getuid()
             or info.st_mode & 0o077):
@@ -225,6 +228,19 @@ def fsync_directory(path):
         os.close(directory_fd)
 
 
+def tighten_directory(path):
+    directory_fd = os.open(path, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    try:
+        info = os.fstat(directory_fd)
+        if info.st_uid != os.getuid():
+            raise ValueError("runtime repair state root must be an owner-controlled directory")
+        os.fchmod(directory_fd, stat.S_IMODE(info.st_mode) & ~0o022)
+        if os.fstat(directory_fd).st_mode & 0o022:
+            raise ValueError("runtime repair state root must be an owner-controlled directory")
+    finally:
+        os.close(directory_fd)
+
+
 def restore_foreign(runtime_root, patches_root, known):
     """Restore runtime patch sets another ODS build left outside this version.
 
@@ -242,9 +258,14 @@ def restore_foreign(runtime_root, patches_root, known):
     if not patches_root.exists() and not patches_root.is_symlink():
         return {"status": "unchanged", "foreign": []}
     info = patches_root.lstat()
-    if (not stat.S_ISDIR(info.st_mode) or info.st_uid != os.getuid()
-            or info.st_mode & 0o022):
+    if not stat.S_ISDIR(info.st_mode) or info.st_uid != os.getuid():
         raise ValueError("runtime repair state root must be an owner-controlled directory")
+    if info.st_mode & 0o022:
+        # Earlier builds created this root through mkdir(parents=True), so a
+        # user-private-group umask (002) left the owner's own directory
+        # group-writable. Remove those bits through a no-follow handle before
+        # trusting any entry instead of refusing the owner's own state.
+        tighten_directory(patches_root)
     plan, modules = [], set()
     for state_dir in sorted(patches_root.iterdir()):
         if state_dir.name in known:
