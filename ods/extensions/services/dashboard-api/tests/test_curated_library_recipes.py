@@ -142,11 +142,9 @@ def _resolver_scan(root):
 
 
 def _accelerator(compose_name):
-    """What both callers pass: a backend overlay compose.<backend>.yaml names
-    its backend; compose.yaml names none."""
-    if compose_name == "compose.yaml":
-        return None
-    return compose_name.removeprefix("compose.").removesuffix(".yaml")
+    """What both callers pass: compose.nvidia.yaml / compose.amd.yaml name their
+    backend (the resolver loads them as compose.<backend>.yaml); others none."""
+    return extensions._LIBRARY_ACCELERATOR_OVERLAYS.get(compose_name)
 
 
 # Curated recipes whose backend overlay reserves the accelerator. The resolver
@@ -346,6 +344,18 @@ ACCELERATOR_POLICY = [
     ("amd-in-cpu-overlay", "compose.cpu.yaml", True, _AMD_GPU, False),
     ("nvidia-imported-recipe", "compose.nvidia.yaml", False, _reserve({**_NVIDIA_GPU, "count": 1}), False),
     ("amd-imported-recipe", "compose.amd.yaml", False, _AMD_GPU, False),
+    # gpus: and runtime: are other routes to a GPU; no recipe may set them anywhere.
+    ("gpus-all-compose-yaml", "compose.yaml", True, {"gpus": "all"}, False),
+    ("gpus-all-nvidia-overlay", "compose.nvidia.yaml", True, {"gpus": "all"}, False),
+    ("gpus-request-nvidia-overlay", "compose.nvidia.yaml", True,
+     {"gpus": [{"driver": "nvidia", "count": 1, "capabilities": ["gpu"]}]}, False),
+    ("gpus-all-amd-overlay", "compose.amd.yaml", True, {**_AMD_GPU, "gpus": "all"}, False),
+    ("gpus-all-imported-recipe", "compose.yaml", False, {"gpus": "all"}, False),
+    ("runtime-nvidia-compose-yaml", "compose.yaml", True, {"runtime": "nvidia"}, False),
+    ("runtime-nvidia-nvidia-overlay", "compose.nvidia.yaml", True,
+     {**_reserve({**_NVIDIA_GPU, "count": 1}), "runtime": "nvidia"}, False),
+    ("runtime-runc-amd-overlay", "compose.amd.yaml", True, {**_AMD_GPU, "runtime": "runc"}, False),
+    ("runtime-nvidia-imported-recipe", "compose.yaml", False, {"runtime": "nvidia"}, False),
 ]
 
 
@@ -586,3 +596,20 @@ def test_capability_free_root_services_do_not_write_owner_prepared_binds():
     assert checked > 150, "Library compose discovery unexpectedly found little"
     assert not offenders, ("Run as the install owner, e.g. user: \"${ODS_UID:-1000}:${ODS_GID:-1000}\":\n"
                            + "\n".join(offenders))
+
+
+def test_library_install_names_the_overlay_that_may_hold_the_gpu(tmp_path, monkeypatch):
+    """The resolver never loads compose.multigpu-nvidia.yaml for an extension;
+    the install error says where a curated recipe may reserve its GPU."""
+    library = tmp_path / "library"
+    recipe = library / "ollama"
+    shutil.copytree(LIBRARY / "ollama", recipe)
+    shutil.copy2(recipe / "compose.nvidia.yaml", recipe / "compose.multigpu-nvidia.yaml")
+    monkeypatch.setattr(extensions, "EXTENSIONS_LIBRARY_DIR", library)
+    monkeypatch.setattr(extensions, "USER_EXTENSIONS_DIR", tmp_path / "user")
+    with pytest.raises(HTTPException) as rejected:
+        with extensions._staged_library_extension("ollama", tmp_path / "user" / "ollama"):
+            pass
+    assert rejected.value.status_code == 400
+    assert "(compose.multigpu-nvidia.yaml)" in rejected.value.detail
+    assert "only from compose.nvidia.yaml" in rejected.value.detail

@@ -563,6 +563,8 @@ def _split_port_host(port_str: str) -> tuple[Optional[str], str]:
 # count or device_ids. scripts/resolve-compose-stack.sh mirrors this policy.
 _TRUSTED_LIBRARY_AMD_DEVICES = frozenset({"/dev/kfd:/dev/kfd", "/dev/dri:/dev/dri"})
 _NVIDIA_DEVICE_ID_RE = re.compile(r"[A-Za-z0-9_.:${}-]+")
+# The overlays the resolver loads as compose.<backend>.yaml for a GPU backend.
+_LIBRARY_ACCELERATOR_OVERLAYS = {"compose.nvidia.yaml": "nvidia", "compose.amd.yaml": "amd"}
 
 
 def _is_ods_nvidia_gpu_reservation(entry) -> bool:
@@ -594,7 +596,8 @@ def _scan_compose_content(
 
     ``accelerator`` names the backend of the overlay being scanned. Only with
     ``trusted`` does it permit that backend's GPU ("nvidia" or "amd"), in
-    exactly the ODS core shape; any other device request is rejected.
+    exactly the ODS core shape; any other device request is rejected, and
+    ``gpus``/``runtime`` are rejected unless ``skip_gpu_passthrough_check``.
     """
     allowed_trusted_extra_hosts = {"host.docker.internal:host-gateway"}
     if not trusted:
@@ -766,10 +769,11 @@ def _scan_compose_content(
                     )
         devices = svc_def.get("devices")
         if devices and accelerator != "amd":
-            raise HTTPException(
-                status_code=400,
-                detail=f"Extension rejected: devices in {svc_name}",
-            )
+            detail = f"Extension rejected: devices in {svc_name}"
+            if trusted:
+                detail += (f" ({compose_path.name}); a curated recipe may pass through "
+                           f"/dev/kfd and /dev/dri only from compose.amd.yaml")
+            raise HTTPException(status_code=400, detail=detail)
         if devices and (not isinstance(devices, list) or any(
                 not isinstance(entry, str) or entry not in _TRUSTED_LIBRARY_AMD_DEVICES
                 for entry in devices)):
@@ -789,12 +793,36 @@ def _scan_compose_content(
         # would otherwise AttributeError on .get() and surface as a 500
         # instead of a clean scanner pass-through (no GPU request â†’ no block).
         if not skip_gpu_passthrough_check:
+            # gpus: and runtime: are other routes to a GPU (Compose
+            # `gpus: all`, the legacy NVIDIA runtime), and a runtime also
+            # swaps the container's isolation. No user extension may set
+            # either, curated or imported. Built-ins keep the same exemption
+            # as their reservations.
+            if "gpus" in svc_def:
+                raise HTTPException(
+                    status_code=400,
+                    detail=(f"Extension rejected: gpus in {svc_name}; extensions may not "
+                            f"request GPUs with the gpus key"),
+                )
+            if "runtime" in svc_def:
+                raise HTTPException(
+                    status_code=400,
+                    detail=(f"Extension rejected: runtime in {svc_name}; extensions may not "
+                            f"choose a container runtime"),
+                )
             deploy = svc_def.get("deploy")
             if isinstance(deploy, dict):
                 resources = deploy.get("resources")
                 if isinstance(resources, dict):
                     reservations = resources.get("reservations")
                     requests = reservations.get("devices") if isinstance(reservations, dict) else None
+                    if requests and accelerator != "nvidia" and trusted:
+                        raise HTTPException(
+                            status_code=400,
+                            detail=(f"Extension rejected: GPU passthrough in {svc_name} "
+                                    f"({compose_path.name}); a curated recipe may reserve "
+                                    f"NVIDIA GPUs only from compose.nvidia.yaml"),
+                        )
                     if requests and accelerator != "nvidia":
                         raise HTTPException(
                             status_code=400,
@@ -2816,10 +2844,11 @@ def _staged_library_extension(service_id: str, dest: Path):
             # The compose resolver also loads compose.<backend>.yaml,
             # compose.local.yaml and compose.multigpu.yaml, with this policy.
             # Scan them here too, so an overlay it would drop fails the
-            # install. Only compose.<backend>.yaml may request that GPU.
+            # install. Only compose.nvidia.yaml / compose.amd.yaml may request
+            # that backend's GPU.
             for overlay in sorted(staged.glob('compose.*.yaml')):
-                backend = overlay.name.removeprefix('compose.').removesuffix('.yaml')
-                _scan_compose_content(overlay, trusted=trusted_library, accelerator=backend)
+                _scan_compose_content(overlay, trusted=trusted_library,
+                                      accelerator=_LIBRARY_ACCELERATOR_OVERLAYS.get(overlay.name))
             if not trusted_library:
                 from extension_recipe_package import verify_package
                 from extension_recipe_validation import validate_recipe

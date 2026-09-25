@@ -457,7 +457,8 @@ def _scan_user_compose_content(compose_path, trusted_library=False, accelerator=
     ``host.docker.internal:host-gateway``, and when ``accelerator`` names the
     backend of the overlay being scanned ("nvidia" or "amd"), that backend's
     GPU in exactly the ODS core shape (see ``_TRUSTED_LIBRARY_AMD_DEVICES``
-    and ``_is_ods_nvidia_gpu_reservation``). Nothing else grants a device.
+    and ``_is_ods_nvidia_gpu_reservation``). Nothing else grants a device;
+    ``gpus`` and ``runtime`` are rejected for every user extension.
     """
     if not trusted_library:
         accelerator = None
@@ -508,6 +509,13 @@ def _scan_user_compose_content(compose_path, trusted_library=False, accelerator=
             reject(f"service '{svc_name}' uses host IPC namespace")
         if svc_def.get("userns_mode") == "host":
             reject(f"service '{svc_name}' uses host user namespace")
+        # gpus: and runtime: are other routes to a GPU (Compose `gpus: all`,
+        # the legacy NVIDIA runtime), and a runtime also swaps the container's
+        # isolation. No user extension may set either, curated or imported.
+        if "gpus" in svc_def:
+            reject(f"service '{svc_name}' requests GPUs via gpus")
+        if "runtime" in svc_def:
+            reject(f"service '{svc_name}' sets a container runtime")
         cap_add = svc_def.get("cap_add", [])
         if isinstance(cap_add, list):
             for cap in cap_add:

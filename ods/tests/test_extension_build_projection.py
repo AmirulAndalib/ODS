@@ -237,7 +237,7 @@ AMD_GPU = {'devices': ['/dev/dri:/dev/dri', '/dev/kfd:/dev/kfd'],
            'group_add': ['${VIDEO_GID:-44}', '${RENDER_GID:-992}']}
 
 
-def gpu_recipe_root(tmp_path, *, upstream=None, nvidia=NVIDIA_GPU, amd=AMD_GPU, override=None):
+def gpu_recipe_root(tmp_path, *, upstream=None, nvidia=NVIDIA_GPU, amd=AMD_GPU, override=None, base=None):
     """An install root holding one GPU library recipe as the dashboard installs it."""
     (tmp_path / 'docker-compose.base.yml').write_text('services: {}\n')
     extension = tmp_path / 'data/user-extensions/gpu-recipe'
@@ -245,7 +245,8 @@ def gpu_recipe_root(tmp_path, *, upstream=None, nvidia=NVIDIA_GPU, amd=AMD_GPU, 
     (extension / 'manifest.yaml').write_text(yaml.safe_dump({'schema_version': 'ods.services.v1', 'service': {
         'id': 'gpu-recipe', 'name': 'GPU Recipe', 'compose_file': 'compose.yaml',
         'gpu_backends': ['nvidia', 'amd']}}))
-    (extension / 'compose.yaml').write_text(yaml.safe_dump({'services': {'gpu-recipe': {'image': 'example:fixture'}}}))
+    (extension / 'compose.yaml').write_text(yaml.safe_dump(
+        {'services': {'gpu-recipe': {'image': 'example:fixture', **(base or {})}}}))
     (extension / 'compose.nvidia.yaml').write_text(yaml.safe_dump({'services': {'gpu-recipe': nvidia}}))
     (extension / 'compose.amd.yaml').write_text(yaml.safe_dump({'services': {'gpu-recipe': amd}}))
     if upstream is not None:
@@ -286,6 +287,9 @@ def test_resolver_keeps_curated_gpu_overlay_on_its_backend(tmp_path, backend):
      'unsupported GPU reservation'),
     ('nvidia', {**NVIDIA_GPU, 'network_mode': 'host'}, 'uses host network mode'),
     ('nvidia', AMD_GPU, 'declares devices'),
+    ('nvidia', {'gpus': 'all'}, 'requests GPUs via gpus'),
+    ('nvidia', {**NVIDIA_GPU, 'runtime': 'nvidia'}, 'sets a container runtime'),
+    ('amd', {**AMD_GPU, 'gpus': 'all'}, 'requests GPUs via gpus'),
 ])
 def test_resolver_drops_curated_overlay_outside_the_accelerator_policy(tmp_path, backend, overlay, reason):
     root = gpu_recipe_root(tmp_path, **{backend: overlay})
@@ -309,8 +313,25 @@ def test_resolver_never_grants_an_imported_recipe_an_accelerator(tmp_path, backe
 @pytest.mark.parametrize('backend, override, reason', [
     ('amd', AMD_GPU, 'declares devices'),
     ('nvidia', NVIDIA_GPU, 'requests GPU passthrough'),
+    ('nvidia', {'gpus': 'all'}, 'requests GPUs via gpus'),
+    ('nvidia', {'runtime': 'nvidia'}, 'sets a container runtime'),
 ])
 def test_resolver_never_grants_the_override_file_an_accelerator(tmp_path, backend, override, reason):
     files, diagnostics = resolve_root(gpu_recipe_root(tmp_path, override=override), backend)
     assert 'docker-compose.override.yml' not in files
     assert f'docker-compose.override.yml: service \'base\' {reason}' in diagnostics
+
+
+@pytest.mark.parametrize('upstream', [None, {'origin': 'github-proposal',
+                                             'repository': 'https://github.com/owner/project'}],
+                         ids=['curated', 'imported'])
+@pytest.mark.parametrize('base, reason', [
+    ({'gpus': 'all'}, 'requests GPUs via gpus'),
+    ({'runtime': 'nvidia'}, 'sets a container runtime'),
+], ids=['gpus', 'runtime'])
+def test_resolver_rejects_gpus_and_runtime_for_every_recipe(tmp_path, upstream, base, reason):
+    """Another route to a GPU drops the whole recipe, curated or imported."""
+    root = gpu_recipe_root(tmp_path, upstream=upstream, base=base)
+    files, diagnostics = resolve_root(root, 'nvidia')
+    assert not any('user-extensions/gpu-recipe/' in path for path in files)
+    assert reason in diagnostics
