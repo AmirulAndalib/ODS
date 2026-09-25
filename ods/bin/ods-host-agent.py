@@ -166,6 +166,11 @@ MODEL_ACTIVATION_HEALTH_ATTEMPTS = 60
 # two additional health intervals during model activation while preserving the
 # same bounded, fail-closed health contract.
 HERMES_MODEL_ACTIVATION_HEALTH_ATTEMPTS = 90
+# A replaced llama-server container usually serves a small or mid-size model
+# within a few seconds. Probe densely for this window instead of sleeping a
+# fixed initial delay, then fall back to the regular 5-second schedule.
+_MODEL_READINESS_FAST_POLL_SECONDS = 30.0
+_MODEL_READINESS_FAST_POLL_INTERVAL_SECONDS = 0.5
 VALID_HOOK_NAMES = frozenset({
     "pre_install", "post_install", "pre_start", "post_start",
     "pre_uninstall", "post_uninstall",
@@ -5937,7 +5942,17 @@ def _core_recreate_compose_flags(flags: list[str]) -> list[str]:
             if index not in excluded and index - 1 not in excluded]
 
 
-def docker_compose_recreate(service_ids: list[str]) -> tuple:
+def docker_compose_converge(service_ids: list[str]) -> tuple:
+    """Apply the current compose definition without forcing a recreate.
+
+    Compose replaces a container only when its resolved service definition
+    (interpolated environment, image, mounts) no longer matches the running
+    instance, and otherwise leaves it untouched.
+    """
+    return docker_compose_recreate(service_ids, force_recreate=False)
+
+
+def docker_compose_recreate(service_ids: list[str], *, force_recreate: bool = True) -> tuple:
     """Force-recreate a set of allowed core services using the current compose stack."""
     ok, error = validate_core_recreate_ids(service_ids)
     if not ok:
@@ -5947,7 +5962,11 @@ def docker_compose_recreate(service_ids: list[str]) -> tuple:
         flags = _core_recreate_compose_flags(resolve_compose_flags())
     except (OSError, ValueError) as exc:
         return False, f"Could not resolve core Compose fragments: {exc}"
-    cmd = ["docker", "compose"] + flags + ["up", "-d", "--no-deps", "--force-recreate"] + service_ids
+    cmd = (
+        ["docker", "compose"] + flags + ["up", "-d", "--no-deps"]
+        + (["--force-recreate"] if force_recreate else [])
+        + service_ids
+    )
     compose_env = os.environ.copy()
     for key in ("GGUF_FILE", "LLM_MODEL", "LEMONADE_MODEL", "MAX_CONTEXT", "CTX_SIZE"):
         compose_env.pop(key, None)
@@ -12098,6 +12117,8 @@ class AgentHandler(BaseHTTPRequestHandler):
         opencode_snapshot: dict | None = None
         perplexica_snapshot: dict | None = None
         container_states: dict[str, dict[str, bool]] = {}
+        litellm_inputs_before: dict | None = None
+        litellm_reuse: str | None = None
         opencode_runtime_state: dict | None = None
         committed = False
         mutation_started = False
@@ -12566,6 +12587,10 @@ class AgentHandler(BaseHTTPRequestHandler):
                 env_pre,
                 container_states["ods-perplexica"],
             )
+            if container_states["ods-litellm"]["running"]:
+                # Fingerprint what the running gateway loaded before any write
+                # so a byte-identical re-render cannot force a no-op recreate.
+                litellm_inputs_before = _dependent_bind_inputs("ods-litellm")
             active_litellm_consumers = [
                 name
                 for name in ("ods-hermes", "ods-openclaw", "ods-perplexica")
@@ -12722,6 +12747,18 @@ class AgentHandler(BaseHTTPRequestHandler):
                 "agentViable": _model_agent_viable(model, int(context_length)),
             }
 
+            def _activation_readiness_cadence() -> dict:
+                # Both container restart helpers return only after Docker has
+                # replaced the previous llama-server, so no stale runtime can
+                # answer an early probe. Native and Lemonade runtimes keep the
+                # original fixed-delay cadence.
+                if (
+                    runtime_restart_strategy in {"compose-llama", "container-llama"}
+                    and not lemonade_runtime
+                ):
+                    return {"fast_poll_seconds": _MODEL_READINESS_FAST_POLL_SECONDS}
+                return {}
+
             def _sb_wait_ready(_env, _gguf, _ctx, lemonade_model_id=""):
                 return _wait_for_model_readiness(
                     _env,
@@ -12731,6 +12768,7 @@ class AgentHandler(BaseHTTPRequestHandler):
                     lemonade_model_id=lemonade_model_id,
                     return_proof=True,
                     require_exact_context=requested_context_length is not None,
+                    **_activation_readiness_cadence(),
                 )
 
             # Restart llama-server with the new model.
@@ -12884,6 +12922,7 @@ class AgentHandler(BaseHTTPRequestHandler):
                     lemonade_model_id=lemonade_model_id,
                     return_identity=True,
                     require_exact_context=requested_context_length is not None,
+                    **_activation_readiness_cadence(),
                 )
                 healthy = bool(runtime_identity)
 
@@ -12981,12 +13020,26 @@ class AgentHandler(BaseHTTPRequestHandler):
 
                 # Recreate bind-configured dependents so Docker Desktop cannot
                 # retain stale inodes after the atomic config replacements.
+                # LiteLLM is the exception only when this activation provably
+                # changed nothing it loads (same healthy instance, identical
+                # bind-mounted bytes, unchanged Compose definition), as with
+                # the model-independent switchboard route. A recreate there
+                # reloads identical inputs yet costs a graceful stop, a full
+                # Python import, and a health cycle (~20s on the fleet).
                 litellm_restart_attempted = container_states["ods-litellm"]["running"]
-                litellm_restarted = _restart_existing_container(
-                    "ods-litellm",
-                    container_states["ods-litellm"],
-                    recreate=True,
-                )
+                if litellm_restart_attempted:
+                    litellm_reuse = _reuse_unchanged_dependent(
+                        "ods-litellm",
+                        litellm_inputs_before,
+                    )
+                if litellm_reuse is None:
+                    litellm_restarted = _restart_existing_container(
+                        "ods-litellm",
+                        container_states["ods-litellm"],
+                        recreate=True,
+                    )
+                else:
+                    litellm_restarted = litellm_reuse == "recreated"
                 if litellm_restarted:
                     # Recreated LiteLLM images can spend tens of seconds in
                     # dependency import/startup before accepting HTTP. Wait on
@@ -12994,6 +13047,9 @@ class AgentHandler(BaseHTTPRequestHandler):
                     # refusals cannot exhaust the completion probe and roll
                     # back an otherwise healthy model swap.
                     _wait_for_container_health("ods-litellm")
+                if litellm_restarted or litellm_reuse == "reused":
+                    # Kept or recreated, the public route must still serve a
+                    # completion against the newly activated model.
                     _verify_litellm_route(env)
                 if hermes_patched:
                     hermes_restart_attempted = container_states["ods-hermes"]["running"]
@@ -13093,6 +13149,8 @@ class AgentHandler(BaseHTTPRequestHandler):
                     "litellm": (
                         "restarted"
                         if litellm_restarted
+                        else "unchanged"
+                        if litellm_reuse == "reused"
                         else "stopped"
                         if container_states["ods-litellm"]["exists"]
                         else "not_installed"
@@ -14646,11 +14704,20 @@ def _wait_for_model_readiness(
     require_exact_context: bool = False,
     cancel_event: threading.Event | None = None,
     allow_model_warmup: bool = True,
+    fast_poll_seconds: float = 0.0,
+    fast_poll_interval: float = _MODEL_READINESS_FAST_POLL_INTERVAL_SECONDS,
 ) -> bool | str | dict[str, object]:
     """Prove exact runtime identity and one matching meaningful completion.
 
     Legacy callers receive a boolean. Identity callers receive the concrete
     runtime identity. Adapters receive identity, actual context, and proof time.
+
+    ``fast_poll_seconds`` opts into dense probing (every
+    ``fast_poll_interval``) for that long *before* the regular schedule, for
+    callers whose restart already removed the previous runtime. Time spent
+    there counts toward ``initial_delay``, and the full ``attempts`` schedule
+    still follows, so a slow load never fails earlier than before. Lemonade
+    keeps the regular cadence because its probes can send warmup loads.
     """
     gpu_backend = str(env.get("GPU_BACKEND") or "nvidia").lower()
     windows_native_llama = _is_windows_host_llama_server(env)
@@ -14696,6 +14763,30 @@ def _wait_for_model_readiness(
         completion_model = lemonade_model_id
         completion_prefix = str(env.get("LEMONADE_API_BASE_PATH") or "/api/v1")
     expected_context = _positive_int(env.get("CTX_SIZE") or env.get("MAX_CONTEXT"))
+
+    if fast_poll_seconds > 0 and not is_lemonade:
+        fast_interval = max(0.05, float(fast_poll_interval))
+        fast_started = time.monotonic()
+        fast_result = _wait_for_model_readiness(
+            env,
+            model_id=model_id,
+            gguf_file=gguf_file,
+            llm_model_name=llm_model_name,
+            lemonade_model_id=lemonade_model_id,
+            attempts=max(1, math.ceil(float(fast_poll_seconds) / fast_interval)),
+            initial_delay=0,
+            interval=fast_interval,
+            return_identity=return_identity,
+            return_proof=return_proof,
+            require_exact_context=require_exact_context,
+            cancel_event=cancel_event,
+            allow_model_warmup=allow_model_warmup,
+        )
+        # Every success contract is truthy; every not-ready result is falsy
+        # and falls through to the unchanged regular schedule below.
+        if fast_result:
+            return fast_result
+        initial_delay = max(0.0, float(initial_delay) - (time.monotonic() - fast_started))
 
     logger.info("Waiting for requested model identity %s at %s", gguf_file, identity_url)
     warmup_sent = False
@@ -15861,6 +15952,109 @@ def _restore_container_state(
             detail = (result.stderr or result.stdout or "").strip()
             raise RuntimeError(f"Could not restore stopped state for {container}: {detail[:300]}")
     return False
+
+
+def _dependent_bind_inputs(container: str) -> dict | None:
+    """Fingerprint a running dependent instance and its bind-mounted host files.
+
+    Returns ``None`` whenever the view cannot be proved from this host, for
+    example when the agent runs inside Docker Desktop and the mount sources
+    are not host-readable paths, or when a bind source is a directory. Callers
+    then keep the unconditional recreate.
+    """
+    try:
+        result = subprocess.run(
+            [
+                "docker", "inspect", "--type", "container", "--format",
+                "{{json .}}", container,
+            ],
+            capture_output=True,
+            text=True,
+            timeout=15,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    if result.returncode != 0:
+        return None
+    try:
+        data = json.loads(result.stdout)
+    except (json.JSONDecodeError, TypeError):
+        return None
+    if not isinstance(data, dict):
+        return None
+    state = data.get("State")
+    container_id = data.get("Id")
+    if (
+        not isinstance(state, dict)
+        or state.get("Running") is not True
+        or not isinstance(container_id, str)
+        or not container_id
+    ):
+        return None
+    health = state.get("Health")
+    health_status = (
+        str(health.get("Status") or "").strip().casefold()
+        if isinstance(health, dict)
+        else "none"
+    )
+    mounts = data.get("Mounts")
+    if mounts is None:
+        mounts = []
+    if not isinstance(mounts, list):
+        return None
+    files: dict[str, str] = {}
+    for mount in mounts:
+        if not isinstance(mount, dict):
+            return None
+        if mount.get("Type") != "bind":
+            continue
+        source = mount.get("Source")
+        if not isinstance(source, str) or not source:
+            return None
+        path = Path(source)
+        try:
+            if not stat_mod.S_ISREG(path.stat().st_mode):
+                return None
+            files[source] = hashlib.sha256(path.read_bytes()).hexdigest()
+        except OSError:
+            return None
+    return {"id": container_id, "health": health_status, "files": files}
+
+
+def _reuse_unchanged_dependent(container: str, before: dict | None) -> str | None:
+    """Keep a running dependent whose inputs this activation did not change.
+
+    ``before`` is :func:`_dependent_bind_inputs` captured before the
+    activation's first write. The instance is kept only when it is the same
+    healthy container, every bind-mounted host file is byte-identical to that
+    capture, and a non-forced Compose ``up`` confirms the service definition
+    (including ``.env`` interpolation) still matches. Recreating it would then
+    reload exactly what it already runs.
+
+    Returns ``"reused"`` for the untouched instance, ``"recreated"`` when
+    Compose itself replaced a drifted definition (the caller must wait for
+    health), or ``None`` when the caller must force-recreate as before.
+    """
+    if before is None:
+        return None
+    current = _capture_container_state(container)
+    if not current["exists"] or not current["running"]:
+        raise RuntimeError(f"{container} stopped during model activation")
+    now = _dependent_bind_inputs(container)
+    if (
+        now is None
+        or now["id"] != before["id"]
+        or now["files"] != before["files"]
+        or now["health"] not in {"healthy", "none"}
+    ):
+        return None
+    ok, error = docker_compose_converge([container.removeprefix("ods-")])
+    if not ok:
+        raise RuntimeError(f"Could not reconcile {container}: {error}")
+    after = _dependent_bind_inputs(container)
+    if after is not None and after["id"] == now["id"]:
+        return "reused"
+    return "recreated"
 
 
 def _opencode_config_paths() -> tuple[Path, ...]:
