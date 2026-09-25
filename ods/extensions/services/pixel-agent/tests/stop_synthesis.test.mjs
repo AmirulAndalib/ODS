@@ -323,8 +323,12 @@ test('the synthesis is skipped whenever its conditions do not hold', async () =>
 
 test('a timeout or rejected reply falls back to the stop text and page list, without retry; failures pause the synthesis', async () => {
   const limits = {...STOP_SYNTHESIS_LIMITS, timeoutMs: 20};
-  const slow = stoppedRun('slow', {limits, stub: {complete: params => new Promise((_, reject) =>
-    params.signal.addEventListener('abort', () => reject(params.signal.reason), {once: true}))}});
+  // A model that never answers. AbortSignal.timeout does not hold the event
+  // loop open (the gateway server does in production), so the stub does.
+  const slow = stoppedRun('slow', {limits, stub: {complete: params => new Promise((_, reject) => {
+    const alive = setInterval(() => {}, 1000);
+    params.signal.addEventListener('abort', () => { clearInterval(alive); reject(params.signal.reason); }, {once: true});
+  })}});
   await slow.guard.settleDelivery(slow.context.runId);
   await slow.guard.settleDelivery(slow.context.runId);
   assert.equal(slow.calls.length, 1, 'no retry');
