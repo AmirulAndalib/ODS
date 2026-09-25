@@ -4,6 +4,9 @@
 // transcript only); it either answers directly ('direct') or calls a tool,
 // which is refused with the finalization instruction. The following call is
 // the single tool-free turn: it answers ('answer') or tries a tool ('tool').
+// 'compaction' reports near-window usage on the answer, so OpenClaw runs a real
+// threshold auto-compaction whose summarization call uses the run's model
+// stream (tower3, 2026-09-25): the answer must survive it.
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {createServer} from 'node:http';
@@ -20,15 +23,25 @@ const pkg=process.env.OPENCLAW_PACKAGE;
 const ANSWER='```json\n{"name":"RTX 5070","vramGB":12,"boardPowerW":250,"retail":null}\n```\n\n' +
   'The NVIDIA page returned 12 GB and 250 W. Retail price and benchmark results are unverified because later fetches failed.';
 
-for (const finalTurn of ['answer','tool','direct']) test(`real harness graceful finalization: final turn ${finalTurn}`,
+for (const finalTurn of ['answer','tool','direct','compaction']) test(`real harness graceful finalization: final turn ${finalTurn}`,
   {skip:!pkg,timeout:90000}, async () => {
   const root=mkdtempSync(join(tmpdir(),'ods-progress-finalization-'));
-  let rounds=0,log='',child,ingress;
+  let rounds=0,summaries=0,log='',child,ingress;
   const seen=[];
   const answerRound=finalTurn==='direct'?4:5;
   const upstream=createServer(async(req,res)=>{
     const chunks=[];for await(const chunk of req) chunks.push(chunk);
-    const tools=JSON.parse(Buffer.concat(chunks).toString()).messages.filter(message=>message.role==='tool');
+    const request=JSON.parse(Buffer.concat(chunks).toString());
+    if (!request.tools?.length) {
+      // A compaction summarization request: no tools, not an agent turn.
+      summaries++;
+      res.writeHead(200,{'Content-Type':'text/event-stream'});
+      res.write('data: '+JSON.stringify({id:'summary',object:'chat.completion.chunk',choices:[{index:0,delta:{role:'assistant',
+        content:'Summary: four source fetches failed; the answer used the NVIDIA page.'},finish_reason:null}]})+'\n\n');
+      res.end('data: '+JSON.stringify({id:'summary',object:'chat.completion.chunk',choices:[{index:0,delta:{},finish_reason:'stop'}]})+'\n\ndata: [DONE]\n\n');
+      return;
+    }
+    const tools=request.messages.filter(message=>message.role==='tool');
     seen.push(tools.at(-1)?.content ?? null);
     const round=rounds++;
     const delta=round!==answerRound || finalTurn==='tool'
@@ -37,8 +50,9 @@ for (const finalTurn of ['answer','tool','direct']) test(`real harness graceful 
       : {role:'assistant',content:ANSWER};
     res.writeHead(200,{'Content-Type':'text/event-stream'});
     res.write('data: '+JSON.stringify({id:'fixture',object:'chat.completion.chunk',choices:[{index:0,delta,finish_reason:null}]})+'\n\n');
+    const usage=finalTurn==='compaction' && !delta.tool_calls ? {usage:{prompt_tokens:31000,completion_tokens:60,total_tokens:31060}} : {};
     res.end('data: '+JSON.stringify({id:'fixture',object:'chat.completion.chunk',
-      choices:[{index:0,delta:{},finish_reason:delta.tool_calls?'tool_calls':'stop'}]})+'\n\ndata: [DONE]\n\n');
+      choices:[{index:0,delta:{},finish_reason:delta.tool_calls?'tool_calls':'stop'}],...usage})+'\n\ndata: [DONE]\n\n');
   });
   await new Promise(resolve=>upstream.listen(0,'127.0.0.1',resolve));
   const probe=createServer();await new Promise(resolve=>probe.listen(0,'127.0.0.1',resolve));
@@ -66,6 +80,8 @@ for (const finalTurn of ['answer','tool','direct']) test(`real harness graceful 
       api.on('before_prompt_build',(e,c)=>guard.observeRun(c,'pixel',e));
       api.on('model_call_started',(e,c)=>guard.observeModelCall(e,c));
       api.on('model_call_ended',(e,c)=>guard.observeModelEnd(e,c));
+      api.on('before_compaction',(e,c)=>{record({compaction:'start',sessionKey:Boolean(c?.sessionKey)});guard.observeCompaction(c,'start');});
+      api.on('after_compaction',(e,c)=>{record({compaction:'end'});guard.observeCompaction(c,'end');});
       api.on('before_tool_call',(e,c)=>{const d=guard.beforeToolCall(e,c);record({before:e.toolName,block:d?.blockReason?.slice(0,40)??null});return d;});
       api.on('after_tool_call',(e,c)=>guard.afterToolCall(e,c));
       api.on('tool_result_persist',(e,c)=>guard.toolResultPersist(e,c));
@@ -79,7 +95,8 @@ for (const finalTurn of ['answer','tool','direct']) test(`real harness graceful 
   `);
   const config={logging:{file:join(root,'runtime.log')},update:{checkOnStart:false},
     gateway:{mode:'local',bind:'loopback',port,auth:{mode:'token',token:'fixture-only'},http:{endpoints:{chatCompletions:{enabled:true}}}},
-    agents:{defaults:{workspace:join(root,'workspace'),skipBootstrap:true,model:{primary:'fixture/test'},contextTokens:32768,heartbeat:{every:'0m'}},
+    agents:{defaults:{workspace:join(root,'workspace'),skipBootstrap:true,model:{primary:'fixture/test'},contextTokens:32768,heartbeat:{every:'0m'},
+      ...(finalTurn==='compaction'?{compaction:{mode:'default',keepRecentTokens:1,reserveTokensFloor:0}}:{})},
       list:[{id:'pixel',default:true}]},
     models:{mode:'replace',providers:{fixture:{baseUrl:`http://127.0.0.1:${upstream.address().port}/v1`,api:'openai-completions',apiKey:'fixture-only',
       models:[{id:'test',name:'Fixture',contextWindow:32768,maxTokens:4096,reasoning:false,input:['text']}]}}},
@@ -119,6 +136,10 @@ for (const finalTurn of ['answer','tool','direct']) test(`real harness graceful 
         'the answer turn sees the fixed instruction as the refused call result\n'+trace);
     }
     assert.equal(frames.at(-1).pixel_outcome.status,'failed',trace);
+    if(finalTurn==='compaction'){
+      assert.ok(summaries>=1,'OpenClaw ran a real compaction summarization call after the answer\n'+trace);
+      assert.ok(events.some(x=>x.compaction==='start'&&x.sessionKey),trace);
+    }
     if(finalTurn!=='tool'){
       assert.ok(delivered.startsWith(ANSWER),trace);
       assert.ok(delivered.includes(PROGRESS_FINALIZATION_NOTE),trace);

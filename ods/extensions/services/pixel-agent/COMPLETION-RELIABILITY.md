@@ -103,7 +103,10 @@ requested format, and mark missing or unverified items. The following model
 call is the answer turn. Parallel siblings in the refused call's model round
 receive the same instruction; with no observed model round, the next tool call
 ends the run. A model that answers without another tool call is treated the
-same way.
+same way. OpenClaw's in-session auto-compaction summarizes through the run's own
+model stream; the summarization calls it starts (at most two, bracketed by
+`before_compaction`) are not counted as turns, so a compaction after the answer
+cannot forfeit it. Any other further model call still does.
 
 The owner receives that answer followed by host facts the model cannot alter:
 the tool-limit note, a failed or pending test result, cited links that were

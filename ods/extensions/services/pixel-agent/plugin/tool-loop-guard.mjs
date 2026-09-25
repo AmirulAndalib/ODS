@@ -9460,6 +9460,32 @@ export function createToolLoopGuard({
     activeUsers.set(user, { runId, sessionId, sessionKey });
   }
 
+  // OpenClaw's in-session auto-compaction summarizes through the run's own
+  // model stream, so those model-call hooks carry this run's identity. They are
+  // not agent turns: the tool-limit answer turn, and an answer it produced,
+  // must survive them (tower3, 2026-09-25: a threshold compaction after the
+  // answer forfeited it). before_compaction opens a window on the Pixel run of
+  // that session; it covers at most the two summarization calls one compaction
+  // starts together, and closes when they end or after_compaction reports none.
+  const MAX_COMPACTION_MODEL_CALLS = 2;
+
+  function compactionRunState(context) {
+    const sessionKey = context?.sessionKey;
+    if (typeof sessionKey !== "string" || !sessionKey) return undefined;
+    for (const [runId, state] of runs) {
+      if (state.currentSessionKey === sessionKey && state.currentSessionId &&
+          sessionRuns.get(state.currentSessionId) === runId) return state;
+    }
+    return undefined;
+  }
+
+  function observeCompaction(context, phase) {
+    const state = compactionRunState(context);
+    if (!state) return;
+    if (phase === "start") state.compactionWindow = { calls: new Set(), started: 0 };
+    else if (state.compactionWindow?.calls.size === 0) state.compactionWindow = undefined;
+  }
+
   function observeModelCall(event, context, agentId = "pixel") {
     if (context?.agentId !== undefined && context.agentId !== agentId) return;
     const runId = context?.runId ?? event?.runId;
@@ -9476,16 +9502,28 @@ export function createToolLoopGuard({
           (hasSessionId && context.sessionId !== state.currentSessionId) ||
           (hasSessionKey && context.sessionKey !== state.currentSessionKey)) return;
     }
+    const compaction = state.compactionWindow;
+    const compactionCall = Boolean(compaction) && typeof event?.callId === "string" && event.callId.length > 0 &&
+      compaction.started < MAX_COMPACTION_MODEL_CALLS;
+    if (compactionCall) {
+      compaction.calls.add(event.callId);
+      compaction.started += 1;
+    } else if (compaction) {
+      // Anything beyond the bounded summarization calls is an agent turn.
+      state.compactionWindow = undefined;
+    }
     state.operationsPromptRound += 1;
     state.progressBudget.beginModelRound();
-    if (state.progressBudget.exhausted) progressFinalization(state).modelCallStarted();
+    if (state.progressBudget.exhausted && !compactionCall) progressFinalization(state).modelCallStarted();
   }
 
-  function observeModelEnd(_event, context, agentId = "pixel") {
+  function observeModelEnd(event, context, agentId = "pixel") {
     if (context?.agentId && context.agentId !== agentId) return;
     const runId = context?.runId;
     const state = runs.get(runId);
     if (!state || !context?.sessionId || context.sessionId !== state.currentSessionId) return;
+    const compaction = state.compactionWindow;
+    if (compaction?.calls.delete(event?.callId) && compaction.calls.size === 0) state.compactionWindow = undefined;
     if (state.extensionPendingHandoff && !state.workspaceLaneRequested && !state.extensionPendingAbortAcknowledged &&
         !state.clientCancelled && !state.progressBudget.exhausted &&
         sessionRuns.get(context.sessionId) === runId) {
@@ -11784,6 +11822,7 @@ export function createToolLoopGuard({
     replyPayloadSending,
     observeRun,
     observeModelCall,
+    observeCompaction,
     abortUserRun,
     verificationForRun,
     deliveryVerificationForRun,

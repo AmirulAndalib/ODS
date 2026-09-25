@@ -350,6 +350,14 @@ export default definePluginEntry({
     api.on("model_call_ended", (event, context) =>
       toolLoopGuard.observeModelEnd(event, context, AGENT_ID)
     );
+    // In-session auto-compaction summarizes through the run's model stream;
+    // its model calls are not agent turns (see observeCompaction).
+    api.on("before_compaction", (_event, context) =>
+      toolLoopGuard.observeCompaction(context, "start")
+    );
+    api.on("after_compaction", (_event, context) =>
+      toolLoopGuard.observeCompaction(context, "end")
+    );
     api.on("llm_input", (event, context) => {
       if (!accessRuntime.isProbe(context)) contextCompaction.observeModelInput(event, context);
     });

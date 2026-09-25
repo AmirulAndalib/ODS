@@ -495,6 +495,116 @@ test('without model hooks, an answer after the research-stop refusal is still de
   assert.deepEqual(aborts, []);
 });
 
+// Replays tower3 session 105e4915 (integration 64ff3d2a, 2026-09-25
+// 10:29-10:31 UTC, Qwen3.5-27B). After the search allowance ran out, two
+// parallel search refusals and a 404, a parallel [web_search, web_fetch] hit
+// the research web-loop stop: both refusals carried the instruction and the
+// model wrote its JSON answer. OpenClaw then ran a threshold auto-compaction
+// for the same run; its summarization call (same runId, through the run's
+// model stream) was counted as a further turn, forfeited the answer and was
+// aborted, so the owner received only the research stop text.
+function tower3Replay({compaction = 'after-finalize', compactionCalls = 1, hooks = true} = {}) {
+  const {guard, aborts} = guardFixture();
+  const sdk = {runId: context.runId, sessionId: context.sessionId, sessionKey: context.sessionKey};
+  let n = 0, m = 0;
+  const modelCall = () => { const callId = `${context.runId}:model:${++m}`; guard.observeModelCall({callId}, sdk); return callId; };
+  const modelEnd = callId => guard.observeModelEnd({callId}, sdk);
+  const turn = () => modelEnd(modelCall());
+  const before = (toolName, params) => {
+    const id = `t3-${++n}`, ctx = {...context, toolName, toolCallId: id};
+    return {id, ctx, toolName, params, decision: guard.beforeToolCall({toolName, toolCallId: id, params}, ctx)};
+  };
+  const finish = ({id, ctx, toolName, params, decision}, outcome) => {
+    const result = decision?.block
+      ? {content: [{type: 'text', text: decision.blockReason}], details: {status: 'blocked', reason: decision.blockReason}}
+      : outcome;
+    const isError = decision?.block === true || result?.isError === true;
+    guard.afterToolCall({toolName, toolCallId: id, params, result, ...(isError ? {error: result.content[0].text} : {})}, ctx);
+    guard.toolResultPersist({toolCallId: id, message: {role: 'toolResult', toolName, toolCallId: id, isError, ...result}}, ctx);
+    return decision;
+  };
+  const batch = calls => { const pending = calls.map(([name, params]) => before(name, params)); return pending.map((p, i) => finish(p, calls[i][2])); };
+  const page = url => ({content: [{type: 'text', text: `Fetched ${url}`}], details: {status: 200, url, finalUrl: url, text: `Evidence from ${url}`}});
+  const fail = code => ({isError: true, content: [{type: 'text', text: JSON.stringify({status: 'error', tool: 'web_fetch', error: `Web fetch failed (${code})`})}],
+    details: {status: 'error'}});
+  const found = q => ({content: [{type: 'text', text: JSON.stringify({query: q, results: []})}], details: {status: 'ok'}});
+  const compact = () => {
+    if (hooks) guard.observeCompaction({sessionKey: context.sessionKey}, 'start');
+    const ids = Array.from({length: compactionCalls}, () => modelCall());
+    ids.forEach(modelEnd);
+    if (hooks) guard.observeCompaction({sessionKey: context.sessionKey}, 'end');
+  };
+  // Earlier rounds: pages read, duplicate/403 failures, and the search allowance used up.
+  Object.values(PAGES).forEach((url, i) => { turn(); batch([['web_fetch', {url}, page(url)], ['web_fetch', {url: `${url}?dup=${i}`}, fail(403)]]); });
+  for (let i = 0; i < DEFAULT_WEB_TOOL_LIMITS.search - 1; i++) { turn(); batch([['web_search', {query: `gpu ${i}`}, found(`gpu ${i}`)]]); }
+  turn();
+  const [, firstRefusal] = batch([['web_search', {query: 'RX 9070 price'}, found('x')], ['web_search', {query: 'RX 9070 specs'}, found('x')],
+    ['web_fetch', {url: 'https://bottleneckpc.com/gpu/rtx-5070'}, page('https://bottleneckpc.com/gpu/rtx-5070')]]);
+  assert.equal(firstRefusal?.blockReason, WEB_SEARCH_BUDGET_EXHAUSTED_REASON);
+  turn();
+  const second = batch([['web_fetch', {url: 'https://www.newegg.com/rx-9070-gre'}, page('https://www.newegg.com/rx-9070-gre')],
+    ['web_search', {query: 'RX 9070 stock'}, found('x')], ['web_search', {query: 'RTX 5070 stock'}, found('x')]]);
+  assert.deepEqual(second.slice(1).map(d => d?.blockReason), [WEB_SEARCH_BUDGET_EXHAUSTED_REASON, WEB_SEARCH_BUDGET_EXHAUSTED_REASON]);
+  // "I have substantial data now. Let me compile the final JSON..." but another fetch: 404.
+  turn(); batch([['web_fetch', {url: 'https://www.tech4gamers.com/reviews/gpus/rx-9070-vs-rtx-5070'}, fail(404)]]);
+  // 10:29:37: parallel web_search + web_fetch after the allowance is gone.
+  turn();
+  const stop = batch([['web_search', {query: 'RTX 5070 vs RX 9070 1440p FPS'}, found('x')],
+    ['web_fetch', {url: 'https://www.notebookcheck.net/RTX-5070-vs-RX-9070.html'}, page('x')]]);
+  // 10:29:57: the single tool-free answer turn writes the JSON answer.
+  const answerCall = modelCall();
+  modelEnd(answerCall);
+  if (compaction === 'before-finalize') compact();
+  guard.beforeAgentFinalize({lastAssistantMessage: RESEARCH_ANSWER}, context);
+  if (compaction === 'after-finalize') compact();
+  return {guard, aborts, stop, turn};
+}
+
+test('tower3 replay: parallel refusals carry the instruction and a post-answer compaction keeps the answer', () => {
+  for (const compaction of ['after-finalize', 'before-finalize']) {
+    for (const compactionCalls of [1, 2]) {
+      const label = `${compaction}/${compactionCalls} summarization call(s)`;
+      const {guard, aborts, stop} = tower3Replay({compaction, compactionCalls});
+      assert.deepEqual(stop.map(d => d?.blockReason), [PROGRESS_FINALIZATION_INSTRUCTION, PROGRESS_FINALIZATION_INSTRUCTION],
+        `${label}: both parallel refusals carry the instruction`);
+      assert.deepEqual(aborts, [], `${label}: the compaction is not aborted`);
+      const delivery = guard.deliveryVerificationForRun(context.runId);
+      assert.equal(delivery.status, 'failed', label);
+      assert.ok(delivery.text.startsWith(RESEARCH_ANSWER), `${label}: the model's JSON answer is delivered`);
+      assert.ok(delivery.text.includes(PROGRESS_FINALIZATION_NOTE), label);
+      assert.match(delivery.text, /web research allowance was used up/, label);
+      assert.ok(!delivery.text.includes(WEB_LOOP_DELIVERY_REASON), label);
+    }
+  }
+});
+
+test('tower3 replay without compaction hooks reproduces the lost answer', () => {
+  const {guard, aborts} = tower3Replay({hooks: false});
+  assert.equal(aborts.length, 1, 'the summarization call was treated as a further turn and aborted');
+  assert.equal(guard.deliveryVerificationForRun(context.runId).text, WEB_LOOP_DELIVERY_REASON);
+});
+
+test('the compaction window stays bounded: a further non-summarization call still forfeits the answer turn', () => {
+  const {guard, aborts} = guardFixture();
+  const sdk = {runId: context.runId, sessionId: context.sessionId, sessionKey: context.sessionKey};
+  exhaustByFailures(guard);
+  enterAnswerTurn(guard);
+  guard.observeCompaction({sessionKey: context.sessionKey}, 'start');
+  for (const callId of ['c1', 'c2', 'c3']) guard.observeModelCall({callId}, sdk);
+  guard.observeModelEnd({callId: 'c3'}, sdk);
+  assert.equal(aborts.length, 1, 'only two summarization calls are exempt');
+  guard.beforeAgentFinalize({lastAssistantMessage: RESEARCH_ANSWER}, context);
+  assert.equal(guard.deliveryVerificationForRun(context.runId).text, RUN_PROGRESS_STOP_REASON);
+  // A compaction of another session never opens a window on this run.
+  const other = guardFixture();
+  exhaustByFailures(other.guard);
+  enterAnswerTurn(other.guard);
+  other.guard.observeCompaction({sessionKey: 'agent:pixel:someone-else'}, 'start');
+  other.guard.observeModelCall({callId: 'x1'}, sdk);
+  other.guard.observeModelEnd({callId: 'x1'}, sdk);
+  assert.equal(other.aborts.length, 1);
+});
+
 test('the instruction is fixed text, identical for every run and tool', () => {
   const seen = new Set();
   for (const [runId, toolName] of [['a', 'web_fetch'], ['b', 'exec'], ['c', 'write']]) {
