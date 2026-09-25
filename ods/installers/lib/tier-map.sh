@@ -56,7 +56,7 @@ set_qwen_tier_config() {
     case $TIER in
         CLOUD)
             TIER_NAME="Cloud (API)"
-            LLM_MODEL="anthropic/claude-sonnet-4-5-20250514"
+            LLM_MODEL="anthropic/claude-sonnet-4-6"
             GGUF_FILE=""
             GGUF_URL=""
             GGUF_SHA256=""
@@ -201,7 +201,7 @@ set_gemma4_tier_config() {
     case $TIER in
         CLOUD)
             TIER_NAME="Cloud (API)"
-            LLM_MODEL="anthropic/claude-sonnet-4-5-20250514"
+            LLM_MODEL="anthropic/claude-sonnet-4-6"
             GGUF_FILE=""
             GGUF_URL=""
             GGUF_SHA256=""
@@ -342,7 +342,7 @@ tier_to_model() {
     case "$effective" in
         gemma4)
             case "$t" in
-                CLOUD)          model="anthropic/claude-sonnet-4-5-20250514" ;;
+                CLOUD)          model="anthropic/claude-sonnet-4-6" ;;
                 NV_ULTRA)       model="gemma-4-31b-it" ;;
                 SH_LARGE)       model="gemma-4-31b-it" ;;
                 SH_COMPACT|SH)  model="gemma-4-26b-a4b-it" ;;
@@ -358,7 +358,7 @@ tier_to_model() {
             ;;
         *)
             case "$t" in
-                CLOUD)          model="anthropic/claude-sonnet-4-5-20250514" ;;
+                CLOUD)          model="anthropic/claude-sonnet-4-6" ;;
                 NV_ULTRA)
                     if [[ "${HOST_ARCH:-}" == "arm64" ]]; then
                         model="qwen3.6-35b-a3b"

@@ -54,7 +54,7 @@ set_qwen_tier_config() {
     case "$tier" in
         CLOUD)
             TIER_NAME="Cloud (API)"
-            LLM_MODEL="anthropic/claude-sonnet-4-5-20250514"
+            LLM_MODEL="anthropic/claude-sonnet-4-6"
             GGUF_FILE=""
             GGUF_URL=""
             GGUF_SHA256=""
@@ -113,7 +113,7 @@ set_gemma4_tier_config() {
     case "$tier" in
         CLOUD)
             TIER_NAME="Cloud (API)"
-            LLM_MODEL="anthropic/claude-sonnet-4-5-20250514"
+            LLM_MODEL="anthropic/claude-sonnet-4-6"
             GGUF_FILE=""
             GGUF_URL=""
             GGUF_SHA256=""
