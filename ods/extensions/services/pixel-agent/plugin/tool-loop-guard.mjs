@@ -16,6 +16,7 @@ import path from "node:path";
 import { isIP } from "node:net";
 import { isDeepStrictEqual } from "node:util";
 import { pythonSyntaxGuidance, escapedLineBreakDiagnosis } from './python-syntax-guidance.mjs';
+import { REDIRECT_ORDER_NOTE, stderrRedirectedBeforeStdoutFile } from './shell-redirect-order.mjs';
 import { captureNativeWebSearchResult, projectNativeWebSearchResult, projectWebResult,
   successfulTruncatedFetch, projectNativeFetchGuidance, TRUNCATED_FETCH_EXTRACTION_GUIDANCE,
   SEARCH_SOURCE_EVIDENCE_GUIDANCE, OMITTED_SEARCH_SNIPPETS_GUIDANCE } from "./web-result-projection.mjs";
@@ -9770,6 +9771,9 @@ export function createToolLoopGuard({
           !Object.hasOwn(completed, 'sessionId')) {
         pendingToolRun.execCompletionGuidance = `[ODS Pixel execution] Exec returned completed with exit code ${completed.exitCode}. ` +
           'This result has no background session ID. Use the returned output; do not invent a session ID or poll a PID.';
+        // Informational only; the command already ran as written.
+        if (stderrRedirectedBeforeStdoutFile(pendingToolRun.selectedParams?.command))
+          pendingToolRun.redirectOrderNote = REDIRECT_ORDER_NOTE;
       }
     }
     if (completedExecution && pendingToolRun?.runId === runId &&
@@ -10936,6 +10940,9 @@ export function createToolLoopGuard({
       (!context?.runId || context.runId === pending.runId) &&
       (!event?.runId || event.runId === pending.runId)
       ? (pending.pythonSyntaxGuidance ?? (!Object.hasOwn(syntaxReceipt.details, 'sessionId') ? pending.execCompletionGuidance : undefined)) : undefined;
+    // Same exact-call binding as the completed-exec receipt above.
+    const redirectOrderNote = executionGuidance && !Object.hasOwn(syntaxReceipt.details, 'sessionId')
+      ? pending.redirectOrderNote : undefined;
     const sandboxPathCorrection = pending?.sandboxPathCorrection &&
       message.role === 'toolResult' && message.toolName === pending.transport &&
       (!message.toolCallId || message.toolCallId === toolCallId) &&
@@ -11147,6 +11154,8 @@ export function createToolLoopGuard({
     if (executionGuidance && !pending.pythonSyntaxGuidance && !content.some(block =>
         block?.type === 'text' && /\[ODS Pixel execution\]/.test(block.text)))
       content.push({type:'text',text:executionGuidance});
+    if (redirectOrderNote && !content.some(block => block?.type === 'text' && block.text === redirectOrderNote))
+      content.push({type:'text',text:redirectOrderNote});
     if (workspaceStageInstruction && coachingDue('workspace', workspaceStageInstruction)) {
       content.push({ type: "text", text: workspaceStageInstruction });
     }
