@@ -48,10 +48,14 @@ export function inspectionRevalidationCandidate(params) {
     !token.startsWith('-') && /^[A-Za-z0-9_./][A-Za-z0-9_./-]*$/.test(token));
 }
 
-// A successful synchronous core-file receipt can only request a fresh host
-// byte comparison. It does not establish task completion or new authorship.
-// Preserve the existing narrow exec eligibility: arbitrary foreground shells
-// can leave redirected or setsid descendants after their own successful exit.
+// A successful synchronous core-file receipt or completed foreground command
+// can only request a fresh host byte comparison. The host re-derives the
+// published directory's snapshot digest; equality, never command syntax,
+// restores currency. It does not establish task completion or new authorship.
+// Commands that visibly detach work (or inject a shell environment) stay
+// ineligible. Like publication itself, the comparison is point-in-time and
+// cannot attest quiescence of a descendant a command hides from its syntax.
+const DETACHING_COMMAND = /(?:^|[^&<>|])&(?!&)|\b(?:nohup|setsid|disown|coproc)\b/;
 export function workspaceRevalidationCandidate(tool, params) {
   if (!params || typeof params !== 'object' || Array.isArray(params)) return false;
   if (['read','write','edit','apply_patch'].includes(tool)) return true;
@@ -59,7 +63,20 @@ export function workspaceRevalidationCandidate(tool, params) {
     try { normalizeWorkspacePreviewInspectionParams(params); return true; }
     catch { return false; }
   }
-  return tool === 'exec' && inspectionRevalidationCandidate(params);
+  return tool === 'exec' && (inspectionRevalidationCandidate(params) ||
+    typeof params.command === 'string' && params.command.trim() !== '' && params.background !== true &&
+    params.pty !== true && params.env == null && !DETACHING_COMMAND.test(params.command));
+}
+
+// Calls that cannot change workspace bytes, whatever their outcome. They
+// neither advance nor revoke a pending host revalidation.
+const READ_ONLY_TOOLS = new Set(['read','web_search','web_fetch','pixel_ods_web_extract','pixel_ods_research','tool_search','tool_describe']);
+export function workspaceReadOnlyCall(tool, params) {
+  if (tool === 'tool_call') {
+    const name = /^(?:openclaw:(?:core|pixel-ods):)?([a-z_]+)$/.exec(typeof params?.id === 'string' ? params.id : '')?.[1];
+    return Boolean(name) && name !== 'tool_call' && workspaceReadOnlyCall(name, params.args);
+  }
+  return READ_ONLY_TOOLS.has(tool) || tool === 'process' && ['list','poll','log'].includes(params?.action);
 }
 
 // Inspection success preserves eligibility only for this exact published
