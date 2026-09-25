@@ -2890,6 +2890,65 @@ class TestLaunchNativeLlamaServer:
         assert "deepseek" in cmd
         assert _kwargs["cwd"] == str(tmp_path)
 
+    @pytest.mark.parametrize(
+        ("help_text", "help_rc", "reasoning", "expected"),
+        [
+            # b9014 has --reasoning (default auto): pass the mode itself.
+            ("-rea, --reasoning [on|off|auto]\n--reasoning-format FORMAT\n", 0, "off", ["--reasoning", "off"]),
+            ("-rea, --reasoning [on|off|auto]\n--reasoning-format FORMAT\n", 0, "", ["--reasoning", "off"]),
+            ("-rea, --reasoning [on|off|auto]\n--reasoning-format FORMAT\n", 0, "on", ["--reasoning", "on"]),
+            # b8248 has no --reasoning: keep the format, and for off add
+            # --reasoning-budget 0, which disables thinking there.
+            ("--reasoning-format FORMAT\n--reasoning-budget N\n", 0, "off",
+             ["--reasoning-format", "none", "--reasoning-budget", "0"]),
+            ("--reasoning-format FORMAT\n--reasoning-budget N\n", 0, "on", ["--reasoning-format", "deepseek"]),
+            ("--reasoning-format FORMAT\n", 0, "off", ["--reasoning-format", "none"]),
+            # A mode that is not off/on/auto keeps the format mapping.
+            ("-rea, --reasoning [on|off|auto]\n", 0, "deepseek", ["--reasoning-format", "deepseek"]),
+            # An unreadable --help keeps the previous behaviour.
+            ("-rea, --reasoning [on|off|auto]\n", 1, "off", ["--reasoning-format", "none"]),
+        ],
+    )
+    def test_windows_passes_reasoning_where_the_runtime_has_it(
+        self, monkeypatch, tmp_path, help_text, help_rc, reasoning, expected,
+    ):
+        env_path = tmp_path / ".env"
+        env_path.write_text(
+            f"GGUF_FILE=test-model.gguf\nLLAMA_REASONING={reasoning}\n",
+            encoding="utf-8",
+        )
+        (tmp_path / "data" / "models").mkdir(parents=True)
+        llama_bin = tmp_path / "llama-server" / "llama-server.exe"
+        llama_bin.parent.mkdir(parents=True)
+        llama_bin.write_text("", encoding="utf-8")
+        calls = []
+
+        class _FakeProc:
+            pid = 4321
+
+        def fake_run(cmd, **_kwargs):
+            assert cmd == [str(llama_bin), "--help"]
+            return subprocess.CompletedProcess(cmd, help_rc, help_text, "")
+
+        def fake_popen(cmd, **kwargs):
+            calls.append(cmd)
+            return _FakeProc()
+
+        monkeypatch.setattr(_mod, "INSTALL_DIR", tmp_path)
+        monkeypatch.setattr(_mod.platform, "system", lambda: "Windows")
+        monkeypatch.setattr(_mod.subprocess, "run", fake_run)
+        monkeypatch.setattr(_mod.subprocess, "Popen", fake_popen)
+
+        _launch_native_llama_server(
+            env_path, llama_bin, tmp_path / "data" / "llama-server.log", tmp_path / "data" / "llama-server.pid",
+        )
+
+        cmd = calls[0]
+        start = cmd.index(expected[0])
+        assert cmd[start:start + len(expected)] == expected
+        for flag in ("--reasoning", "--reasoning-format", "--reasoning-budget"):
+            assert (flag in cmd) == (flag in expected), flag
+
     def test_llm_bridge_is_disabled_before_native_bind(self, monkeypatch, tmp_path):
         env = {
             "GGUF_FILE": "test-model.gguf",

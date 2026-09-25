@@ -699,6 +699,18 @@ if ($dryRun) {
                 # ── Fallback: llama-server.exe (Vulkan) ──
                 $llamaZip = Join-Path $env:TEMP $script:LLAMA_CPP_VULKAN_ASSET
                 if (-not (Test-Path $script:LLAMA_SERVER_EXE)) {
+                    # Refuse an unpinned tag before downloading anything, and
+                    # discard a cached archive from an earlier run that does not
+                    # match the pin.
+                    $expectedLlamaSha = $script:LLAMA_CPP_VULKAN_SHA256[$script:LLAMA_CPP_RELEASE_TAG]
+                    if (-not $expectedLlamaSha) {
+                        Write-AIError "No pinned SHA-256 for llama.cpp $($script:LLAMA_CPP_RELEASE_TAG) ($($script:LLAMA_CPP_VULKAN_ASSET)); refusing an unverified llama-server."
+                        exit 1
+                    }
+                    if ((Test-Path $llamaZip) -and ((Get-FileHash -LiteralPath $llamaZip -Algorithm SHA256).Hash.ToLowerInvariant() -ne $expectedLlamaSha)) {
+                        Write-AIWarn "Discarding a cached $($script:LLAMA_CPP_VULKAN_ASSET) that does not match its pinned SHA-256."
+                        Remove-Item $llamaZip -Force -ErrorAction SilentlyContinue
+                    }
                     if (-not (Test-Path $llamaZip)) {
                         $dlOk = Invoke-DownloadWithRetry -Url $script:LLAMA_CPP_VULKAN_URL `
                             -Destination $llamaZip -Label "Downloading llama-server (Vulkan)"
@@ -709,6 +721,12 @@ if ($dryRun) {
                     }
 
                     Write-AI "Validating llama-server archive..."
+                    $actualLlamaSha = (Get-FileHash -LiteralPath $llamaZip -Algorithm SHA256).Hash.ToLowerInvariant()
+                    if ($actualLlamaSha -ne $expectedLlamaSha) {
+                        Remove-Item $llamaZip -Force -ErrorAction SilentlyContinue
+                        Write-AIError "llama-server archive SHA-256 mismatch for $($script:LLAMA_CPP_VULKAN_ASSET): expected $expectedLlamaSha, got $actualLlamaSha. The download was removed; re-run the installer."
+                        exit 1
+                    }
                     $zipValid = Test-ZipIntegrity -Path $llamaZip
                     if (-not $zipValid.Valid) {
                         Write-AIWarn "Archive is corrupt: $($zipValid.ErrorMessage)"
@@ -773,7 +791,10 @@ if ($dryRun) {
                     "on"    { $_reasoningFmt = "deepseek" }
                     default { $_reasoningFmt = $_reasoning }
                 }
-                $llamaArgs += @("--reasoning-format", $_reasoningFmt)
+                # b9014 has --reasoning and defaults it to auto, which turns
+                # Qwen3.5 thinking on; where the binary has the switch, pass
+                # the mode itself (as Docker does) instead of the format.
+                $llamaArgs += @(Get-ODSNativeReasoningArgs -Executable $script:LLAMA_SERVER_EXE -Mode $_reasoning -FallbackFormat $_reasoningFmt)
                 if ($_llamaEnv["LLAMA_ARG_FLASH_ATTN"]) { $llamaArgs += @("--flash-attn", $_llamaEnv["LLAMA_ARG_FLASH_ATTN"]) }
                 if ($_llamaEnv["LLAMA_ARG_CACHE_TYPE_K"]) { $llamaArgs += @("--cache-type-k", $_llamaEnv["LLAMA_ARG_CACHE_TYPE_K"]) }
                 if ($_llamaEnv["LLAMA_ARG_CACHE_TYPE_V"]) { $llamaArgs += @("--cache-type-v", $_llamaEnv["LLAMA_ARG_CACHE_TYPE_V"]) }

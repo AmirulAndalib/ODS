@@ -2013,7 +2013,6 @@ function Start-NativeInferenceServer {
             "--port", [string]$script:LEMONADE_PORT,
             "--n-gpu-layers", $gpuLayers,
             "--ctx-size", $ctxSize,
-            "--reasoning-format", $reasoningFmt,
             # llama.cpp keeps /metrics off unless asked. The dashboard's
             # tokens/sec reading and the Usage page's local-runtime counters
             # both scrape that endpoint, so every other launch path passes
@@ -2021,8 +2020,14 @@ function Start-NativeInferenceServer {
             "--metrics"
         )
         if ($selection.profile) {
+            # A registered profile keeps its own qualified argument list.
+            $llamaArgs += @("--reasoning-format", $reasoningFmt)
             $llamaArgs += @($selection.profile.args)
         } else {
+            # b9014 has --reasoning and defaults it to auto, which turns
+            # Qwen3.5 thinking on; where the binary has the switch, pass the
+            # mode itself (as Docker does) instead of the format.
+            $llamaArgs += @(Get-ODSNativeReasoningArgs -Executable $llamaExecutable -Mode $reasoning -FallbackFormat $reasoningFmt)
             if ($envVars["LLAMA_ARG_FLASH_ATTN"]) { $llamaArgs += @("--flash-attn", $envVars["LLAMA_ARG_FLASH_ATTN"]) }
             if ($envVars["LLAMA_ARG_CACHE_TYPE_K"]) { $llamaArgs += @("--cache-type-k", $envVars["LLAMA_ARG_CACHE_TYPE_K"]) }
             if ($envVars["LLAMA_ARG_CACHE_TYPE_V"]) { $llamaArgs += @("--cache-type-v", $envVars["LLAMA_ARG_CACHE_TYPE_V"]) }
