@@ -98,6 +98,16 @@ Nothing is revised after owner cancellation or a tool-limit stop, and the
 revision grants no tool allowance. `tests/requested_text_revision.test.mjs`
 replays the tower1 case.
 
+A listed name can also be on the page but not as its item's heading (tower2
+round 073: "Dawn jazz" was only a badge, and the card heading read "Dawn Jazz
+at the Rose Pavilion"). This is reported through the same note, revision and
+delivery, with fixed text that quotes the longer heading, but only for names
+from a counted list: no hN heading equals the name, a heading contains it as
+whole words and names no other listed item, and another listed item is exactly
+a heading of that same level. The workspace guide also tells the model to use
+owner-named items verbatim as headings or labels.
+`tests/requested_heading_revision.test.mjs` replays the tower2 case.
+
 ## Saved project delivery
 
 A model can successfully write an HTML project and then stop without calling
