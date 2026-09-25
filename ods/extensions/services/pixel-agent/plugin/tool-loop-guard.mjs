@@ -160,6 +160,15 @@ export const PENDING_EXEC_RETRY_EXHAUSTED_REASON =
 export const PENDING_EXEC_LOOP_ABORT_REASON =
   "Pixel stopped this response because it kept restarting an already-running command instead of polling its process session. The original process was preserved for cancellation cleanup; start a fresh message to continue safely.";
 
+// Direct answer for a `process` call when no background exec session can
+// exist (see phantomProcessCall). Fixed text: it is repeated verbatim, so it
+// carries no per-call detail and needs no separate coaching.
+export const PHANTOM_PROCESS_REASON =
+  "No background process is running in this response. Every command so far has completed, and its output is in the corresponding exec result. Continue with that output instead of calling process.";
+
+// Phantom process answers per run that do not consume the failure budget.
+export const PHANTOM_PROCESS_FREE_ANSWERS = 2;
+
 export const VERIFICATION_PENDING_DELIVERY_PREFIX =
   "Pixel stopped before the verification process reached a terminal result, so success is unverified. The workspace is preserved; ask Pixel to continue the run or inspect the process.";
 
@@ -6599,6 +6608,8 @@ export function createToolLoopGuard({
   // session's real publication and carry no proof across changed snapshots.
   const sessionPreviewVisibilityObligations = new Map();
   const sessionDownloadJobs = new Map();
+  // Process scopes in which an exec has returned a background session.
+  const sessionBackgroundExecs = new Set();
 
   function workspaceVisibilityInspectionPassed(state) {
     const proof = state.workspaceVisibilityInspection;
@@ -6617,6 +6628,46 @@ export function createToolLoopGuard({
       sessionDownloadJobs.delete(sessionDownloadJobs.keys().next().value);
     }
     sessionDownloadJobs.set(sessionId, jobs);
+  }
+
+  // OpenClaw scopes process sessions by sessionKey, else sessionId, else the
+  // agent, so a background command started by an earlier run of the same
+  // conversation remains visible to process. Mirror those scopes; never treat
+  // such a real session as phantom merely because this run did not start it.
+  function backgroundExecScopes(state, agentId) {
+    const scopes = [state.currentSessionKey, state.currentSessionId]
+      .filter((scope) => typeof scope === "string" && scope);
+    return scopes.length ? scopes : [`agent:${agentId}`];
+  }
+
+  function rememberBackgroundExec(state, agentId) {
+    state.backgroundExecStarted = true;
+    for (const scope of backgroundExecScopes(state, agentId)) {
+      sessionBackgroundExecs.delete(scope);
+      while (sessionBackgroundExecs.size >= MAX_TRACKED_RUNS) {
+        sessionBackgroundExecs.delete(sessionBackgroundExecs.values().next().value);
+      }
+      sessionBackgroundExecs.add(scope);
+    }
+  }
+
+  // A process call is a phantom only when no background exec session can
+  // exist: none started in this run or conversation, none is pending, and
+  // every exec allowed in this run has a receipt bound by afterToolCall (an
+  // exec still in flight may yet return a running session). Only a model
+  // call to core process with an action qualifies; ODS-internal SDK calls
+  // (ods-* IDs, e.g. workspace bundle settlement) keep today's path.
+  function phantomProcessCall(state, agentId, target, params, callId) {
+    return ["process", "openclaw:core:process"].includes(
+      typeof target === "string" ? target.trim() : target
+    ) &&
+      params && typeof params === "object" && !Array.isArray(params) &&
+      typeof params.action === "string" && params.action.trim().length > 0 &&
+      !(typeof callId === "string" && callId.startsWith("ods-")) &&
+      !state.backgroundExecStarted &&
+      state.pendingExecSessions.size === 0 &&
+      state.execCallsInFlight.size === 0 &&
+      !backgroundExecScopes(state, agentId).some((scope) => sessionBackgroundExecs.has(scope));
   }
 
   function pruneRuns() {
@@ -6834,6 +6885,12 @@ export function createToolLoopGuard({
         recursiveDeleteAbortAttempted: false,
         pendingExecSessions: new Map(),
         pendingExecBlocks: new Map(),
+        // Phantom-process bookkeeping: allowed exec calls whose receipt has
+        // not been observed yet, whether any exec went to the background in
+        // this run, and how many phantom process calls were answered.
+        execCallsInFlight: new Set(),
+        backgroundExecStarted: false,
+        phantomProcessAnswers: 0,
         execOriginalByWrapped: new Map(),
         verificationOriginalByWrapped: new Map(),
         currentSessionId: undefined,
@@ -8677,6 +8734,48 @@ export function createToolLoopGuard({
       }
     }
 
+    // Phantom process calls. After exec already returned a terminal result, a
+    // compact model can still "poll" it: process without a sessionId, with an
+    // invented one, or list. Core process answers with failures, and those
+    // exhausted the run budget of tasks whose tests had already passed. Every
+    // refusal above keeps precedence; this only replaces a core execution that
+    // cannot reach a real session. Direct and Tool Search (tool_call) forms
+    // share this point. Real sessions, and their alias canonicalization, still
+    // reach process unchanged.
+    const phantomCallId = context?.toolCallId ?? event?.toolCallId;
+    if (phantomProcessCall(state, agentId, selectedToolTarget, selectedParams, phantomCallId)) {
+      // Budget: a phantom answer is an informational no-op, neither a failure
+      // nor progress. The first PHANTOM_PROCESS_FREE_ANSWERS per run are
+      // recorded now as discovery (like tool_search): no failure is charged,
+      // earlier failures are not reset, and model rounds keep advancing. The
+      // call ID then de-duplicates the blocked receipt that after_tool_call
+      // and tool_result_persist report later. Beyond that bound the same answer
+      // is charged as an ordinary blocked result, so a model that keeps polling
+      // still reaches the unchanged consecutive/total failure fuses. A nested
+      // Tool Search execution is charged through its outer tool_call receipt,
+      // whose ID is not this one, so it never receives the free allowance.
+      const nested = typeof phantomCallId === "string" && phantomCallId.startsWith("tool_search_code:");
+      if (!nested && ++state.phantomProcessAnswers <= PHANTOM_PROCESS_FREE_ANSWERS) {
+        state.progressBudget.observeResult({callId: phantomCallId, tool: toolName,
+          params: event?.params, failed: false, discovery: true});
+      }
+      return { block: true, blockReason: PHANTOM_PROCESS_REASON };
+    }
+    // An allowed exec can still return a background session. Until
+    // afterToolCall binds its receipt, no process call is treated as phantom.
+    // Nested Tool Search and ODS-internal executions are covered by their
+    // outer call or settle their own session; a call whose receipt cannot be
+    // bound keeps phantom answers off for the rest of this run.
+    if (selectedToolName === "exec" &&
+        !(typeof phantomCallId === "string" && /^(?:ods-|tool_search_code:)/.test(phantomCallId))) {
+      if (typeof phantomCallId === "string" && phantomCallId &&
+          state.execCallsInFlight.size < MAX_PENDING_EXEC_SESSIONS) {
+        state.execCallsInFlight.add(phantomCallId);
+      } else {
+        state.backgroundExecStarted = true;
+      }
+    }
+
     if (!WEB_TOOLS.has(toolName)) {
       if (selectedToolName === "exec" && execControl) {
         const params = { ...selectedParams };
@@ -9152,6 +9251,16 @@ export function createToolLoopGuard({
     }
     const toolCallId = context?.toolCallId ?? event?.toolCallId;
     event = {...event, params: canonicalWorkspaceParams(toolName, event?.params, state.configuredWorkspaceRoot)};
+    // Bind this exec receipt for phantom-process detection: remember a
+    // background session first, then release the call's in-flight mark. Any
+    // running receipt counts, even one the pending-session map rejects.
+    const phantomExecEnvelope = event?.result?.details;
+    const phantomExecReceipt = toolName === "exec" ? event
+      : toolName === "tool_call" && String(event?.params?.id ?? "").split(":").at(-1) === "exec"
+        ? phantomExecEnvelope?.tool?.name === "exec" ? phantomExecEnvelope : event
+        : undefined;
+    if (runningExecSessionId(phantomExecReceipt)) rememberBackgroundExec(state, agentId);
+    state.execCallsInFlight.delete(toolCallId);
     const pendingToolRun = pendingToolRuns.get(toolCallId);
     if (workspacePreviewInspectionAvailable && pendingToolRun?.selectedToolName === PREVIEW_INSPECTION_TOOL &&
         pendingToolRun.runId === runId && pendingToolRun.transport === toolName &&
