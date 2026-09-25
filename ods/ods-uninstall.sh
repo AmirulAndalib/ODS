@@ -103,18 +103,8 @@ resolve_compose_flags() {
 }
 
 preserve_model_cache() {
-    local source="$INSTALL_DIR/data/models" entry
-    [[ ! -L "$INSTALL_DIR/data" && ! -L "$source" ]] || return 1
-    [[ -e "$source" ]] || return 0
-    [[ -d "$source" ]] || return 1
-    MODELS_BACKUP="$HOME/.ods-models-backup"
-    # Atomic creation refuses existing backups and dangling symlinks. Never
-    # overwrite a prior user's cache or continue deletion after a failed move.
-    (umask 077; mkdir "$MODELS_BACKUP") || return 1
-    for entry in "$source"/* "$source"/.[!.]* "$source"/..?*; do
-        [[ -e "$entry" || -L "$entry" ]] || continue
-        mv "$entry" "$MODELS_BACKUP/" || return 1
-    done
+    MODELS_BACKUP="${INSTALL_DIR%/}.models-backup"
+    python3 "$SCRIPT_DIR/lib/model-cache-custody.py" preserve "$INSTALL_DIR" || return 1
     log_info "Models preserved at: $MODELS_BACKUP"
 }
 
@@ -166,7 +156,7 @@ ODS Uninstaller
 Usage: $(basename "$0") [OPTIONS]
 
 Options:
-    --keep-models   Keep models at ~/.ods-models-backup (must not already exist)
+    --keep-models   Keep models beside the install in <install>.models-backup
     --keep-data     Keep user data (chat history, n8n workflows, etc.)
     --force         Skip confirmation prompts
     --non-interactive  Never prompt for sudo; require cached or passwordless sudo
@@ -239,6 +229,14 @@ if [[ "$FORCE" != "true" ]]; then
         exit 0
     fi
     echo ""
+fi
+
+# Fail before stopping/removing services if models cannot be retained without
+# crossing filesystems. Recheck immediately before the actual atomic rename.
+if $KEEP_MODELS; then
+    command -v python3 >/dev/null 2>&1 \
+        || { log_error "Python 3 is required for safe model preservation; installation untouched."; exit 1; }
+    python3 "$SCRIPT_DIR/lib/model-cache-custody.py" preflight "$INSTALL_DIR" || exit 1
 fi
 
 # A non-interactive purge must prove that privileged cleanup can run before
@@ -517,7 +515,7 @@ fi
 log_info "Removing installation directory..."
 INSTALL_DIR_CLEANED=true
 if $KEEP_MODELS && ! preserve_model_cache; then
-    log_error "Model preservation failed; installation deletion stopped. Keep remaining files in $INSTALL_DIR/data/models and $HOME/.ods-models-backup for recovery."
+    log_error "Model preservation failed; installation deletion stopped. Keep remaining files in $INSTALL_DIR/data/models and ${INSTALL_DIR%/}.models-backup for recovery."
     exit 1
 fi
 
@@ -582,8 +580,9 @@ echo -e "${GREEN}║     ODS has been uninstalled.           ║${NC}"
 echo -e "${GREEN}╚══════════════════════════════════════════════════╝${NC}"
 echo ""
 if $KEEP_MODELS; then
-    echo "Your models were saved to: $HOME/.ods-models-backup"
-    echo "To reuse them on reinstall, move them back to ~/ods/data/models/"
+    echo "Retained model files: ${INSTALL_DIR%/}.models-backup/models"
+    echo "Restore destination: $INSTALL_DIR/data/models"
+    echo "Keep custody.json beside the retained models for validated recovery; do not overwrite an existing destination."
 fi
 if $KEEP_DATA; then
     echo "Your user data was preserved at: $INSTALL_DIR/data/"

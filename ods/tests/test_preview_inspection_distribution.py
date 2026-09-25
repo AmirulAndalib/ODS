@@ -304,8 +304,9 @@ def test_publisher_stays_without_docker_and_broker_is_narrow():
         "cache-directory-symlink",
     ],
 )
+@pytest.mark.parametrize("document_generation", [False, True])
 def test_linux_uninstall_validates_all_artifacts_before_deleting_any(
-    tmp_path, monkeypatch, fault
+    tmp_path, monkeypatch, fault, document_generation
 ):
     source = tmp_path / "source"
     source.mkdir()
@@ -343,16 +344,31 @@ def test_linux_uninstall_validates_all_artifacts_before_deleting_any(
         (source / name).write_bytes(b"# reviewed " + name.encode() + b"\nVALUE = 1\n")
         (source / name).chmod(0o644)
     module.install_linux(source=source, config=config())
+    if document_generation:
+        # Model the later installed generation without changing the stable
+        # installer's runtime inventory or executing any new helper.
+        for name in (
+            "preview_inspection_document.py",
+            "preview_inspection_lease.py",
+            "preview_inspection_leases.py",
+        ):
+            (source / name).write_bytes(b"# reviewed document helper\nVALUE = 1\n")
+            (source / name).chmod(0o644)
+        lease_helper = program / "preview_inspection_leases.py"
+        lease_helper.write_bytes((source / lease_helper.name).read_bytes())
+        lease_helper.chmod(0o644)
     if fault == "foreign-file":
         (program / "operator-file").write_bytes(b"not ours")
     if fault == "changed-source":
-        (program / module.RUNTIME_FILES[0]).write_bytes(b"changed")
+        target = "preview_inspection_leases.py" if document_generation else module.RUNTIME_FILES[0]
+        (program / target).write_bytes(b"changed")
     if fault == "wrong-owner":
         value = config()
         value["ownerUid"] = 1001
         config_path.write_text(json.dumps(value))
     if fault == "incomplete":
-        (program / module.RUNTIME_FILES[0]).unlink()
+        target = "preview_inspection_leases.py" if document_generation else module.RUNTIME_FILES[0]
+        (program / target).unlink()
     cache_root = program / "__pycache__"
     if fault and "cache" in fault:
         if fault == "empty-cache":
@@ -425,3 +441,24 @@ def test_linux_uninstall_validates_all_artifacts_before_deleting_any(
         )
         assert not program.exists() and not unit.exists() and not config_path.exists()
         assert calls == [["/usr/bin/systemctl", "is-active", "--quiet", unit.name]]
+
+
+@pytest.mark.parametrize("mask", range(1, 7))
+def test_linux_cleanup_rejects_every_partial_document_source_generation(tmp_path, monkeypatch, mask):
+    names = (
+        "preview_inspection_document.py",
+        "preview_inspection_lease.py",
+        "preview_inspection_leases.py",
+    )
+    for index, name in enumerate(names):
+        if mask & (1 << index):
+            (tmp_path / name).write_text("# fixture\n")
+            (tmp_path / name).chmod(0o644)
+    monkeypatch.setattr(module.os, "geteuid", lambda: 0)
+    monkeypatch.setattr(module.sys, "platform", "linux")
+    calls = []
+    monkeypatch.setattr(module, "protected_parent", lambda *a, **kw: calls.append(a))
+    monkeypatch.setattr(module.subprocess, "run", lambda *a, **kw: calls.append(a))
+    with pytest.raises(FileNotFoundError):
+        module.linux_cleanup(source=tmp_path, owner_uid=1000, remove=True)
+    assert not calls
