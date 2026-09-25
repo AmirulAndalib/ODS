@@ -358,10 +358,11 @@ test('no change when the budget is not hit', () => {
   assert.equal(callTool(guard, 'web_fetch', {url: 'https://www.techpowerup.com/review/'}, 'next')?.block, undefined);
   guard.beforeAgentFinalize({lastAssistantMessage: RESEARCH_ANSWER}, context);
   const delivery = guard.deliveryVerificationForRun(context.runId);
-  assert.doesNotMatch(delivery.text ?? '', /tool limit|stopped after repeated/);
+  // The answer's own wording mentions a tool limit; the host note must not appear.
+  assert.doesNotMatch(delivery.text ?? '', /reached its tool limit|stopped after repeated/);
   assert.deepEqual(aborts, []);
   const reply = guard.replyPayloadSending({runId: context.runId, kind: 'final', payload: {text: RESEARCH_ANSWER}});
-  assert.doesNotMatch(reply?.payload?.text ?? RESEARCH_ANSWER, /tool limit|stopped after repeated/);
+  assert.doesNotMatch(reply?.payload?.text ?? RESEARCH_ANSWER, /reached its tool limit|stopped after repeated/);
 });
 
 test('free corrections apply before exhaustion; after it the single answer turn applies', () => {

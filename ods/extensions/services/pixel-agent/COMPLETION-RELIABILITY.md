@@ -20,6 +20,31 @@ If execution never occurred, delivery reports incompleteness instead of another
 promise. Existing Operations, publication and permission checks take precedence.
 Recovery does not replay side effects or grant additional permissions.
 
+## Cited pages that were not read
+
+When the owner asks for sources to be opened, every cited public URL needs a
+successful page read (a 2xx `web_fetch` with text, or matched targeted
+extraction) in the same response. A citation matches a read `url` or `finalUrl`
+after conservative normalization only: scheme and host case, default ports,
+the fragment and one trailing path slash. The query string is kept. A link the
+answer itself labels as unverified or not opened stays as written.
+
+An answer that cites unread URLs gets one revision (idempotency key
+`ods-opened-source-attribution`). Its fixed instruction names exactly those
+URLs and asks the model to replace each with a page it actually read in this
+response or remove it and mark the claim unverified. If the answer still cites
+unread URLs afterwards, or the harness refuses the revision, the owner receives
+that answer with only those links replaced by `[source not verified]`
+(`[fonte não verificada]` in Portuguese), Markdown link syntax around them
+flattened to text, and one fixed source-check note. Nothing else in the answer
+changes and no link is added. The outcome stays `failed`, so the harness and
+owner still see that verification was incomplete. The whole answer is replaced
+with the incomplete-research text only when none of its cited URLs was read,
+too little prose remains outside links, or it exceeds 20,000 characters. If a
+tool limit stops the revision pass, the answer from its tool-free answer turn
+(below) is newer and supersedes this armed delivery.
+`tests/partial_citation_delivery.test.mjs` replays the tower1 fleet case.
+
 ## Saved project delivery
 
 A model can successfully write an HTML project and then stop without calling
