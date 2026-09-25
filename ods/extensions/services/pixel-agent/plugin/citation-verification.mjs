@@ -461,9 +461,12 @@ export function createHostCitationVerifier({readPage, allowed = () => true, limi
     allowed: () => { try { return allowed() === true; } catch { return false; } },
     // Verifies every URL or reports why not. Never throws; never waits past
     // the time budget. `verified` lists only URLs whose page carried anchors.
-    async verify({answer, urls, portuguese = false}) {
+    // An aborted `signal` (the owner cancelled the run) ends every read at
+    // once and verifies nothing.
+    async verify({answer, urls, portuguese = false, signal}) {
       const started = now();
       const result = (fields) => ({verified: [], results: [], fetched: 0, ...fields, elapsedMs: Math.round(now() - started)});
+      if (signal?.aborted) return result({skipped: 'cancelled'});
       if (!Array.isArray(urls) || !urls.length) return result({skipped: 'no-candidates'});
       if (urls.length > bounds.maxUrls) return result({skipped: 'too-many-citations'});
       const claims = new Map(urls.map(url => [url, citationClaims(answer, url, {portuguese})]));
@@ -475,16 +478,20 @@ export function createHostCitationVerifier({readPage, allowed = () => true, limi
       // is aborted and counts as not read; finished reads keep their result.
       const controller = new AbortController();
       const settled = new Array(urls.length);
-      let timer;
+      let timer, stop;
       const deadline = new Promise(resolve => { timer = setTimer(resolve, bounds.budgetMs); });
+      const cancelled = new Promise(resolve => { stop = resolve; });
+      signal?.addEventListener('abort', stop, {once: true});
       const timeoutSeconds = Math.max(1, Math.ceil(bounds.budgetMs / 1000));
       const reads = urls.map((url, i) => Promise.resolve()
         .then(() => readPage(url, {signal: controller.signal, timeoutSeconds, types: PUBLIC_PAGE_TEXT_TYPES}))
         .catch(() => ({ok: false, reason: 'blocked'}))
         .then(page => { settled[i] ??= page; }));
-      await Promise.race([Promise.all(reads), deadline]);
+      await Promise.race([Promise.all(reads), deadline, cancelled]);
       clearTimer(timer);
+      signal?.removeEventListener('abort', stop);
       controller.abort();
+      if (signal?.aborted) return result({skipped: 'cancelled', fetched: urls.length});
       const pages = urls.map((_, i) => settled[i] ??= {ok: false, reason: 'timeout'});
       const results = urls.map((url, i) => {
         const page = pages[i];

@@ -282,6 +282,14 @@ export const WORKSPACE_PREVIEW_PUBLISHED_DELIVERY_PREFIX =
 export const CLIENT_CANCELLED_REASON =
   "The owner cancelled this Pixel response. Do not call another tool or continue the task in this turn.";
 
+// Model-only context for the first owner message after a cancel. The
+// cancelled request stays in the transcript without an answer, and a model
+// otherwise treats it as still pending (tower1 round 067).
+export const OWNER_CANCELLED_REQUEST_CONTEXT =
+  "[ODS Portal note, not owner text: the owner cancelled their previous message in this chat before it was answered. " +
+  "That request is withdrawn. Do not answer, continue or resume it, and do not use tools or cite evidence for it, " +
+  "unless the owner's current message below explicitly asks you to. Respond only to the current message.]";
+
 export const EXACT_DOWNLOAD_REQUIRES_BROKER_REASON =
   "Pixel cannot turn web_fetch or another transformed page view into an exact-byte download. Call pixel_ops_download_stage now; ODS will bind it to the owner's exact HTTPS URL, destination basename, and expected digest. Wait for that exact job with pixel_ops_job_wait, then publish only its verified receipt with pixel_ods_download_promote. Do not create a substitute file.";
 
@@ -6761,6 +6769,10 @@ export function createToolLoopGuard({
   const runs = new Map();
   const activeUsers = new Map();
   const sessionRuns = new Map();
+  // The newest run observed per session key, and the owner cancel that the
+  // next owner message in that chat must start clean from.
+  const sessionKeyRuns = new Map();
+  const sessionCancellations = new Map();
   const pendingToolRuns = new Map();
   const sessionPreviews = new Map();
   // A prior owner requirement is not a passing inspection. Bind it to the
@@ -6898,6 +6910,28 @@ export function createToolLoopGuard({
     while (activeUsers.size >= MAX_TRACKED_RUNS) {
       activeUsers.delete(activeUsers.keys().next().value);
     }
+  }
+
+  function rememberBySessionKey(map, sessionKey, value) {
+    map.delete(sessionKey);
+    while (map.size >= MAX_TRACKED_RUNS) map.delete(map.keys().next().value);
+    map.set(sessionKey, value);
+  }
+
+  // Run binding across an owner cancel. The first owner turn that starts in
+  // the chat afterwards takes the cancel record: that run, and every attempt
+  // of it, is told the earlier request is withdrawn, and its completion
+  // assurance cannot bind web evidence to that request. A retry attempt of the
+  // cancelled run never takes it, and a later message never sees it again.
+  function takeOwnerCancellation(state, runId, context, agentId) {
+    if (state.cancelBoundaryObserved) return;
+    state.cancelBoundaryObserved = true;
+    const sessionKey = context?.sessionKey;
+    const record = typeof sessionKey === "string" ? sessionCancellations.get(sessionKey) : undefined;
+    if (!record || record.runId === runId || state.clientCancelled || !ownerInteractiveTurn(context, agentId)) return;
+    sessionCancellations.delete(sessionKey);
+    state.withdrawnOwnerRequest = record;
+    state.completionAssurance.followWithdrawnRequest(record.ownerText);
   }
 
   function rememberSessionPreview(sessionId, preview, state) {
@@ -9234,7 +9268,12 @@ export function createToolLoopGuard({
       }
       if (typeof context?.sessionKey === "string" && context.sessionKey) {
         state.currentSessionKey = context.sessionKey;
+        rememberBySessionKey(sessionKeyRuns, context.sessionKey, runId);
       }
+      // The first attempt carries the owner's message; a later attempt of the
+      // same run carries a harness retry prompt instead.
+      if (ownerIntent) state.ownerRequestText ??= ownerIntent;
+      takeOwnerCancellation(state, runId, context, agentId);
       if (currentUserText(event?.messages, event?.prompt)) {
         state.ownerIntentObserved = true;
         state.workspacePreviewForbidden = ownerForbidsWorkspacePreview(event?.messages, event?.prompt);
@@ -9493,13 +9532,15 @@ export function createToolLoopGuard({
   // starts together, and closes when they end or after_compaction reports none.
   const MAX_COMPACTION_MODEL_CALLS = 2;
 
-  // The run that currently owns the session with this key, if any.
+  // The run that currently owns the session with this key, if any: only the
+  // newest run observed for the key. An older run (a cancelled one, or one on
+  // a rotated session ID) never receives a later run's messages.
   function activeSessionRun(sessionKey) {
     if (typeof sessionKey !== "string" || !sessionKey) return undefined;
-    for (const [runId, state] of runs) {
-      if (state.currentSessionKey === sessionKey && state.currentSessionId &&
-          sessionRuns.get(state.currentSessionId) === runId) return { runId, state };
-    }
+    const runId = sessionKeyRuns.get(sessionKey);
+    const state = runId === undefined ? undefined : runs.get(runId);
+    if (state?.currentSessionKey === sessionKey && state.currentSessionId &&
+        sessionRuns.get(state.currentSessionId) === runId) return { runId, state };
     return undefined;
   }
 
@@ -9571,7 +9612,21 @@ export function createToolLoopGuard({
     if (!active) return false;
     let aborted = false;
     let executionSignalled = execControl ? false : true;
-    stateFor(active.runId).clientCancelled = true;
+    const cancelledState = stateFor(active.runId);
+    cancelledState.clientCancelled = true;
+    // Void this run's pending completion revision and replacement text, and
+    // stop any host citation read it is still waiting on (before_agent_finalize
+    // or a partial answer's check), before the harness abort settles.
+    cancelledState.completionAssurance.cancel();
+    cancelledState.hostCitationAbort?.abort();
+    // Recorded before the abort is awaited: the chat's next run cannot start
+    // until this one ends. The request text is known only for a run still in
+    // progress; the abort may otherwise have ended a run not yet observed.
+    const cancellation = {runId: active.runId,
+      ownerText: cancelledState.runEnded ? undefined : cancelledState.ownerRequestText};
+    if (typeof active.sessionKey === "string" && active.sessionKey) {
+      rememberBySessionKey(sessionCancellations, active.sessionKey, cancellation);
+    }
     if (execControl) {
       try {
         executionSignalled = Boolean(execControl.signal(active.runId));
@@ -9588,6 +9643,10 @@ export function createToolLoopGuard({
       }
     } catch (error) {
       warn(`Pixel client-cancel abort failed: ${String(error)}`);
+    }
+    // Without an acknowledged abort the run may still answer its request.
+    if (!aborted && sessionCancellations.get(active.sessionKey) === cancellation) {
+      sessionCancellations.delete(active.sessionKey);
     }
     const cancelled = aborted && executionSignalled;
     if (executionSignalled && typeof execControl?.clear === "function") {
@@ -11398,8 +11457,12 @@ export function createToolLoopGuard({
     if (urls.length > remaining) return skip('web-allowance');
     if (!hostCitationVerifier.allowed()) return skip('web-disabled');
     let outcome;
+    // An owner cancel aborts these reads (abortUserRun); the run's
+    // finalization then ends without waiting out the read budget.
+    const cancellation = new AbortController();
+    state.hostCitationAbort = cancellation;
     try {
-      outcome = await hostCitationVerifier.verify({answer, urls, portuguese});
+      outcome = await hostCitationVerifier.verify({answer, urls, portuguese, signal: cancellation.signal});
     } catch (error) {
       // Best effort: a verifier fault leaves the ordinary citation checks.
       warn(`Pixel host citation verification failed for run ${runId}: ${String(error)}`);
@@ -11407,6 +11470,8 @@ export function createToolLoopGuard({
       state.fetch += urls.length;
       state.total += urls.length;
       return skip('verifier-error');
+    } finally {
+      if (state.hostCitationAbort === cancellation) state.hostCitationAbort = undefined;
     }
     if (outcome.fetched) for (const url of urls) attempted.add(url);
     state.fetch += outcome.fetched;
@@ -11468,6 +11533,23 @@ export function createToolLoopGuard({
   function endPreviewRevalidation(event, context) {
     const state = runs.get(context?.runId ?? event?.runId);
     if (state) {state.previewRevalidationCandidate=undefined;state.previewVerificationGeneration=(state.previewVerificationGeneration ?? 0)+1;}
+  }
+
+  // agent_end: a later cancel for this user can no longer name this run's
+  // request as the one it withdrew.
+  function observeAgentEnd(event, context) {
+    const state = runs.get(context?.runId ?? event?.runId);
+    if (state) state.runEnded = true;
+  }
+
+  // Model-only prompt context for one attempt (before_prompt_build
+  // prependContext); never persisted as owner text. A cancelled run's own
+  // retry attempt is told to stop, and the first owner turn after a cancel is
+  // told the earlier request is withdrawn.
+  function promptContextForRun(runId) {
+    const state = typeof runId === "string" ? runs.get(runId) : undefined;
+    if (state?.clientCancelled) return CLIENT_CANCELLED_REASON;
+    return state?.withdrawnOwnerRequest ? OWNER_CANCELLED_REQUEST_CONTEXT : undefined;
   }
 
   function beforeAgentFinalize(event, context, agentId = "pixel") {
@@ -12001,6 +12083,8 @@ export function createToolLoopGuard({
     // Read-only host-verification records for one run (diagnostics and tests).
     citationVerificationForRun: runId => [...(runs.get(runId)?.hostCitationVerifications ?? [])],
     endPreviewRevalidation,
+    observeAgentEnd,
+    promptContextForRun,
     replyPayloadSending,
     observeRun,
     observeModelCall,

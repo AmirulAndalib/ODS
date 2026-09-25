@@ -265,6 +265,10 @@ export function createCompletionAssurance() {
   let initialized = false, research = false, portuguese = false, conversational = false, attempts = 0;
   let readsRequired = false, attributionAttempts = 0;
   let workObserved = false, webObserved = false, terminal, terminalStatus = 'failed';
+  // Run binding. An owner cancel ends this run's assurance for good: no later
+  // revision, host read or replacement text. A run that follows a cancel can
+  // still see the withdrawn request, unanswered, in its transcript.
+  let cancelled = false, ownerRequest = '', withdrawnRequest;
   const sources = new Set();
   const opened = new Set();
   const browserSnapshots = new Set();
@@ -291,11 +295,23 @@ export function createCompletionAssurance() {
     begin(ownerText, event) {
       if (initialized) return;
       initialized = true;
+      ownerRequest = normalize(ownerText).trim();
       const precedingRequest = continuedOwnerRequest(ownerText, event);
       readsRequired = sourceReadsRequested(ownerText) || sourceReadsRequested(precedingRequest);
       research = readsRequired || researchRequested(ownerText) || researchRequested(precedingRequest);
       conversational = /^(?:(?:please|por favor)[,\s]+)?(?:traduza|translate|reescreva|rewrite|repita|repeat|diga apenas|say exactly|responda apenas|return exactly|explique|explain|rascunho|draft|exemplo|example)\b/.test(normalize(ownerText).trim()) && !research;
       portuguese = /\b(qual|voce|vc|noticias|hoje|consulte|pesquise|busque|procure|crie|arquivo|internet|instale|instalar|baixar|configure|configurar)\b/.test(normalize(ownerText));
+    },
+    // The owner cancelled this run. Any revision it armed, its replacement
+    // text and any pending host read are void; nothing here outlives it.
+    cancel() {
+      cancelled = true;
+      terminal = undefined;
+    },
+    // This run started right after the owner cancelled `text` (undefined when
+    // unknown) in the same chat. Its transcript may still hold that request.
+    followWithdrawnRequest(text) {
+      withdrawnRequest = {text: typeof text === 'string' ? normalize(text).trim() : ''};
     },
     observe(tool, event) {
       if (!tool || DISCOVERY.has(tool) || !event?.result || event.error || event.result.isError) return;
@@ -328,13 +344,13 @@ export function createCompletionAssurance() {
     // judged: only for a source-read request in a run whose web tools already
     // returned a result, and only the unlabelled unread citations.
     hostVerificationCandidates(text) {
-      if (!readsRequired || conversational || !webObserved) return;
+      if (cancelled || !readsRequired || conversational || !webObserved) return;
       const urls = unreadCitations(String(text ?? ''), readSources());
       return urls.length ? {urls, portuguese} : undefined;
     },
     observeHostVerification(url) {
       const href = publicSourceUrl(url);
-      if (href && hostVerified.size < 16) {
+      if (href && !cancelled && hostVerified.size < 16) {
         hostVerified.add(href);
         recordReadPage({url: href, keys: [citationKey(href)].filter(Boolean)});
       }
@@ -344,6 +360,7 @@ export function createCompletionAssurance() {
     // receipts (web_fetch, targeted extraction) and host verifications.
     get readPages() { return readPages.map(({url, title}) => (title ? {url, title} : {url})); },
     finalize(text) {
+      if (cancelled) return;
       if (conversational) return;
       const read = readSources();
       const unread = readsRequired ? unreadCitations(text, read) : [];
@@ -368,7 +385,13 @@ export function createCompletionAssurance() {
       const attributionSources = readsRequired ? new Set([...opened, ...browserSnapshots]) : sources;
       const missingResearch = research && (!webObserved || sources.size === 0);
       const cited = sources.size ? new Set(citationSpans(String(text)).map(span => span.key).filter(Boolean)) : new Set();
-      const missingCitations = sources.size > 0 && ![...sources, ...hostVerified].some(url => text.includes(url) ||
+      // Returned web evidence normally answers this run's owner request. After
+      // a cancel it may answer the withdrawn one instead (tower1 r067: a
+      // conversational reply was revised into the cancelled research). Only
+      // the current request, or a resend of the withdrawn one, binds it.
+      const evidenceBound = !withdrawnRequest || research || readsRequired ||
+        Boolean(withdrawnRequest.text && withdrawnRequest.text === ownerRequest);
+      const missingCitations = evidenceBound && sources.size > 0 && ![...sources, ...hostVerified].some(url => text.includes(url) ||
         text.includes(url.replaceAll('(', '%28').replaceAll(')', '%29')) || cited.has(citationKey(url)));
       // A candid failure or clarification is a valid terminal answer. It must
       // not be turned into another attempt that repeats denied work.
