@@ -39,6 +39,9 @@ def preflight(install):
         original = directory(source)
         if original.st_dev != directory(root.parent).st_dev:
             raise ValueError('models are on a separate mount; same-filesystem preservation is unavailable')
+        for parent in (source.parent, root.parent):
+            if not os.access(parent, os.W_OK | os.X_OK):
+                raise ValueError('model preservation parent is not writable/searchable: ' + str(parent))
     return root, source, backup
 
 
@@ -86,6 +89,9 @@ def restore(install):
             or marker_info.st_mode & 0o077):
         raise ValueError('invalid model custody receipt')
     receipt = json.loads(marker.read_text(encoding='utf-8'))
+    if (not isinstance(receipt, dict) or type(receipt.get('schemaVersion')) is not int
+            or any(type(receipt.get(key)) is not int for key in ('device', 'inode'))):
+        raise ValueError('invalid model custody schema')
     retained = directory(backup / 'models')
     if receipt != {'schemaVersion': 1, 'installRoot': str(root),
                    'device': retained.st_dev, 'inode': retained.st_ino}:

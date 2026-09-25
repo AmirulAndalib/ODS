@@ -270,5 +270,30 @@ rm -rf "$INSTALL_DIR"
         self.assertFalse(self.args.exists())
         self.assertTrue((self.install / 'data/models/llm/model.gguf').exists())
 
+    @unittest.skipIf(os.getuid() == 0, 'root bypasses ordinary directory permissions')
+    def test_unwritable_source_or_backup_parent_fails_in_preflight(self):
+        for parent in (self.install / 'data', self.install.parent):
+            with self.subTest(parent=parent), self.helper_env():
+                parent.chmod(0o555)
+                try:
+                    with self.assertRaisesRegex(ValueError, 'not writable/searchable'):
+                        custody.preflight(self.install)
+                    self.assertFalse(Path(str(self.install) + '.models-backup').exists())
+                    self.assertTrue((self.install / 'data/models/llm/model.gguf').exists())
+                finally:
+                    parent.chmod(0o755)
+
+    def test_boolean_schema_does_not_equal_integer_custody_version(self):
+        with self.helper_env():
+            custody.preserve(self.install)
+            backup = Path(str(self.install) + '.models-backup')
+            marker = backup / 'custody.json'
+            receipt = json.loads(marker.read_text())
+            receipt['schemaVersion'] = True
+            marker.write_text(json.dumps(receipt))
+            with self.assertRaisesRegex(ValueError, 'invalid model custody schema'):
+                custody.restore(self.install)
+            self.assertTrue((backup / 'models/llm/model.gguf').is_file())
+
 if __name__ == '__main__':
     unittest.main()
