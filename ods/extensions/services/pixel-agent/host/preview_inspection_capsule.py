@@ -1,14 +1,18 @@
 #!/usr/bin/env python3
 """Untrusted site execution lives only in the short-lived no-network capsule."""
 
+import collections
 import http.server
+import itertools
 import mimetypes
 import re
+import struct
 import sys
 import threading
 import time
 import unicodedata
 import urllib.parse
+import zlib
 from preview_inspection_protocol import (
     CSP,
     Invalid,
@@ -358,6 +362,165 @@ class PageErrors:
         return {"pageErrors": {"count": self.count, "messages": list(self.messages)}}
 
 
+# Rendered palette: the painted colors of the page as first loaded at a fixed
+# desktop viewport, by share of that viewport's area. It is captured in its own
+# disposable context of the same browser, through the same loopback server and
+# request guard, so it neither observes nor changes the inspected steps. The
+# device scale renders 320x180 device pixels (one per 4x4 CSS pixels): large
+# painted regions keep their exact color, while small text and edges blend.
+PALETTE_VIEWPORT = {"width": 1280, "height": 720}
+PALETTE_DEVICE_SCALE = 0.25
+PALETTE_SETTLE_MS = 100
+PALETTE_TIMEOUT_MS = 3000
+# The broker allows the whole capsule 45 seconds. A capture (at most two
+# timeouts) starts only while it cannot push a slow run past that deadline.
+PALETTE_START_BUDGET_S = 30
+MAX_PALETTE_COLORS = 6
+MAX_PALETTE_PIXELS = 1920 * 1920
+PNG_SIGNATURE = b"\x89PNG\r\n\x1a\n"
+# Hue families (HSL degrees, upper bound exclusive). Achromatic colors are
+# named by lightness instead; see palette_bucket.
+HUE_FAMILIES = (
+    (12, "red"),
+    (36, "orange"),
+    (50, "amber"),
+    (68, "yellow"),
+    (165, "green"),
+    (195, "teal"),
+    (255, "blue"),
+    (290, "purple"),
+    (345, "pink"),
+    (360, "red"),
+)
+GRAY_LEVELS = ((0.13, "black"), (0.40, "dark gray"), (0.72, "gray"), (0.94, "light gray"))
+PALETTE_NAMES = (
+    "white", "light gray", "gray", "dark gray", "black", "red", "orange",
+    "amber", "yellow", "green", "teal", "blue", "purple", "pink", "brown",
+)
+
+
+def png_colors(data):
+    """Count the exact RGB colors of a non-interlaced 8-bit RGB/RGBA PNG.
+
+    Standard library only; alpha is ignored (browser screenshots are opaque).
+    """
+    if not isinstance(data, (bytes, bytearray)) or data[:8] != PNG_SIGNATURE:
+        raise Invalid("invalid png")
+    position, header, compressed = 8, None, []
+    while position + 8 <= len(data):
+        length, kind = struct.unpack(">I4s", data[position : position + 8])
+        body = data[position + 8 : position + 8 + length]
+        if len(body) != length:
+            raise Invalid("invalid png")
+        position += 12 + length
+        if kind == b"IHDR":
+            if length != 13:
+                raise Invalid("invalid png")
+            header = struct.unpack(">IIBBBBB", body)
+        elif kind == b"IDAT":
+            compressed.append(body)
+        elif kind == b"IEND":
+            break
+    if header is None:
+        raise Invalid("invalid png")
+    width, height, depth, color_type, _, _, interlace = header
+    if (
+        depth != 8
+        or color_type not in (2, 6)
+        or interlace
+        or not 0 < width * height <= MAX_PALETTE_PIXELS
+    ):
+        raise Invalid("unsupported png")
+    channels = 3 if color_type == 2 else 4
+    stride = width * channels
+    expected = (stride + 1) * height
+    try:
+        raw = zlib.decompressobj().decompress(b"".join(compressed), expected)
+    except zlib.error:
+        raise Invalid("invalid png") from None
+    if len(raw) != expected:
+        raise Invalid("invalid png")
+    counts = collections.Counter()
+    previous = bytearray(stride)
+    add = lambda a, b: (a + b) & 255
+    for row in range(height):
+        start = row * (stride + 1)
+        kind = raw[start]
+        line = bytearray(raw[start + 1 : start + 1 + stride])
+        if kind == 1:
+            for channel in range(channels):
+                line[channel::channels] = bytes(
+                    itertools.accumulate(line[channel::channels], add)
+                )
+        elif kind == 2:
+            line = bytearray(map(add, line, previous))
+        elif kind == 3:
+            for i in range(stride):
+                left = line[i - channels] if i >= channels else 0
+                line[i] = (line[i] + ((left + previous[i]) >> 1)) & 255
+        elif kind == 4:
+            for i in range(stride):
+                a = line[i - channels] if i >= channels else 0
+                b = previous[i]
+                c = previous[i - channels] if i >= channels else 0
+                p = a + b - c
+                pa, pb, pc = abs(p - a), abs(p - b), abs(p - c)
+                predictor = a if pa <= pb and pa <= pc else b if pb <= pc else c
+                line[i] = (line[i] + predictor) & 255
+        elif kind != 0:
+            raise Invalid("invalid png")
+        counts.update(zip(line[0::channels], line[1::channels], line[2::channels]))
+        previous = line
+    return counts
+
+
+def palette_bucket(r, g, b):
+    """A fixed perceptual bucket (HSL family and lightness band) for one color."""
+    high, low = max(r, g, b), min(r, g, b)
+    delta = high - low
+    lightness = (high + low) / 510
+    # Chroma under 10% reads as neutral (tinted whites, grays and near-blacks).
+    if delta < 26:
+        name = next((n for limit, n in GRAY_LEVELS if lightness < limit), "white")
+        return name, 0
+    if high == r:
+        hue = (60 * (g - b) / delta) % 360
+    elif high == g:
+        hue = 60 * (b - r) / delta + 120
+    else:
+        hue = 60 * (r - g) / delta + 240
+    saturation = delta / (high + low) if lightness <= 0.5 else delta / (510 - high - low)
+    name = next(n for limit, n in HUE_FAMILIES if hue < limit)
+    if name == "red" and lightness >= 0.75:
+        name = "pink"
+    elif 12 <= hue < 50 and (lightness < 0.35 or (saturation < 0.5 and lightness < 0.7)):
+        # Dark or muted orange and amber hues read as brown.
+        name = "brown"
+    return name, 0 if lightness < 0.35 else 1 if lightness < 0.65 else 2
+
+
+def rendered_palette(counts, limit=MAX_PALETTE_COLORS):
+    """Top painted buckets by area: name, most frequent exact hex, percent."""
+    total = sum(counts.values())
+    if total <= 0:
+        raise Invalid("empty capture")
+    buckets = {}
+    for color, count in counts.items():
+        entry = buckets.setdefault(palette_bucket(*color), [0, color, 0])
+        entry[0] += count
+        if count > entry[2] or (count == entry[2] and color < entry[1]):
+            entry[1], entry[2] = color, count
+    colors = []
+    for (name, _band), (count, color, _) in sorted(
+        buckets.items(), key=lambda item: (-item[1][0], item[0])
+    )[:limit]:
+        percent = (200 * count + total) // (2 * total)
+        if percent < 1:
+            break
+        colors.append({"name": name, "hex": "#%02x%02x%02x" % color, "percent": percent})
+    return colors
+
+
 def wrapper_document(prefix):
     # Fixed and script-free: page script exceptions therefore come only from
     # the sandboxed preview frame or a frame the preview itself created.
@@ -365,6 +528,96 @@ def wrapper_document(prefix):
         f"<!doctype html><style>html,body{{margin:0;height:100%;overflow:hidden}}iframe{{border:0;width:100%;height:100%}}</style>"
         f'<iframe name="inspection" sandbox="{SANDBOX}" src="{prefix}"></iframe>'
     ).encode()
+
+
+def guard_requests(context, page, origin, prefix, blocked):
+    """Allow only GETs of the wrapper and this site's files from the loopback
+    server, and at most the wrapper and site-entry navigations. Everything
+    else, popups, downloads and websockets are recorded (bounded) and stopped."""
+    navigation_count = 0
+
+    def route_handler(route):
+        nonlocal navigation_count
+        req = route.request
+        parsed = urllib.parse.urlsplit(req.url)
+        safe = (
+            req.method == "GET"
+            and parsed.scheme == "http"
+            and "http://" + parsed.netloc == origin
+            and (
+                parsed.path.startswith(prefix)
+                or parsed.path == "/__ods_inspection__.html"
+            )
+        )
+        if req.is_navigation_request():
+            navigation_count += 1
+            safe = (
+                safe
+                and navigation_count <= 2
+                and req.url
+                in (origin + "/__ods_inspection__.html", origin + prefix)
+            )
+        if safe:
+            route.continue_()
+        else:
+            if len(blocked) < 32:
+                blocked.append(
+                    "navigation" if req.is_navigation_request() else "network"
+                )
+            route.abort()
+
+    context.route("**/*", route_handler)
+    context.on(
+        "page",
+        lambda popup: (
+            blocked.append("popup") if len(blocked) < 32 else None,
+            popup.close(),
+        ),
+    )
+    page.on(
+        "download",
+        lambda download: (
+            blocked.append("download") if len(blocked) < 32 else None,
+            download.cancel(),
+        ),
+    )
+    page.on(
+        "websocket",
+        lambda _: blocked.append("websocket") if len(blocked) < 32 else None,
+    )
+
+
+def capture_palette(browser, origin, prefix):
+    """Rendered colors of a fresh load at the fixed desktop viewport, or None.
+
+    Its own context: the step context and its page-error listener never see
+    this load, and a request blocked here voids only the palette."""
+    blocked = []
+    context = browser.new_context(
+        viewport=dict(PALETTE_VIEWPORT),
+        device_scale_factor=PALETTE_DEVICE_SCALE,
+        service_workers="block",
+        accept_downloads=False,
+    )
+    try:
+        page = context.new_page()
+        page.set_default_timeout(PALETTE_TIMEOUT_MS)
+        guard_requests(context, page, origin, prefix, blocked)
+        page.goto(
+            origin + "/__ods_inspection__.html",
+            wait_until="load",
+            timeout=PALETTE_TIMEOUT_MS,
+        )
+        frame = page.frame(name="inspection")
+        if frame is None or frame.url != origin + prefix:
+            return None
+        page.wait_for_timeout(PALETTE_SETTLE_MS)
+        image = page.screenshot(type="png", scale="device", timeout=PALETTE_TIMEOUT_MS)
+        if blocked:
+            return None
+        return {"viewport": dict(PALETTE_VIEWPORT), "colors": rendered_palette(png_colors(image))}
+    finally:
+        context.close()
 
 
 def observe_until_stable(once, wait):
@@ -387,6 +640,7 @@ def observe_until_stable(once, wait):
 
 
 def run_browser(bundle, playwright_factory=None):
+    started = time.monotonic()
     request, files = validate_bundle(bundle)
     prefix = "/" + request["siteId"] + "/"
     blocked = []
@@ -457,57 +711,7 @@ def run_browser(bundle, playwright_factory=None):
             )
             page = context.new_page()
             page.set_default_timeout(2000)
-            navigation_count = 0
-
-            def route_handler(route):
-                nonlocal navigation_count
-                req = route.request
-                parsed = urllib.parse.urlsplit(req.url)
-                safe = (
-                    req.method == "GET"
-                    and parsed.scheme == "http"
-                    and parsed.netloc == f"127.0.0.1:{server.server_port}"
-                    and (
-                        parsed.path.startswith(prefix)
-                        or parsed.path == "/__ods_inspection__.html"
-                    )
-                )
-                if req.is_navigation_request():
-                    navigation_count += 1
-                    safe = (
-                        safe
-                        and navigation_count <= 2
-                        and req.url
-                        in (origin + "/__ods_inspection__.html", origin + prefix)
-                    )
-                if safe:
-                    route.continue_()
-                else:
-                    if len(blocked) < 32:
-                        blocked.append(
-                            "navigation" if req.is_navigation_request() else "network"
-                        )
-                    route.abort()
-
-            context.route("**/*", route_handler)
-            context.on(
-                "page",
-                lambda popup: (
-                    blocked.append("popup") if len(blocked) < 32 else None,
-                    popup.close(),
-                ),
-            )
-            page.on(
-                "download",
-                lambda download: (
-                    blocked.append("download") if len(blocked) < 32 else None,
-                    download.cancel(),
-                ),
-            )
-            page.on(
-                "websocket",
-                lambda _: blocked.append("websocket") if len(blocked) < 32 else None,
-            )
+            guard_requests(context, page, origin, prefix, blocked)
             # Registered before navigation so startup exceptions are included.
             # Page-scoped (not context-wide): blocked popups are never recorded.
             page.on("pageerror", page_errors.record)
@@ -768,6 +972,17 @@ def run_browser(bundle, playwright_factory=None):
                 "scope": SCOPE,
             }
             context.close()
+            # After the step context is closed, so its receipt is final. The
+            # palette is separate evidence: it never changes a step or status,
+            # and it is omitted (as by older capsules) when capture fails.
+            palette = None
+            if time.monotonic() - started < PALETTE_START_BUDGET_S:
+                try:
+                    palette = capture_palette(browser, origin, prefix)
+                except Exception:
+                    pass
+            if palette:
+                result["renderedColors"] = palette
             browser.close()
             return result
     finally:

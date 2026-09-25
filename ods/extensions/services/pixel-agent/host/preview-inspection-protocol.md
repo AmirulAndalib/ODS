@@ -118,6 +118,56 @@ proof that no script failed.
 The capsule is baked into the locally built inspection image. A host keeps
 producing receipts without `pageErrors` until the installer rebuilds that image.
 
+## Rendered colors
+
+Local models are often not multimodal, and CSS source alone does not show what
+is painted: an accent variable used only by `:focus` outlines changes nothing
+visible. Publication is byte-only and renders nothing, so the capsule reports
+the painted palette with every receipt it builds.
+
+After the step context is closed and its receipt is final, the capsule loads
+the same snapshot once more in a separate context of the same browser: a fixed
+1280x720 desktop viewport, default (light) color scheme, device scale 0.25.
+It uses the same loopback server, request guard, navigation limit, and popup,
+download and websocket blocking, and registers no page-error listener. It
+waits 100 ms after `load`, takes a 320x180 PNG screenshot of the viewport (one
+device pixel per 4x4 CSS pixels) and decodes it with the standard library. The
+page as first loaded is captured, never the state left by the inspected
+clicks, and never hover or focus styles.
+
+Each pixel's exact color goes to one fixed bucket. A color with chroma under
+26/255 is neutral and named by HSL lightness: `black` (<0.13), `dark gray`
+(<0.40), `gray` (<0.72), `light gray` (<0.94) or `white`. Otherwise the HSL hue
+names the family: `red` (<12 or >=345 degrees), `orange` (<36), `amber` (<50),
+`yellow` (<68), `green` (<165), `teal` (<195), `blue` (<255), `purple` (<290),
+`pink` (<345). Red with lightness >=0.75 is `pink`; hues 12-50 that are dark
+(lightness <0.35) or muted (saturation <0.5 and lightness <0.7) are `brown`.
+Chromatic buckets split into three lightness bands (<0.35, <0.65, rest).
+
+The receipt carries `renderedColors: {viewport: {width, height}, colors}`.
+`colors` lists at most six buckets by pixel count, largest first; ties order
+by bucket name and band. Each entry is `{name, hex, percent}`: `hex` is the
+most frequent exact color in the bucket (lowercase `#rrggbb`, ties to the
+lowest), and `percent` is the bucket's share of the viewport rounded half up.
+Buckets rounding below 1% are not listed, so the rounded shares can exceed
+100 by at most one half per entry. Callers validate these exact bounds and
+reject any other shape.
+
+The palette is evidence about paint only. It never changes a step or the
+receipt status, and it does not prove any requested behavior. A failed or
+blocked capture omits the field, as do receipts from capsules built before it.
+The tool states it once, in a fixed line after the assertion scope, and omits
+it from the quoted evidence copy:
+
+`Rendered colors (by area, desktop 1280x720 as loaded): white 77%, green
+#2d5a3d 12%, green #4a7c59 7%, light gray 3%, gray 1%. Colors under 1% of the
+view and hover/focus-only styles are not listed.`
+
+Neutral names carry no hex. The line is part of the inspection tool result
+only, never the system prompt. The capture adds about 0.2 seconds to an
+inspection. A host keeps producing receipts without `renderedColors` until the
+installer rebuilds the inspection image.
+
 ## Host custody and isolation
 
 Linux/WSL uses `/run/ods-pixel-inspection/control.sock`, a root-controlled 0750
@@ -163,14 +213,17 @@ There is no host-browser fallback.
 ## Tests
 
 `node --test tests/test-preview-inspection.mjs` checks plugin contracts,
-Unicode hash compatibility, forged/incomplete receipts, unavailable results, and
-page-error bounds and presentation.
+Unicode hash compatibility, forged/incomplete receipts, unavailable results,
+page-error bounds and presentation, and rendered-color bounds and the fixed
+line.
 `python3 -m unittest discover -s tests -p test_preview_inspection.py` checks
-protocol, ownership, paths, immutable bytes, subprocess bounds, cleanup, and
-page-error receipt shaping through a scripted browser double.
+protocol, ownership, paths, immutable bytes, subprocess bounds, cleanup,
+page-error receipt shaping through a scripted browser double, the PNG decoder
+and palette buckets, and the separate palette capture.
 Set `ODS_PREVIEW_BROWSER_TESTS=1` only for the fixture Chromium suite; it also
 checks the hidden-inclusive role/name matcher against Playwright's own
-`includeHidden` engine. Set
+`includeHidden` engine, and replays the fleet round 069 page
+(`tests/fixtures/preview-palette/tower1-r069`) and its amber repair. Set
 `ODS_INSPECTION_TEST_IMAGE=sha256:<candidate>` for real isolated-container
 smoke, observed hidden-flex regression, hung-script, and cancellation cleanup.
 These test-only variables never select a production image or grant authority.

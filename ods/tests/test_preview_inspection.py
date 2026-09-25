@@ -1,14 +1,17 @@
 """Boundaries and opt-in real browser regressions (ODS_PREVIEW_BROWSER_TESTS=1)."""
 
 import base64
+import collections
 import copy
 import hashlib
 import os
 import socket
+import struct
 import sys
 import tempfile
 import time
 import unittest
+import zlib
 from pathlib import Path
 from unittest.mock import patch
 
@@ -55,12 +58,14 @@ FLEET_PLAN = [
 ]
 
 
-def bundle(html, steps=None):
-    data = html.encode()
-    name = b"index.html"
-    digest = hashlib.sha256(
-        len(name).to_bytes(4, "big") + name + len(data).to_bytes(8, "big") + data
-    ).hexdigest()
+def bundle(html, steps=None, files=None):
+    # files: {path: bytes} for a multi-file site; html alone is index.html.
+    files = sorted((files or {"index.html": html.encode()}).items())
+    digest = hashlib.sha256()
+    for name, data in files:
+        digest.update(len(name.encode()).to_bytes(4, "big") + name.encode())
+        digest.update(len(data).to_bytes(8, "big") + data)
+    digest = digest.hexdigest()
     return {
         "schemaVersion": 1,
         "request": {
@@ -71,8 +76,38 @@ def bundle(html, steps=None):
             "viewport": {"width": 375, "height": 812},
             "steps": steps or [step("assert-visible", "#item")],
         },
-        "files": [{"path": "index.html", "base64": base64.b64encode(data).decode()}],
+        "files": [{"path": name, "base64": base64.b64encode(data).decode()}
+                  for name, data in files],
     }
+
+
+# Fleet round 069 (tower1, Qwen3.5-27B): "change the accent to amber". The
+# model set --accent-color to #ffc107, which only styles :focus outlines; the
+# page as rendered stayed green and white, and the fleet found no amber paint.
+TOWER1_R069 = Path(__file__).resolve().parent / "fixtures/preview-palette/tower1-r069"
+
+
+def tower1_files(**replacements):
+    files = {path.name: path.read_bytes() for path in sorted(TOWER1_R069.iterdir())}
+    css = files["styles.css"].decode()
+    for old, new in replacements.items():
+        assert old in css, old
+        css = css.replace(old, new)
+    files["styles.css"] = css.encode()
+    return files
+
+
+# The repair the owner asked for: the visible primary colors become amber.
+AMBER_REPAIR = {"--primary-color: #2d5a3d;": "--primary-color: #ffa000;",
+                "--secondary-color: #4a7c59;": "--secondary-color: #ffc107;"}
+DARK_PAGE_HTML = (
+    "<!doctype html><title>Night Garden</title><style>body{margin:0;background:#121212;color:#e0e0e0;"
+    "font:16px sans-serif}header{padding:48px;background:#1e1e1e}main{padding:32px}"
+    ".card{background:#2c2c2c;padding:24px;margin:16px 0;border-radius:8px}"
+    "button{background:#bb86fc;color:#121212;border:0;padding:24px 64px;font-size:20px}</style>"
+    "<header><h1>Night Garden</h1></header><main><div class=card>Dawn Jazz</div>"
+    "<div class=card>River Lantern Walk</div><button>Show sold out</button></main>"
+)
 
 
 class ObservationTests(unittest.TestCase):
@@ -321,9 +356,11 @@ class ScriptedBrowser:
     while handling a click, as an author's page would. The real browser path
     is covered by the opt-in BrowserTests and DockerCapsuleTests below."""
 
-    def __init__(self, load_errors=(), click_errors=()):
+    def __init__(self, load_errors=(), click_errors=(), palette=None):
         self.load_errors, self.click_errors = list(load_errors), list(click_errors)
         self.handlers, self.calls, self.revealed = {}, [], False
+        # Without a screenshot the capture fails and the palette is omitted.
+        self.palette = palette or PaletteDouble(None)
 
     def __call__(self):
         return self
@@ -341,7 +378,12 @@ class ScriptedBrowser:
     def launch(self, **_):
         return self
 
-    def new_context(self, **_):
+    def new_context(self, **kwargs):
+        # The rendered palette uses its own context (see PaletteDouble).
+        if "device_scale_factor" in kwargs:
+            self.calls.append("new_context:palette")
+            self.palette.kwargs, self.palette.site = kwargs, self.site
+            return self.palette
         return self
 
     def route(self, *_):
@@ -407,7 +449,70 @@ class ScriptedBrowser:
         return {"result": {"objectId": params["arguments"][0]["value"]}}
 
     def close(self):
+        self.calls.append("close")
+
+
+class Route:
+    def __init__(self, url, navigation=False, method="GET"):
+        self.request, self.url, self.method, self.navigation = self, url, method, navigation
+        self.outcome = None
+
+    def is_navigation_request(self):
+        return self.navigation
+
+    def continue_(self):
+        self.outcome = "continued"
+
+    def abort(self):
+        self.outcome = "aborted"
+
+
+class PaletteDouble:
+    """The palette context and page: a separate load that renders `image`.
+    `during_load` routes a request through the installed guard as the page
+    loads, and `error` makes the screenshot fail."""
+
+    def __init__(self, image, during_load=None, error=None, frame_url=None):
+        self.image, self.during_load, self.error, self.frame_url = image, during_load, error, frame_url
+        self.calls, self.handlers, self.routes, self.kwargs, self.shot = [], {}, [], None, None
+
+    def new_page(self):
+        return self
+
+    def set_default_timeout(self, _):
         pass
+
+    def route(self, _pattern, handler):
+        self.guard = handler
+
+    def on(self, event, handler):
+        self.calls.append("on:" + event)
+        self.handlers.setdefault(event, []).append(handler)
+
+    def goto(self, url, **_):
+        self.calls.append("goto")
+        self.origin = url.split("/__ods_inspection__.html")[0]
+        self.url = self.frame_url or self.origin + "/" + self.site + "/"
+        for relative, navigation in [("/" + self.site + "/styles.css", False),
+                                     *(self.during_load or [])]:
+            route = Route(self.origin + relative if relative.startswith("/") else relative, navigation)
+            self.guard(route)
+            self.routes.append(route)
+
+    def frame(self, name):
+        return self if name == "inspection" else None
+
+    def wait_for_timeout(self, _):
+        pass
+
+    def screenshot(self, **kwargs):
+        self.shot = kwargs
+        if self.error:
+            raise self.error
+        return self.image
+
+    def close(self):
+        self.calls.append("close")
 
 
 class PageErrorTests(unittest.TestCase):
@@ -673,11 +778,278 @@ class HiddenRoleLocatorTests(unittest.TestCase):
             self.assertNotIn(forbidden, source)
 
 
+PNG_SIGNATURE = b"\x89PNG\r\n\x1a\n"
+
+
+def png_chunk(kind, body):
+    return struct.pack(">I", len(body)) + kind + body + struct.pack(">I", zlib.crc32(kind + body))
+
+
+def encode_png(width, height, pixels, alpha=False, filters=(0,), depth=8, color_type=None, interlace=0):
+    """Reference encoder: row y uses filter type filters[y % len(filters)]."""
+    channels = 4 if alpha else 3
+    raw, previous = bytearray(), bytes(width * channels)
+    for y in range(height):
+        row = bytearray()
+        for r, g, b in pixels[y * width:(y + 1) * width]:
+            row += bytes((r, g, b, 255)[:channels])
+        kind = filters[y % len(filters)]
+        raw.append(kind)
+        for i, value in enumerate(row):
+            a = row[i - channels] if i >= channels else 0
+            b = previous[i]
+            c = previous[i - channels] if i >= channels else 0
+            p = a + b - c
+            paeth = (a if abs(p - a) <= abs(p - b) and abs(p - a) <= abs(p - c)
+                     else b if abs(p - b) <= abs(p - c) else c)
+            raw.append((value - (0, a, b, (a + b) >> 1, paeth)[kind]) & 255)
+        previous = bytes(row)
+    header = struct.pack(">IIBBBBB", width, height, depth,
+                         (6 if alpha else 2) if color_type is None else color_type, 0, 0, interlace)
+    return (PNG_SIGNATURE + png_chunk(b"IHDR", header) +
+            png_chunk(b"IDAT", zlib.compress(bytes(raw))) + png_chunk(b"IEND", b""))
+
+
+def hex_rgb(value):
+    return tuple(bytes.fromhex(value[1:]))
+
+
+def page_pixels(background, *regions, width=320, height=180):
+    """A capture-sized page: `background`, then (x0, y0, x1, y1, color) regions."""
+    pixels = [hex_rgb(background)] * (width * height)
+    for x0, y0, x1, y1, color in regions:
+        for y in range(y0, y1):
+            pixels[y * width + x0:y * width + x1] = [hex_rgb(color)] * (x1 - x0)
+    return pixels
+
+
+def palette_of(pixels, width=320, height=180):
+    image = encode_png(width, height, pixels, filters=(0, 1, 2, 3, 4))
+    return capsule.rendered_palette(capsule.png_colors(image))
+
+
+def event_page(primary, secondary):
+    """The round-069 layout at capture size: a header gradient, two white
+    cards with buttons and body text, and the Show sold out control."""
+    return page_pixels(
+        "#f5f7f5",
+        (0, 0, 160, 30, primary), (160, 0, 320, 30, secondary),
+        (60, 40, 260, 90, "#ffffff"), (60, 100, 260, 150, "#ffffff"),
+        (70, 60, 200, 62, "#333333"), (70, 120, 200, 122, "#333333"),
+        (70, 75, 100, 85, secondary), (70, 135, 100, 145, secondary),
+        (110, 160, 210, 172, primary),
+    )
+
+
+class PaletteTests(unittest.TestCase):
+    def test_png_decoder_matches_every_filter_and_channel_layout(self):
+        width, height = 23, 11
+        seed = hashlib.sha256(b"palette").digest() * 64
+        # Few distinct colors, so neighbouring rows and pixels both repeat
+        # and differ; every filter type sees both cases.
+        pixels = [tuple(seed[(i * 7 + k) % 97] // 64 * 85 for k in range(3)) for i in range(width * height)]
+        expected = collections.Counter(pixels)
+        for alpha in (False, True):
+            for filters in ((0,), (1,), (2,), (3,), (4,), (4, 3, 2, 1, 0)):
+                with self.subTest(alpha=alpha, filters=filters):
+                    image = encode_png(width, height, pixels, alpha=alpha, filters=filters)
+                    self.assertEqual(capsule.png_colors(image), expected)
+
+    def test_png_decoder_rejects_unsupported_or_malformed_input(self):
+        pixels = [(1, 2, 3)] * 4
+        good = encode_png(2, 2, pixels)
+        self.assertEqual(capsule.png_colors(good), collections.Counter({(1, 2, 3): 4}))
+        header = lambda width, height: png_chunk(b"IHDR", struct.pack(">IIBBBBB", width, height, 8, 2, 0, 0, 0))
+        unsupported = [
+            None, b"", b"GIF89a", good[:8], good[:30],
+            PNG_SIGNATURE + good[8 + 25:],                             # no IHDR
+            encode_png(2, 2, pixels, depth=16),
+            encode_png(2, 2, pixels, color_type=3),
+            encode_png(2, 2, pixels, color_type=0),
+            encode_png(2, 2, pixels, interlace=1),
+            PNG_SIGNATURE + header(4000, 4000),                        # too large
+            PNG_SIGNATURE + header(2, 2) + png_chunk(b"IDAT", zlib.compress(b"\x05" + bytes(6) + b"\x00" + bytes(6))),
+            PNG_SIGNATURE + header(2, 2) + png_chunk(b"IDAT", zlib.compress(b"\x00" + bytes(6))),  # short
+            PNG_SIGNATURE + header(2, 2) + png_chunk(b"IDAT", b"not zlib"),
+            PNG_SIGNATURE + png_chunk(b"IHDR", b"short"),
+        ]
+        for image in unsupported:
+            with self.subTest(image=image[:40] if image else image):
+                with self.assertRaises(protocol.Invalid):
+                    capsule.png_colors(image)
+
+    def test_color_families(self):
+        table = {
+            "#ffc107": "amber", "#ffbf00": "amber", "#ffa000": "amber", "#f59e0b": "amber",
+            "#ff9800": "orange", "#d97706": "orange", "#ff5722": "orange",
+            "#ffeb3b": "yellow", "#ffd700": "yellow",
+            "#2d5a3d": "green", "#4a7c59": "green", "#4caf50": "green",
+            "#008080": "teal", "#1976d2": "blue", "#0f172a": "blue",
+            "#7b1fa2": "purple", "#bb86fc": "purple",
+            "#e91e63": "pink", "#ffcdd2": "pink", "#c41e3a": "red", "#d32f2f": "red",
+            "#795548": "brown", "#8b4513": "brown",
+            "#ffffff": "white", "#f5f7f5": "white", "#eeeeee": "light gray", "#cccccc": "light gray",
+            "#a3bcaa": "gray", "#666666": "gray", "#333333": "dark gray",
+            "#1e1e1e": "black", "#121212": "black", "#000000": "black",
+        }
+        for color, name in table.items():
+            with self.subTest(color=color):
+                self.assertEqual(capsule.palette_bucket(*hex_rgb(color))[0], name)
+        self.assertEqual(set(table.values()), set(capsule.PALETTE_NAMES))
+        # Neutrals are named by lightness alone; each hue splits into bands.
+        self.assertNotEqual(capsule.palette_bucket(*hex_rgb("#2d5a3d")), capsule.palette_bucket(*hex_rgb("#4a7c59")))
+        self.assertEqual(capsule.palette_bucket(*hex_rgb("#ffa000")), capsule.palette_bucket(*hex_rgb("#ffc107")))
+
+    def test_green_page_reports_green_and_no_amber(self):
+        self.assertEqual(palette_of(event_page("#2d5a3d", "#4a7c59")), [
+            {"name": "white", "hex": "#f5f7f5", "percent": 79},
+            {"name": "green", "hex": "#2d5a3d", "percent": 10},
+            {"name": "green", "hex": "#4a7c59", "percent": 9},
+            {"name": "dark gray", "hex": "#333333", "percent": 1},
+        ])
+
+    def test_amber_page_reports_amber(self):
+        # Amber shades of one lightness band share a bucket; its hex is the
+        # most painted exact color.
+        self.assertEqual(palette_of(event_page("#ffa000", "#ffc107")), [
+            {"name": "white", "hex": "#f5f7f5", "percent": 79},
+            {"name": "amber", "hex": "#ffa000", "percent": 20},
+            {"name": "dark gray", "hex": "#333333", "percent": 1},
+        ])
+
+    def test_dark_mode_page(self):
+        pixels = page_pixels(
+            "#121212", (0, 0, 320, 40, "#1e1e1e"), (40, 60, 280, 100, "#2c2c2c"),
+            (40, 110, 280, 150, "#2c2c2c"), (60, 75, 200, 78, "#e0e0e0"), (60, 125, 200, 128, "#e0e0e0"),
+            (110, 158, 210, 176, "#bb86fc"),
+        )
+        self.assertEqual(palette_of(pixels), [
+            {"name": "black", "hex": "#121212", "percent": 64},
+            {"name": "dark gray", "hex": "#2c2c2c", "percent": 32},
+            {"name": "purple", "hex": "#bb86fc", "percent": 3},
+            {"name": "light gray", "hex": "#e0e0e0", "percent": 1},
+        ])
+
+    def test_ranking_is_deterministic_bounded_and_rounded(self):
+        counts = collections.Counter({
+            hex_rgb("#ffffff"): 300, hex_rgb("#fafafa"): 300,     # tie inside one bucket
+            hex_rgb("#1976d2"): 150, hex_rgb("#d32f2f"): 150,     # tie between buckets
+            hex_rgb("#4caf50"): 40, hex_rgb("#ffc107"): 30, hex_rgb("#7b1fa2"): 20,
+            hex_rgb("#e91e63"): 6, hex_rgb("#008080"): 4,          # beyond the limit
+        })
+        palette = capsule.rendered_palette(counts)
+        self.assertEqual(palette, capsule.rendered_palette(collections.Counter(dict(reversed(counts.items())))))
+        self.assertEqual([(c["name"], c["hex"], c["percent"]) for c in palette], [
+            ("white", "#fafafa", 60), ("blue", "#1976d2", 15), ("red", "#d32f2f", 15),
+            ("green", "#4caf50", 4), ("amber", "#ffc107", 3), ("purple", "#7b1fa2", 2)])
+        self.assertEqual(len(capsule.rendered_palette(counts, limit=3)), 3)
+        tiny = collections.Counter({hex_rgb("#ffffff"): 996, hex_rgb("#ffc107"): 4})
+        self.assertEqual([c["name"] for c in capsule.rendered_palette(tiny)], ["white"], "under 1% is not listed")
+        with self.assertRaises(protocol.Invalid):
+            capsule.rendered_palette(collections.Counter())
+
+
+class PaletteCaptureTests(unittest.TestCase):
+    GREEN = encode_png(4, 2, [hex_rgb("#f5f7f5")] * 5 + [hex_rgb("#2d5a3d")] * 3, filters=(2, 4))
+
+    def run_scripted(self, palette, load_errors=()):
+        browser = ScriptedBrowser(load_errors=load_errors, palette=palette)
+        data = bundle("<p id=item hidden></p><button id=show>Show</button>", [
+            step("assert-hidden", "#item"), step("click", "#show"), step("assert-visible", "#item")])
+        browser.site = data["request"]["siteId"]
+        return browser, capsule.run_browser(data, playwright_factory=browser)
+
+    def test_palette_is_separate_evidence_from_a_fresh_desktop_context(self):
+        errors = [PageError("SecurityError", STORAGE_ERROR)]
+        palette = PaletteDouble(self.GREEN)
+        browser, result = self.run_scripted(palette, errors)
+        # Rounded shares may exceed 100 by at most one half per entry.
+        self.assertEqual(result["renderedColors"], {"viewport": {"width": 1280, "height": 720}, "colors": [
+            {"name": "white", "hex": "#f5f7f5", "percent": 63},
+            {"name": "green", "hex": "#2d5a3d", "percent": 38}]})
+        self.assertEqual(palette.kwargs, {"viewport": {"width": 1280, "height": 720}, "device_scale_factor": 0.25,
+                                          "service_workers": "block", "accept_downloads": False})
+        self.assertEqual(palette.shot, {"type": "png", "scale": "device", "timeout": capsule.PALETTE_TIMEOUT_MS})
+        # The same request guard, popup, download and websocket handling, but
+        # no page-error listener: this load never adds step evidence.
+        self.assertEqual([route.outcome for route in palette.routes], ["continued"])
+        self.assertTrue({"on:page", "on:download", "on:websocket"} <= set(palette.calls))
+        self.assertNotIn("on:pageerror", palette.calls)
+        self.assertEqual(result["pageErrors"]["count"], 1)
+        # The step context is closed, its receipt final, before the palette
+        # context exists; the palette context is closed too.
+        self.assertLess(browser.calls.index("close"), browser.calls.index("new_context:palette"))
+        self.assertEqual(palette.calls[-1], "close")
+        _, without = self.run_scripted(PaletteDouble(None), errors)
+        self.assertEqual({k: v for k, v in result.items() if k != "renderedColors"}, without)
+        self.assertEqual(result["status"], "passed")
+        self.assertLessEqual(len(protocol.canonical(result)), protocol.MAX_RESULT)
+
+    def test_palette_is_omitted_when_capture_fails_or_is_blocked(self):
+        cases = {
+            "no image": PaletteDouble(None),
+            "not a png": PaletteDouble(b"<svg/>"),
+            "screenshot timeout": PaletteDouble(self.GREEN, error=TimeoutError("screenshot")),
+            "foreign request": PaletteDouble(self.GREEN, during_load=[("http://203.0.113.9/font.woff2", False)]),
+            "navigation": PaletteDouble(self.GREEN, during_load=[("/elsewhere.html", True)]),
+            "frame moved": PaletteDouble(self.GREEN, frame_url="http://127.0.0.1:9/other/"),
+        }
+        for label, palette in cases.items():
+            with self.subTest(label):
+                _, result = self.run_scripted(palette)
+                self.assertNotIn("renderedColors", result)
+                self.assertEqual(result["status"], "passed", result)
+                self.assertEqual(result["blockedRequests"], [], "palette blocks never reach step evidence")
+                self.assertEqual(palette.calls[-1], "close")
+                if palette.during_load:
+                    self.assertEqual(palette.routes[-1].outcome, "aborted")
+
+    def test_palette_never_starts_late_in_the_capsule_deadline(self):
+        palette = PaletteDouble(self.GREEN)
+        with patch.object(capsule, "PALETTE_START_BUDGET_S", 0):
+            _, result = self.run_scripted(palette)
+        self.assertNotIn("renderedColors", result)
+        self.assertEqual(result["status"], "passed")
+        self.assertIsNone(palette.kwargs, "no palette context was created")
+        # A late capture (at most two timeouts) still ends well inside 45 s.
+        self.assertLess(capsule.PALETTE_START_BUDGET_S + 2 * capsule.PALETTE_TIMEOUT_MS / 1000, 40)
+
+    def test_broker_relays_rendered_colors_unchanged(self):
+        data = bundle("hi")
+        request = data["request"]
+        receipt = {"schemaVersion": 1, "kind": protocol.KIND, "status": "passed",
+                   "siteId": request["siteId"], "sha256": request["sha256"],
+                   "planSha256": protocol.plan_hash(request), "viewport": request["viewport"],
+                   "steps": [], "diagnostics": {}, "blockedRequests": [],
+                   "renderedColors": {"viewport": {"width": 1280, "height": 720}, "colors": [
+                       {"name": "white", "hex": "#f5f7f5", "percent": 75}]},
+                   "scope": protocol.SCOPE}
+        config = {"docker": "/usr/bin/docker", "imageId": "sha256:" + "a" * 64,
+                  "ownerUid": os.getuid(), "transport": "local", "snapshotRoot": "/owned"}
+        with (
+            patch.object(broker, "snapshot_bundle", return_value=data),
+            patch.object(broker, "bounded_process",
+                         side_effect=lambda argv, *_a, **_k: protocol.canonical(receipt) if "run" in argv else b""),
+        ):
+            self.assertEqual(broker.inspect_request(request, config), receipt)
+
+
+def palette_names(result):
+    return [color["name"] for color in result["renderedColors"]["colors"]]
+
+
+def palette_share(result, name):
+    return sum(c["percent"] for c in result["renderedColors"]["colors"] if c["name"] == name)
+
+
+TOWER1_PLAN = [step("assert-hidden", "#midnight-concert-card"), role_step("click", "button", "Show sold out"),
+               step("assert-visible", "#midnight-concert-card")]
+
 @unittest.skipUnless(
     os.environ.get("ODS_PREVIEW_BROWSER_TESTS") == "1", "real Chromium opt in"
 )
 class BrowserTests(unittest.TestCase):
-    def check(self, html, steps):
+    def check(self, html, steps, files=None):
         # Fixture browsers get a separate process group and deadline too. The
         # production caller uses the stricter Docker capsule, never this path.
         import subprocess
@@ -693,7 +1065,7 @@ class BrowserTests(unittest.TestCase):
         )
         try:
             output, error = child.communicate(
-                protocol.canonical(bundle(html, steps)), timeout=20
+                protocol.canonical(bundle(html, steps, files)), timeout=20
             )
             self.assertEqual(child.returncode, 0, error.decode(errors="replace"))
             return protocol.strict_json(output)
@@ -1024,11 +1396,53 @@ class BrowserTests(unittest.TestCase):
         self.assertNotIn("pageErrors", result)
 
 
+    def test_rendered_palette_replays_tower1_round069(self):
+        # The accent change only styles :focus outlines: nothing amber is painted.
+        result = self.check(None, TOWER1_PLAN, tower1_files())
+        self.assertEqual(result["status"], "passed", result)
+        self.assertEqual(palette_names(result)[0], "white", result)
+        self.assertNotIn("amber", palette_names(result))
+        self.assertGreaterEqual(palette_share(result, "green"), 10, result)
+        self.assertLessEqual({"#2d5a3d", "#4a7c59"}, {c["hex"] for c in result["renderedColors"]["colors"]})
+
+    def test_rendered_palette_reports_the_amber_repair(self):
+        result = self.check(None, TOWER1_PLAN, tower1_files(**AMBER_REPAIR))
+        self.assertEqual(result["status"], "passed", result)
+        self.assertGreaterEqual(palette_share(result, "amber"), 10, result)
+        self.assertNotIn("green", palette_names(result))
+
+    def test_rendered_palette_of_a_dark_page(self):
+        result = self.check(DARK_PAGE_HTML, [role_step("assert-visible", "button", "Show sold out")])
+        self.assertEqual(palette_names(result)[0], "black", result)
+        self.assertGreaterEqual(palette_share(result, "black"), 50, result)
+        self.assertIn("purple", palette_names(result))
+        self.assertNotIn("white", palette_names(result))
+
+    def test_rendered_palette_is_the_fresh_desktop_load(self):
+        # Mobile media rules and the inspected click both paint other colors;
+        # the palette is the page as first loaded at the desktop viewport.
+        html = ("<style>body{margin:0;background:#1976d2}@media (max-width:600px){body{background:#d32f2f}}"
+                "</style><button id=paint onclick=\"document.body.style.background='#ffc107'\">Paint</button>")
+        result = self.check(html, [step("click", "#paint")])
+        self.assertEqual(result["status"], "passed", result)
+        self.assertEqual(result["viewport"], {"width": 375, "height": 812})
+        self.assertEqual(result["renderedColors"]["viewport"], {"width": 1280, "height": 720})
+        self.assertEqual(palette_names(result)[0], "blue", result)
+        self.assertGreaterEqual(palette_share(result, "blue"), 95, result)
+        self.assertFalse({"red", "amber"} & set(palette_names(result)), result)
+
+    def test_palette_load_errors_are_not_step_evidence(self):
+        html = ('<p id="item" style="background:#4caf50;height:600px">visible</p>'
+                '<script>sessionStorage.getItem("seen")</script>')
+        result = self.check(html, [step("assert-visible", "#item")])
+        self.assertEqual(result["pageErrors"]["count"], 1, "the palette load is not recorded")
+        self.assertIn("green", palette_names(result))
+
 @unittest.skipUnless(
     os.environ.get("ODS_INSPECTION_TEST_IMAGE"), "isolated Docker image test opt in"
 )
 class DockerCapsuleTests(unittest.TestCase):
-    def invoke(self, html, steps, cancel=False):
+    def invoke(self, html, steps, cancel=False, files=None):
         import workspace_preview as publisher
         import threading
         import subprocess
@@ -1041,14 +1455,15 @@ class DockerCapsuleTests(unittest.TestCase):
             workspace.mkdir(mode=0o700)
             site = workspace / "site"
             site.mkdir(mode=0o700)
-            (site / "index.html").write_text(html)
-            (site / "index.html").chmod(0o600)
+            for name, data in (files or {"index.html": html.encode()}).items():
+                (site / name).write_bytes(data)
+                (site / name).chmod(0o600)
             previews = root / "previews"
             previews.mkdir(mode=0o700)
             receipt = publisher.publish_snapshot(
                 workspace, previews, "site", os.getuid()
             )
-            request = bundle(html, steps)["request"]
+            request = bundle(html, steps, files)["request"]
             request.update(siteId=receipt["siteId"], sha256=receipt["sha256"])
             config = {
                 "docker": "/usr/bin/docker",
@@ -1143,6 +1558,15 @@ class DockerCapsuleTests(unittest.TestCase):
             cancel=True,
         )
 
+
+    def test_real_capsule_tower1_palette_replay(self):
+        result = self.invoke(None, TOWER1_PLAN, files=tower1_files())
+        self.assertEqual(result["status"], "passed", result)
+        self.assertNotIn("amber", palette_names(result))
+        self.assertGreaterEqual(palette_share(result, "green"), 10, result)
+        repaired = self.invoke(None, TOWER1_PLAN, files=tower1_files(**AMBER_REPAIR))
+        self.assertEqual(repaired["status"], "passed", repaired)
+        self.assertGreaterEqual(palette_share(repaired, "amber"), 10, repaired)
 
 if __name__ == "__main__":
     unittest.main()
