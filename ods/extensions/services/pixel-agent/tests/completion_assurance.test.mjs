@@ -100,12 +100,18 @@ test('a promise after partial progress still needs a delivered result', () => {
   assert.equal(guard.finalize('Vou consultar as fontes agora.')?.action,'revise');
 });
 test('clock context is explicit, portable and preserves requested dates', () => {
-  const value=executionContext(new Date('2026-09-16T00:03:00Z'));
-  assert.match(value,/2026-09-16T00:03:00.000Z/);
+  const value=executionContext();
+  assert.match(value,/Each owner message begins with its timestamp/);
   assert.match(value,/owner's explicit date and timezone/);
   assert.match(value,/prefer write and verify the bytes with read/);
   assert.match(value,/portable printf/);
   assert.match(value,/Do not claim a match when readback differs/);
+});
+test('system-prompt execution context carries no clock and is byte-stable across turns', async () => {
+  const first=executionContext();
+  await new Promise(resolve=>setTimeout(resolve,5));
+  assert.equal(executionContext(),first);
+  assert.doesNotMatch(first,/\d{4}-\d{2}-\d{2}T\d{2}:\d{2}/);
 });
 test('sources must come from structured tool evidence, not invented prose links', () => {
   const guard=createCompletionAssurance();guard.begin('Notícias de hoje');
