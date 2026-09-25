@@ -23,6 +23,7 @@ import hashlib
 import io
 import json
 import types
+from pathlib import Path
 
 import pytest
 
@@ -95,7 +96,37 @@ REDACTED_CASES = [
     ("private-key", _pem("RSA", KEY_BODY), KEY_BODY),
     ("private-key-cut", _pem("OPENSSH", KEY_BODY, end=False), KEY_BODY),
     ("terminal-colors", "\x1b[31mDB_PASSWORD=hunter2\x1b[0m", "hunter2"),
+    ("digits-only", "SECRET_KEY=987654321098765432", "987654321098765432"),
+    ("digits-only-long", "API_KEY=123456789012345678", "123456789012345678"),
+    ("digits-only-qualified", "HUGINN_SECRET_TOKEN=5566778899", "5566778899"),
+    ("vault-approle", "VAULT_SECRET_ID=hunter2hunter2", "hunter2hunter2"),
+    ("vault-approle-yaml", "secret_id: hunter2hunter2", "hunter2hunter2"),
+    ("url-after-word", "foo_postgres://user:hunter2@host/db", "hunter2"),
+    ("url-after-digit", "1postgres://user:hunter2@host/db", "hunter2"),
+    ("cookie-later", "Cookie: theme=dark; session=abc123def456", "abc123def456"),
+    ("escape-between", "DB_PASSWORD\x1b(B=hunter2", "hunter2"),
 ]
+
+# Shapes main already redacted on the build path, the rollback excerpt or both
+# (review of #6721): JVM system properties, flags with an underscore or a
+# single dash, dotted config paths, escaped JSON and unclosed quotes. Each is
+# checked on every path. escaped-json-name is new; main missed it everywhere.
+EVERY_PATH_CASES = [
+    ("jvm-property", "-Dspring.datasource.password=hunter2hunter2", "hunter2hunter2"),
+    ("jvm-property-dotted", "-Des.bootstrap.password=hunter2hunter2", "hunter2hunter2"),
+    ("jvm-property-dashed", "-Dkc.db-password=hunter2hunter2", "hunter2hunter2"),
+    ("flag-underscore", "--api_key=hunter2hunter2", "hunter2hunter2"),
+    ("flag-underscore-hf", "--hf_token=hunter2hunter2", "hunter2hunter2"),
+    ("flag-underscore-space", "--api_key hunter2hunter2", "hunter2hunter2"),
+    ("flag-single-dash", "-password=hunter2hunter2", "hunter2hunter2"),
+    ("flag-db", "--db_password=hunter2hunter2", "hunter2hunter2"),
+    ("dotted-config-path", "model_list[0].litellm_params.api_key: hunter2hunter2", "hunter2hunter2"),
+    ("escaped-json", '{"msg":"export DB_PASSWORD=\\"hunter2hunter2\\""}', "hunter2hunter2"),
+    ("escaped-json-name", '{\\"api_key\\": \\"hunter2hunter2\\"}', "hunter2hunter2"),
+    ("unclosed-quote", 'DB_PASSWORD="hunter2hunter2', "hunter2hunter2"),
+    ("unclosed-escaped-quote", 'DB_PASSWORD=\\"hunter2hunter2', "hunter2hunter2"),
+]
+REDACTED_CASES += EVERY_PATH_CASES
 
 # Ordinary log text that must come back unchanged.
 KEPT_CASES = [
@@ -136,6 +167,12 @@ KEPT_CASES = [
     "password: ${DB_PASSWORD}",
     "main: server is listening on http://0.0.0.0:8080",
     "pip install scikit-learn",
+    "eos_token: <|im_end|>",
+    "stop token: </s>",
+    "print_info: EOT token        = 151645 '<|im_end|>'",
+    "Authorization: Bearer",
+    "Cookie:",
+    'missing "DB_PASSWORD=" line in .env',
 ]
 
 
@@ -158,7 +195,19 @@ def test_names_and_structure_stay_readable():
     assert _mod._redact_credential_text('{"token": "abc123"}') == '{"token": "[REDACTED]"}'
     assert _mod._redact_credential_text("Authorization: Bearer abc.def.ghi") == "Authorization: Bearer [REDACTED]"
     assert _mod._redact_credential_text("postgres://u:p@db/app") == "postgres://[REDACTED]@db/app"
-    assert _mod._redact_credential_text("Cookie: session=abc123; theme=dark") == "Cookie: [REDACTED]; theme=dark"
+    # Every cookie in a Cookie header, not only the first.
+    assert _mod._redact_credential_text("Cookie: session=abc123; theme=dark") == "Cookie: [REDACTED]"
+    assert _mod._redact_credential_text("curl -H 'Cookie: a=1; b=2' http://x") == "curl -H 'Cookie: [REDACTED]' http://x"
+    assert _mod._redact_credential_text("{cookie: sid=abc123, accept: text/html}") == (
+        "{cookie: [REDACTED], accept: text/html}")
+    assert _mod._redact_credential_text('{"set-cookie": ["sid=abc123; Path=/"]}') == (
+        '{"set-cookie": ["[REDACTED]"]}')
+    assert _mod._redact_credential_text("-Dspring.datasource.password=hunter2") == (
+        "-Dspring.datasource.password=[REDACTED]")
+    assert _mod._redact_credential_text('{"msg":"export DB_PASSWORD=\\"hunter2\\""}') == (
+        '{"msg":"export DB_PASSWORD=\\"[REDACTED]\\""}')
+    assert _mod._redact_credential_text('DB_PASSWORD="hunter2') == "DB_PASSWORD=[REDACTED]"
+    assert _mod._redact_credential_text("api_key=, model=qwen") == "api_key=, model=qwen"
 
 
 def test_known_values_and_control_characters():
@@ -166,6 +215,49 @@ def test_known_values_and_control_characters():
     assert _mod._redact_credential_text(text, ["dbsecretvalue123", "", None]) == (
         "connecting as shlink with [REDACTED]\nready\ttrue")
     assert _mod._redact_credential_text(None) == ""
+
+
+def test_escapes_are_removed_before_matching():
+    # tput sgr0 prints ESC ( B, which used to sit between the name and the value.
+    assert _mod._redact_credential_text("DB_PASSWORD\x1b(B\x1b[m=hunter2") == "DB_PASSWORD=[REDACTED]"
+    assert _mod._redact_credential_text("\x1b]0;window title\x07ready") == "ready"
+
+
+def test_carriage_returns_keep_progress_lines_apart():
+    assert _mod._redact_credential_text("10%\r50%\r100%\r\ndone") == "10%\n50%\n100%\ndone"
+    assert _mod._runtime_log_excerpt("error: first\rerror: second") == "error: first\nerror: second"
+
+
+@pytest.mark.parametrize("line,secret", [case[1:] for case in EVERY_PATH_CASES],
+                         ids=[case[0] for case in EVERY_PATH_CASES])
+def test_review_shapes_are_redacted_on_every_path(line, secret, tmp_path, monkeypatch):
+    (tmp_path / ".env").write_text("", encoding="utf-8")
+    monkeypatch.setattr(_mod, "INSTALL_DIR", tmp_path)
+
+    def docker(args, **kwargs):
+        if args[:2] == ["docker", "logs"]:
+            return types.SimpleNamespace(returncode=0, stdout=line)
+        return types.SimpleNamespace(returncode=1, stdout="")
+    monkeypatch.setattr(_mod.subprocess, "run", docker)
+
+    outputs = {
+        "build": _mod._install_build_diagnostic(
+            types.SimpleNamespace(stderr=line + "\nfailed to solve: exit code: 1"), {}),
+        "container": _mod._collect_container_start_diagnostic("ods-x", {}, None),
+        "rollback excerpt": _mod._runtime_log_excerpt("error: " + line),
+        "log viewer": _mod._redact_credential_text(line),
+    }
+    for path, output in outputs.items():
+        assert secret not in output, path
+        assert "[REDACTED]" in output, path
+
+
+def test_credential_fixtures_are_built_at_runtime():
+    """Secret Scan reads the whole history, so no fixture may be a literal here."""
+    source = Path(__file__).read_text(encoding="utf-8")
+    for value in (JWT, HF, MASTER_KEY, PROJECT_KEY, ANTHROPIC_KEY, GITHUB_TOKEN, GITHUB_PAT,
+                  SLACK_TOKEN, GOOGLE_KEY, JWT.split(".")[0], "-----" + "BEGIN"):
+        assert value not in source
 
 
 def test_runtime_log_excerpt_redacts_the_new_shapes_and_keeps_counts():

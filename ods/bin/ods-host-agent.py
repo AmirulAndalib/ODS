@@ -7394,7 +7394,10 @@ STARTUP_DIAGNOSTIC_LIMIT = 2000
 # _write_progress), the llama-server log excerpt kept when an activation rolls
 # back, Windows Lemonade restart output and the container log viewer.
 _REDACTED = '[REDACTED]'
-_OUTPUT_ANSI_RE = re.compile(r'\x1b\[[0-?]*[ -/]*[@-~]')
+# Terminal escapes: CSI (colors), OSC (titles) and the short ESC forms such as
+# the ESC ( B that tput sgr0 prints. They and other control characters are
+# removed before any matching, so none can sit between a name and its value.
+_OUTPUT_ANSI_RE = re.compile(r'\x1b(?:\[[0-?]*[ -/]*[@-~]|\][^\x07\x1b\n]*(?:\x07|\x1b\\)?|[ -/]*[0-~])')
 _OUTPUT_CONTROL_RE = re.compile(r'[\x00-\x08\x0b-\x1f]')
 # A name holds a credential when one of its words (split at _ - . and
 # camelCase) is one of these (HF_TOKEN, clientSecret, DB_PASSWORD, Cookie) ...
@@ -7429,20 +7432,36 @@ _CREDENTIAL_METADATA_WORDS = frozenset({
     'md'})
 _NAME_WORD_RE = re.compile(r'[A-Z]+(?![a-z])|[A-Z]?[a-z]+|[0-9]+')
 _ENV_STYLE_NAME_RE = re.compile(r'[A-Z][A-Z0-9]*(?:_[A-Z0-9]+)+')
-# NAME=value, NAME: value, "name": "value", Authorization: Bearer value, and
-# --flag value / --flag=value. Only the name and separator are matched here,
-# so a name that is not a credential never hides the one after it.
+# NAME=value, NAME: value, "name": "value", \"name\": \"value\" (escaped JSON),
+# Authorization: Bearer value, -Dproperty=value, --flag=value and --flag value.
+# The name is the whole run of name characters, leading - or . included
+# (-Dspring.datasource.password, model_list[0].litellm_params.api_key), and
+# _credential_name_kind drops that prefix. One start per run keeps this linear.
+# Only the name and separator are matched here, so a name that is not a
+# credential never hides the one after it.
 _CREDENTIAL_ASSIGNMENT_RE = re.compile(
-    r'''(?<![A-Za-z0-9_.-])(?P<name>[A-Za-z_][A-Za-z0-9_.-]*)'''
-    r'''["']?[ \t]*[:=](?![:=])[ \t]*(?:(?i:bearer|basic|token|digest)[ \t]+)?'''
-    r'''|(?<![A-Za-z0-9_-])--(?P<flag>[A-Za-z][A-Za-z0-9-]*)(?:=|[ \t]+)(?!-)''')
-_CREDENTIAL_VALUE_RE = re.compile(r'''"[^"\n]*"|'[^'\n]*'|[^\s"',;]+''')
+    r'''(?<![A-Za-z0-9_.-])(?P<name>[A-Za-z0-9_.-]+)'''
+    r'''(?:\\?["'])?[ \t]*[:=](?![:=])[ \t]*(?:(?i:bearer|basic|token|digest)[ \t]+)?'''
+    r'''|(?<![A-Za-z0-9_-])--(?P<flag>[A-Za-z][A-Za-z0-9_-]*)(?:=|[ \t]+)(?!-)''')
+# A quoted value ("...", '...', \"...\" inside a JSON string, or the first
+# item of a JSON list); a bare value; or, when a value follows a quote that is
+# never closed, the whole non-space run.
+_CREDENTIAL_VALUE_RE = re.compile(
+    r'''\[?(?P<quote>\\?["'])(?P<quoted>[^\n]*?)(?P=quote)'''
+    r'''|(?!\[?\\?["'])[^\s"',;]+'''
+    r'''|(?=\[?\\?["'][^\s"'\\,;)\]}])\S+''')
+# A Cookie header (Cookie: a=1; b=2) carries several cookies: all of them.
+_COOKIE_HEADER_VALUE_RE = re.compile(r'''(?!\[)[^\s;,"'\\`]+(?:;[ \t]*[^\s;,"'\\`]+)*''')
+_CREDENTIAL_NAME_PREFIX_RE = re.compile(r'^(?:-D(?=[a-z]))?[-.0-9]*')
+# A tokenizer's special token (<|im_end|>, </s>) as the value of a token name.
+_SPECIAL_TOKEN_RE = re.compile(r'<[^\s<>]{1,40}>')
 _PLACEHOLDER_VALUES = frozenset({
     'none', 'null', 'nil', 'true', 'false', 'undefined', 'yes', 'no', 'on', 'off', 'unset',
-    _REDACTED.lower()})
+    'bearer', 'basic', 'digest', _REDACTED.lower()})
 _BEARER_VALUE_RE = re.compile(r'''(?i)\b(bearer[ \t]+)([^\s"',;]+)''')
-# The scheme is bounded so a long run of letters and dots stays linear.
-_URL_USERINFO_RE = re.compile(r'''\b([a-zA-Z][a-zA-Z0-9+.-]{0,31}://)[^/\s@"'<>]+@''')
+# The scheme is bounded so a long run of letters and dots stays linear. It is
+# not anchored, so foo_postgres:// and 1postgres:// still match.
+_URL_USERINFO_RE = re.compile(r'''([a-zA-Z][a-zA-Z0-9+.-]{0,31}://)[^/\s@"'<>]+@''')
 # Credentials recognizable without a name: private key blocks, JWTs and
 # prefixed tokens (Hugging Face, OpenAI-style sk-, GitHub, Slack, Google).
 _BARE_CREDENTIAL_RE = re.compile(
@@ -7457,11 +7476,14 @@ _BARE_CREDENTIAL_RE = re.compile(
 
 
 def _credential_name_kind(name: str) -> str | None:
-    """``count`` for a token/key name, ``secret`` for another credential name, else None.
+    """``count`` for a plain token name, ``secret`` for another credential name, else None.
 
-    A token or key name can also hold a count or an id (``EOS token = 151645``,
-    ``max_token: 512``), so an all-digit value is kept for those.
+    A plain token name can also hold a count, an id or a tokenizer's special
+    token (``EOS token = 151645``, ``max_token: 512``, ``eos_token: <|im_end|>``),
+    so those values are kept for it. A qualified one (``SECRET_TOKEN``,
+    ``API_TOKEN``) and every key, secret or password name is always redacted.
     """
+    name = _CREDENTIAL_NAME_PREFIX_RE.sub('', name)  # -D, --, a leading . or digit
     words = [word.lower() for word in _NAME_WORD_RE.findall(name)]
     env_style = _ENV_STYLE_NAME_RE.fullmatch(name) is not None
     found = None
@@ -7474,9 +7496,16 @@ def _credential_name_kind(name: str) -> str | None:
               and previous not in _NON_CREDENTIAL_QUALIFIERS
               and (env_style or previous in _CREDENTIAL_QUALIFIERS)):
             found = index
-    if found is None or any(word in _CREDENTIAL_METADATA_WORDS for word in words[found + 1:]):
+    if found is None:
         return None
-    return 'count' if words[found] in ('token', 'key', 'keys') else 'secret'
+    later = words[found + 1:]
+    if words[found] == 'secret':
+        later = [word for word in later if word not in ('id', 'ids')]  # A Vault secret_id is a credential.
+    if any(word in _CREDENTIAL_METADATA_WORDS for word in later):
+        return None
+    plain_token = words[found] == 'token' and not any(
+        word in _CREDENTIAL_QUALIFIERS or word in _CREDENTIAL_NAME_WORDS for word in words[:found])
+    return 'count' if plain_token else 'secret'
 
 
 def _redact_credential_assignments(text: str) -> str:
@@ -7484,18 +7513,21 @@ def _redact_credential_assignments(text: str) -> str:
     for match in _CREDENTIAL_ASSIGNMENT_RE.finditer(text):
         if match.start() < cursor:
             continue  # Inside a value already redacted.
-        kind = _credential_name_kind(match.group('name') or match.group('flag'))
+        name = match.group('name') or match.group('flag')
+        kind = _credential_name_kind(name)
         value = _CREDENTIAL_VALUE_RE.match(text, match.end()) if kind else None
         if value is None:
             continue
-        raw = value.group()
-        quote = raw[0] if len(raw) > 1 and raw[0] == raw[-1] and raw[0] in '"\'' else ''
-        bare = raw[1:-1] if quote else raw
-        if (not bare.strip() or bare.lower() in _PLACEHOLDER_VALUES
+        quote = value.group('quote') or ''
+        if (not quote and (match.group('name') or '').lower() in ('cookie', 'set-cookie')
+                and ':' in text[match.end('name'):match.end()]):
+            value = _COOKIE_HEADER_VALUE_RE.match(text, match.end()) or value
+        bare = value.group('quoted') if quote else value.group()
+        if (not bare.strip(' \t"\'\\') or bare.lower() in _PLACEHOLDER_VALUES
                 or re.fullmatch(r'\$\{?[A-Za-z_][A-Za-z0-9_]*\}?', bare)
-                or (kind == 'count' and bare.isdigit())):
-            continue  # Nothing secret: an unset value, a ${REFERENCE}, a count.
-        parts += [text[cursor:value.start()], quote + _REDACTED + quote]
+                or (kind == 'count' and (bare.isdigit() or _SPECIAL_TOKEN_RE.fullmatch(bare)))):
+            continue  # Nothing secret: an unset value, a ${REFERENCE}, a count, <|im_end|>.
+        parts += [text[cursor:value.start('quote') if quote else value.start()], quote + _REDACTED + quote]
         cursor = value.end()
     parts.append(text[cursor:])
     return ''.join(parts)
@@ -7515,10 +7547,12 @@ def _redact_credential_text(text, known_values=()) -> str:
     Then credential-shaped text: values of credential names (see
     _credential_name_kind), credential flags, bearer tokens, URL user info,
     JWTs, private keys and prefixed tokens such as ``hf_...``. Terminal
-    escapes and control characters are removed too. Ordinary words, token
-    counts, digests and model names are kept.
+    escapes and control characters are removed first; a carriage return
+    ends a line, as splitlines() reads it. Ordinary words, token counts,
+    digests and model names are kept.
     """
     text = _OUTPUT_ANSI_RE.sub('', str(text or ''))
+    text = _OUTPUT_CONTROL_RE.sub('', text.replace('\r\n', '\n').replace('\r', '\n'))
     values = sorted({value for value in known_values if isinstance(value, str) and value},
                     key=len, reverse=True)
     if values:
@@ -7526,8 +7560,7 @@ def _redact_credential_text(text, known_values=()) -> str:
     text = _URL_USERINFO_RE.sub(r'\1' + _REDACTED + '@', text)
     text = _redact_credential_assignments(text)
     text = _BEARER_VALUE_RE.sub(_redact_bearer_value, text)
-    text = _BARE_CREDENTIAL_RE.sub(_REDACTED, text)
-    return _OUTPUT_CONTROL_RE.sub('', text)
+    return _BARE_CREDENTIAL_RE.sub(_REDACTED, text)
 
 
 def _redact_untrusted_output(output: str, services: dict, extra_secrets=()) -> str | None:
