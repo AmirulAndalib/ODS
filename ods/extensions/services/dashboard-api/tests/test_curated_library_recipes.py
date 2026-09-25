@@ -206,3 +206,49 @@ def test_thin_build_base_is_the_reviewed_upstream_image():
                 assert bases[0] in reviewed, f"{dockerfile.relative_to(ODS)}: FROM {bases[0]}"
                 checked += 1
     assert checked >= 70, "Thin-build discovery unexpectedly found little"
+
+
+def _writable_relative_binds(service):
+    """Relative bind sources, which the host agent pre-creates as its own non-root user."""
+    sources = []
+    for volume in service.get("volumes") or []:
+        if isinstance(volume, dict):
+            if volume.get("type") == "bind" and not volume.get("read_only"):
+                sources.append(str(volume.get("source", "")))
+            continue
+        source, _, mount = str(volume).partition(":")
+        if "ro" not in mount.partition(":")[2].split(","):
+            sources.append(source)
+    return [source for source in sources
+            if "/" in source and not source.startswith(("/", "$", "~", "`", "\\"))]
+
+
+def test_capability_free_root_services_do_not_write_owner_prepared_binds():
+    """Root without CAP_DAC_OVERRIDE cannot create files in the owner's 0755 data dir.
+
+    ods-host-agent pre-creates relative bind sources as the install owner and
+    never chowns them. ntfy shipped as root with cap_drop ALL and crash-looped
+    on SQLite creation; such services need a non-root user instead.
+    """
+    offenders, checked = [], 0
+    for path in sorted(LIBRARY.glob("*/compose*.yaml")):
+        compose = yaml.safe_load(path.read_text(encoding="utf-8"))
+        manifest_path = path.parent / "manifest.yaml"
+        manifest = yaml.safe_load(manifest_path.read_text(encoding="utf-8")) if manifest_path.is_file() else {}
+        container_uid = ((manifest or {}).get("service") or {}).get("container_uid")
+        services = (compose or {}).get("services") or {}
+        for name, service in services.items():
+            if not isinstance(service, dict):
+                continue
+            checked += 1
+            dropped = {str(cap).upper().removeprefix("CAP_") for cap in service.get("cap_drop") or []}
+            added = {str(cap).upper().removeprefix("CAP_") for cap in service.get("cap_add") or []}
+            user = service.get("user")
+            root = (str(user).split(":")[0] in ("0", "root") if user is not None
+                    else str(container_uid or 0) == "0")
+            binds = _writable_relative_binds(service)
+            if root and "ALL" in dropped and "DAC_OVERRIDE" not in added and binds:
+                offenders.append(f"{path.relative_to(ODS)} {name}: {', '.join(binds)}")
+    assert checked > 150, "Library compose discovery unexpectedly found little"
+    assert not offenders, ("Run as the install owner, e.g. user: \"${ODS_UID:-1000}:${ODS_GID:-1000}\":\n"
+                           + "\n".join(offenders))
