@@ -699,6 +699,18 @@ if ($dryRun) {
                 # ── Fallback: llama-server.exe (Vulkan) ──
                 $llamaZip = Join-Path $env:TEMP $script:LLAMA_CPP_VULKAN_ASSET
                 if (-not (Test-Path $script:LLAMA_SERVER_EXE)) {
+                    # Refuse an unpinned tag before downloading anything, and
+                    # discard a cached archive from an earlier run that does not
+                    # match the pin.
+                    $expectedLlamaSha = $script:LLAMA_CPP_VULKAN_SHA256[$script:LLAMA_CPP_RELEASE_TAG]
+                    if (-not $expectedLlamaSha) {
+                        Write-AIError "No pinned SHA-256 for llama.cpp $($script:LLAMA_CPP_RELEASE_TAG) ($($script:LLAMA_CPP_VULKAN_ASSET)); refusing an unverified llama-server."
+                        exit 1
+                    }
+                    if ((Test-Path $llamaZip) -and ((Get-FileHash -LiteralPath $llamaZip -Algorithm SHA256).Hash.ToLowerInvariant() -ne $expectedLlamaSha)) {
+                        Write-AIWarn "Discarding a cached $($script:LLAMA_CPP_VULKAN_ASSET) that does not match its pinned SHA-256."
+                        Remove-Item $llamaZip -Force -ErrorAction SilentlyContinue
+                    }
                     if (-not (Test-Path $llamaZip)) {
                         $dlOk = Invoke-DownloadWithRetry -Url $script:LLAMA_CPP_VULKAN_URL `
                             -Destination $llamaZip -Label "Downloading llama-server (Vulkan)"
@@ -709,12 +721,6 @@ if ($dryRun) {
                     }
 
                     Write-AI "Validating llama-server archive..."
-                    $expectedLlamaSha = $script:LLAMA_CPP_VULKAN_SHA256[$script:LLAMA_CPP_RELEASE_TAG]
-                    if (-not $expectedLlamaSha) {
-                        Remove-Item $llamaZip -Force -ErrorAction SilentlyContinue
-                        Write-AIError "No pinned SHA-256 for llama.cpp $($script:LLAMA_CPP_RELEASE_TAG) ($($script:LLAMA_CPP_VULKAN_ASSET)); refusing an unverified llama-server."
-                        exit 1
-                    }
                     $actualLlamaSha = (Get-FileHash -LiteralPath $llamaZip -Algorithm SHA256).Hash.ToLowerInvariant()
                     if ($actualLlamaSha -ne $expectedLlamaSha) {
                         Remove-Item $llamaZip -Force -ErrorAction SilentlyContinue

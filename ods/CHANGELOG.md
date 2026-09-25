@@ -35,22 +35,45 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   installer rerun still keeps an active model whose `.env` has the old
   `resolve/main` URL when the repo, file path and sha256 match the catalog, and
   writes the pinned URL.
-- The Intel (`server-intel-b9014`), Apple Docker (`server-b9014`), Intel Arc
-  local build (tag `b9014`, commit `d4b0c22f`) and native Windows Vulkan
-  (`llama-b9014-bin-win-vulkan-x64.zip`) llama.cpp runtimes move from b8248 to
-  b9014, the build NVIDIA and CPU already use. b8248 ignores
-  `LLAMA_ARG_REASONING` and `LLAMA_ARG_SPEC_TYPE`, so ODS's reasoning-off
-  default and per-model speculative settings had no effect on these backends,
-  and b8248 rejects `--spec-draft-n-max`, which the Windows launchers pass
-  when `LLAMA_ARG_SPEC_DRAFT_N_MAX` is set. The images are
-  digest-pinned, the Arc build checks the tag's commit, and the Windows
-  installer now checks the archive's SHA-256. Native Windows launches pass
-  `LLAMA_REASONING` as `--reasoning` when the installed llama-server has that
-  switch, as native macOS does: b9014 defaults it to `auto`, which turns
-  Qwen3.5 thinking on, and `--reasoning-format none` alone returns the
-  reasoning inside the reply. Not measured on Intel or native Windows
-  hardware. Existing native Windows installs keep their llama-server until it
-  is reinstalled.
+- The Intel Docker image (`server-intel-b9014`), the Apple Docker image
+  (`server-b9014`) and fresh native Windows Vulkan installs
+  (`llama-b9014-bin-win-vulkan-x64.zip`, SHA-256 now checked before
+  extraction) move from llama.cpp b8248 to b9014, the build NVIDIA and CPU
+  already use. b8248 ignores `LLAMA_ARG_REASONING` and `LLAMA_ARG_SPEC_TYPE`,
+  and rejects `--spec-draft-n-max`, which the Windows launchers pass when
+  `LLAMA_ARG_SPEC_DRAFT_N_MAX` is set. Not measured on Intel or native Windows
+  hardware.
+  - Intel and Apple Docker now honor the reasoning-off default, so Qwen3.5
+    stops thinking by default on these backends (it thought on b8248). This
+    is intended; set `LLAMA_REASONING=on` to keep thinking.
+  - Intel: ODS no longer sets `SYCL_CACHE_PERSISTENT=1` for llama-server; the
+    persistent SYCL kernel cache crashes llama-server with the oneAPI 2025.3
+    runtime in the b9014 image. Every start now JIT-compiles kernels again
+    (~30 s). On hosts with more than one Intel GPU that runtime can crash with
+    the default `ONEAPI_DEVICE_SELECTOR=level_zero:gpu`; set
+    `ONEAPI_DEVICE_SELECTOR=level_zero:0` in `.env`, which the Intel overlays
+    now read and the installer keeps.
+  - The installer selects `docker-compose.arc.yml` for Intel, not
+    `docker-compose.intel.yml`, so the Intel image change reaches only stacks
+    started with the Intel overlay by hand. The Arc local-build path
+    (`docker-compose.arc.yml`, `images/llama-sycl`) was already broken and is
+    not moved to b9014 by this change: its image copies only the
+    `llama-server` binary although llama.cpp builds shared libraries by
+    default, the installer never builds it (it starts Compose with
+    `--no-build --pull never`) and never rebuilds an existing
+    `ods-llama-sycl:local`, and b9014 has not been compiled on its oneAPI
+    2025.0.0 base. Only its source defaults changed (tag `b9014`, pinned
+    commit).
+  - Native Windows: re-running the installer keeps an existing
+    `llama-server.exe`, so installs from before this change stay on b8248.
+    To move to b9014, delete `<install>\llama-server` and re-run the
+    installer. Every Windows launch path now reads the installed binary's
+    `--help`: on b9014 it passes `LLAMA_REASONING` as `--reasoning` (b9014
+    defaults it to `auto`, and `--reasoning-format none` alone returns the
+    reasoning inside the reply); on b8248 it keeps `--reasoning-format` and,
+    for `off`, adds `--reasoning-budget 0`, which is what turns thinking off
+    there. Before this change, b8248 installs returned Qwen3.5's reasoning
+    inside every reply.
 - Perplexica now runs upstream release v1.12.2, published under its new name
   Vane (`itzcrazykns1337/vane:slim-v1.12.2`, digest-pinned). The UI shows the
   Vane name; ODS keeps the `perplexica` service, port and volumes, so settings

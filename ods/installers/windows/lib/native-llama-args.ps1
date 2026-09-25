@@ -21,7 +21,9 @@
 #   does through LLAMA_ARG_REASONING. b9014 defaults --reasoning to auto, which
 #   turns Qwen3.5 thinking on for every request, and with --reasoning-format
 #   none the reasoning comes back inside the reply. Older binaries (b8248) have
-#   no --reasoning and keep the caller's --reasoning-format mapping.
+#   no --reasoning and keep the caller's --reasoning-format mapping; for off
+#   they also get --reasoning-budget 0, the switch that disables thinking
+#   there (b8248 accepts only 0 or -1, and defaults to -1, thinking on).
 # ============================================================================
 
 $script:ODSLlamaServerHelpCache = @{}
@@ -142,7 +144,8 @@ function Get-ODSNativeCheckpointIntervalArgs {
 function Get-ODSNativeReasoningArgs {
     <#
     .SYNOPSIS
-        --reasoning <mode> where the binary has it, else --reasoning-format.
+        --reasoning <mode> where the binary has it, else --reasoning-format
+        (plus --reasoning-budget 0 for off where the binary has that).
     .PARAMETER Mode
         LLAMA_REASONING from .env; empty means ODS's default, off.
     .PARAMETER FallbackFormat
@@ -163,6 +166,10 @@ function Get-ODSNativeReasoningArgs {
     if ($value -cin @("off", "on", "auto") -and (Test-ODSLlamaServerHelpFlag -Executable $Executable -Flag "--reasoning")) {
         return @("--reasoning", $value)
     }
-    if ($FallbackFormat) { return @("--reasoning-format", $FallbackFormat) }
-    return @()
+    $arguments = @()
+    if ($FallbackFormat) { $arguments += @("--reasoning-format", $FallbackFormat) }
+    if ($value -ceq "off" -and (Test-ODSLlamaServerHelpFlag -Executable $Executable -Flag "--reasoning-budget")) {
+        $arguments += @("--reasoning-budget", "0")
+    }
+    return $arguments
 }

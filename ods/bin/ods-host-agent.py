@@ -17553,27 +17553,39 @@ def _windows_llama_reasoning_arguments(llama_bin: Path, reasoning: str, reasonin
     Same rule as installers/windows/lib/native-llama-args.ps1 and the macOS
     helper: llama.cpp b9014 defaults --reasoning to auto, which turns Qwen3.5
     thinking on, and with --reasoning-format none the reasoning comes back
-    inside the reply. b8248 has no --reasoning and keeps the format mapping.
+    inside the reply. b8248 has no --reasoning and keeps the format mapping;
+    for off it also gets --reasoning-budget 0, which disables thinking there
+    (its default, -1, leaves thinking on).
     """
     mode = str(reasoning or "").strip().strip("\"'") or "off"
+    help_text = ""
     if mode in {"off", "on", "auto"}:
         try:
             result = subprocess.run(
                 [str(llama_bin), "--help"],
                 capture_output=True,
                 text=True,
+                encoding="utf-8",
+                errors="replace",
                 timeout=15,
                 creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
             )
         except (OSError, subprocess.SubprocessError):
             result = None
         if result is not None and result.returncode == 0:
-            flag = re.compile(r"(?<![\w-])--reasoning(?![\w-])")
             help_text = (result.stdout or "") + (result.stderr or "")
-            if any(flag.search(line) and "has been removed" not in line.lower()
-                   for line in help_text.splitlines()):
-                return ["--reasoning", mode]
-    return ["--reasoning-format", reasoning_fmt]
+
+    def listed(flag: str) -> bool:
+        pattern = re.compile(r"(?<![\w-])" + re.escape(flag) + r"(?![\w-])")
+        return any(pattern.search(line) and "has been removed" not in line.lower()
+                   for line in help_text.splitlines())
+
+    if listed("--reasoning"):
+        return ["--reasoning", mode]
+    arguments = ["--reasoning-format", reasoning_fmt]
+    if mode == "off" and listed("--reasoning-budget"):
+        arguments += ["--reasoning-budget", "0"]
+    return arguments
 
 
 def _launch_native_llama_server(env_path: Path, llama_bin: Path, llama_log: Path, pid_file: Path):

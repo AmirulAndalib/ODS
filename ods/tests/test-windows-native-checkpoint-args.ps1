@@ -68,9 +68,11 @@ try {
         "-rea, --reasoning [on,off,auto]   use reasoning/thinking in the chat",
         "--reasoning-format FORMAT",
         "--reasoning-budget N")
-    $formatOnly = New-FakeLlamaServer -Name "format-only" -HelpLines @(
+    $b8248Reasoning = New-FakeLlamaServer -Name "b8248-reasoning" -HelpLines @(
         "--reasoning-format FORMAT",
-        "--reasoning-budget N")
+        "--reasoning-budget N   -1 for unrestricted thinking budget, or 0 to disable thinking")
+    $formatOnly = New-FakeLlamaServer -Name "format-only" -HelpLines @(
+        "--reasoning-format FORMAT")
     $removed = New-FakeLlamaServer -Name "removed" -HelpLines @(
         "--reasoning   this flag has been removed")
     function Assert-Reasoning {
@@ -84,7 +86,10 @@ try {
     Assert-Reasoning (Get-ODSNativeReasoningArgs -Executable $withReasoning -Mode "auto" -FallbackFormat "auto") @("--reasoning", "auto") "b9014 auto"
     Assert-Reasoning (Get-ODSNativeReasoningArgs -Executable $withReasoning -Mode "deepseek" -FallbackFormat "deepseek") @("--reasoning-format", "deepseek") "format name"
     Assert-Reasoning (Get-ODSNativeReasoningArgs -Executable $withReasoning -Mode "OFF" -FallbackFormat "OFF") @("--reasoning-format", "OFF") "case-sensitive mode"
-    Assert-Reasoning (Get-ODSNativeReasoningArgs -Executable $formatOnly -Mode "off" -FallbackFormat "none") @("--reasoning-format", "none") "b8248 off"
+    Assert-Reasoning (Get-ODSNativeReasoningArgs -Executable $b8248Reasoning -Mode "off" -FallbackFormat "none") @("--reasoning-format", "none", "--reasoning-budget", "0") "b8248 off"
+    Assert-Reasoning (Get-ODSNativeReasoningArgs -Executable $b8248Reasoning -Mode "" -FallbackFormat "none") @("--reasoning-format", "none", "--reasoning-budget", "0") "b8248 default"
+    Assert-Reasoning (Get-ODSNativeReasoningArgs -Executable $b8248Reasoning -Mode "on" -FallbackFormat "deepseek") @("--reasoning-format", "deepseek") "b8248 on"
+    Assert-Reasoning (Get-ODSNativeReasoningArgs -Executable $formatOnly -Mode "off" -FallbackFormat "none") @("--reasoning-format", "none") "no budget flag"
     Assert-Reasoning (Get-ODSNativeReasoningArgs -Executable $removed -Mode "off" -FallbackFormat "none") @("--reasoning-format", "none") "removed flag"
     Assert-Reasoning (Get-ODSNativeReasoningArgs -Executable $failing -Mode "off" -FallbackFormat "none") @("--reasoning-format", "none") "help exits non-zero"
 

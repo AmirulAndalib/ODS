@@ -24,7 +24,9 @@
 # Native Windows does the same through installers/windows/lib/
 # native-llama-args.ps1 (Get-ODSNativeReasoningArgs), a Bash probe in
 # scripts/bootstrap-upgrade.sh and the host agent: --reasoning on runtimes that
-# list it (b9014), --reasoning-format on older ones (b8248).
+# list it (b9014), --reasoning-format on older ones (b8248), plus
+# --reasoning-budget 0 for off where the binary has it, which is what disables
+# thinking on b8248.
 # tests/test-windows-native-checkpoint-args.ps1 checks the helper.
 
 set -euo pipefail
@@ -76,8 +78,9 @@ for target in installers/windows/install-windows.ps1 installers/windows/ods.ps1;
         fail "$target must choose --reasoning or --reasoning-format with Get-ODSNativeReasoningArgs"
     fi
 done
-if grep -q 'windows_native_reasoning_mode' "$ROOT_DIR/scripts/bootstrap-upgrade.sh" \
-    && grep -q '"--reasoning", $env:ODS_WIN_REASONING_MODE' "$ROOT_DIR/scripts/bootstrap-upgrade.sh"; then
+if grep -q 'windows_native_reasoning_flag' "$ROOT_DIR/scripts/bootstrap-upgrade.sh" \
+    && grep -q '"--reasoning", $env:ODS_WIN_REASONING_MODE' "$ROOT_DIR/scripts/bootstrap-upgrade.sh" \
+    && grep -q '"--reasoning-budget", "0"' "$ROOT_DIR/scripts/bootstrap-upgrade.sh"; then
     pass "scripts/bootstrap-upgrade.sh passes --reasoning to Windows runtimes that have it"
 else
     fail "scripts/bootstrap-upgrade.sh must pass --reasoning to Windows runtimes that have it"

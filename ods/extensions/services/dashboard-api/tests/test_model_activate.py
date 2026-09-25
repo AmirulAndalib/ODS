@@ -2897,8 +2897,13 @@ class TestLaunchNativeLlamaServer:
             ("-rea, --reasoning [on|off|auto]\n--reasoning-format FORMAT\n", 0, "off", ["--reasoning", "off"]),
             ("-rea, --reasoning [on|off|auto]\n--reasoning-format FORMAT\n", 0, "", ["--reasoning", "off"]),
             ("-rea, --reasoning [on|off|auto]\n--reasoning-format FORMAT\n", 0, "on", ["--reasoning", "on"]),
-            # b8248 has only the format; so does a mode that is not off/on/auto.
-            ("--reasoning-format FORMAT\n--reasoning-budget N\n", 0, "off", ["--reasoning-format", "none"]),
+            # b8248 has no --reasoning: keep the format, and for off add
+            # --reasoning-budget 0, which disables thinking there.
+            ("--reasoning-format FORMAT\n--reasoning-budget N\n", 0, "off",
+             ["--reasoning-format", "none", "--reasoning-budget", "0"]),
+            ("--reasoning-format FORMAT\n--reasoning-budget N\n", 0, "on", ["--reasoning-format", "deepseek"]),
+            ("--reasoning-format FORMAT\n", 0, "off", ["--reasoning-format", "none"]),
+            # A mode that is not off/on/auto keeps the format mapping.
             ("-rea, --reasoning [on|off|auto]\n", 0, "deepseek", ["--reasoning-format", "deepseek"]),
             # An unreadable --help keeps the previous behaviour.
             ("-rea, --reasoning [on|off|auto]\n", 1, "off", ["--reasoning-format", "none"]),
@@ -2939,10 +2944,10 @@ class TestLaunchNativeLlamaServer:
         )
 
         cmd = calls[0]
-        flag = expected[0]
-        assert cmd[cmd.index(flag):cmd.index(flag) + 2] == expected
-        other = "--reasoning-format" if flag == "--reasoning" else "--reasoning"
-        assert other not in cmd
+        start = cmd.index(expected[0])
+        assert cmd[start:start + len(expected)] == expected
+        for flag in ("--reasoning", "--reasoning-format", "--reasoning-budget"):
+            assert (flag in cmd) == (flag in expected), flag
 
     def test_llm_bridge_is_disabled_before_native_bind(self, monkeypatch, tmp_path):
         env = {

@@ -9,10 +9,13 @@
    defaults (installer pulls, tier maps, host agent fallback, catalog entries)
    must match the Compose default exactly.
 
-2. Intel, Apple Docker, the Intel Arc local build and native Windows run the
-   same llama.cpp build as NVIDIA/CPU. The Arc build checks the tag's commit,
-   and the Windows installer checks the release archive's SHA-256 for every
-   tag it can download.
+2. The Intel and Apple Docker images and native Windows pin the same
+   llama.cpp build as NVIDIA/CPU, and the Intel Arc local build's source
+   defaults name it (that image is not built by the installer). The Arc build
+   checks the tag's commit, and the Windows installer checks the release
+   archive's SHA-256 for every tag it can download, before downloading.
+   Neither Intel overlay sets SYCL_CACHE_PERSISTENT, which crashes the oneAPI
+   2025.3 runtime in the b9014 image.
 
 3. NVIDIA never gets `--split-mode row`. llama.cpp removed CUDA row split in
    b9890 (ggml-org/llama.cpp#24216): the flag still parses, but model load
@@ -102,7 +105,7 @@ def build_of(ref: str) -> str:
 
 
 def check_other_backends(errors: list[str]) -> None:
-    """Intel, Apple Docker, the Arc build and native Windows run the default build."""
+    """Intel/Apple images, Arc source defaults and native Windows pin the default build."""
     default_build = build_of(compose_default("docker-compose.nvidia.yml"))
     intel = compose_default("docker-compose.intel.yml")
     apple_match = re.search(r"^\s*image:\s*(\S+)", (ROOT_DIR / "docker-compose.apple.yml").read_text(encoding="utf-8"), re.M)
@@ -139,10 +142,20 @@ def check_other_backends(errors: list[str]) -> None:
         if tag not in sums:
             errors.append(f"constants.ps1: no SHA-256 for the Windows Vulkan archive of {tag}")
     verify = installer.find("LLAMA_CPP_VULKAN_SHA256[$script:LLAMA_CPP_RELEASE_TAG]")
-    hashing = installer.find("Get-FileHash -LiteralPath $llamaZip -Algorithm SHA256")
+    download = installer.find("Invoke-DownloadWithRetry -Url $script:LLAMA_CPP_VULKAN_URL")
+    hashing = installer.find("Get-FileHash -LiteralPath $llamaZip -Algorithm SHA256", max(download, 0))
     extract = installer.find("Invoke-ExtractionWithRetry -ZipPath $llamaZip")
-    if not (0 <= verify < hashing < extract):
-        errors.append("install-windows.ps1: the llama-server archive must be checked against its pinned SHA-256 before extraction")
+    if not (0 <= verify < download < hashing < extract):
+        errors.append("install-windows.ps1: the pinned SHA-256 must be looked up before the download and checked before extraction")
+
+    for name in ("docker-compose.intel.yml", "docker-compose.arc.yml"):
+        text = (ROOT_DIR / name).read_text(encoding="utf-8")
+        if re.search(r"^\s*-\s*SYCL_CACHE_PERSISTENT=", text, re.M):
+            errors.append(f"{name}: must not pass SYCL_CACHE_PERSISTENT to llama-server")
+        if "ONEAPI_DEVICE_SELECTOR=${ONEAPI_DEVICE_SELECTOR:-level_zero:gpu}" not in text:
+            errors.append(f"{name}: ONEAPI_DEVICE_SELECTOR must come from .env (level_zero:0 on multi-GPU hosts)")
+    if re.search(r"^SYCL_CACHE_PERSISTENT=", (ROOT_DIR / "installers/phases/06-directories.sh").read_text(encoding="utf-8"), re.M):
+        errors.append("06-directories.sh: must not write SYCL_CACHE_PERSISTENT")
 
 
 def bash_case(text: str, anchor: str, variables: dict[str, str], result: str) -> str:
@@ -183,7 +196,7 @@ def main() -> int:
         for error in errors:
             print(f"  - {error}")
         return 1
-    print("[PASS] llama.cpp images are tag@digest pinned and agree; every backend runs the default build; NVIDIA never uses row split")
+    print("[PASS] llama.cpp images are tag@digest pinned and agree; Intel/Apple/Windows pin the default build; NVIDIA never uses row split")
     return 0
 
 
