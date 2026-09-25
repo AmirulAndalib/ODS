@@ -329,6 +329,11 @@ def main() -> int:
     assert "SYSTEM_RAM_GB=${RAM_GB:-0}" in directories
     assert "strongest installable hardware-fit model" in detection
     assert '_selector_env="$(_run_catalog_selector 2>>' in detection
+    # The pick is planned at the Hermes floor (installers/lib/model-selector.sh).
+    assert '--min-context "$ODS_HERMES_MIN_CONTEXT"' in detection
+    selector_lib = (ROOT / "installers" / "lib" / "model-selector.sh").read_text(encoding="utf-8")
+    assert '--ram-gb "${RAM_GB:-0}"' in selector_lib
+    assert "ODS_HERMES_MIN_CONTEXT=65536" in selector_lib
     assert 'PIXEL_AGENT_MODEL_READY:-unknown' in features
     assert "Portal adaptive mode will use this best-fit local model" in features
     assert "catalog testing is performance guidance, not an access gate" in features

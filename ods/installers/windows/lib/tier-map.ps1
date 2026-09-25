@@ -741,6 +741,58 @@ function Test-CatalogMemoryFits {
     return ($RequiredGB -le ($CapacityGB + $script:LEGACY_FIT_TOLERANCE_GIB))
 }
 
+function Test-CatalogModelContextFit {
+    <#
+    .SYNOPSIS
+        Would the configured model fit at ContextLength on this hardware?
+    .DESCRIPTION
+        Mirrors model_selection.check_fit (select-model.py --check-fit), used by
+        the Hermes floor re-check in phases/03-features.ps1. Returns $true or
+        $false, or $null when unknown (selector disabled, no catalog, or a
+        model outside the catalog), in which case the caller raises as before.
+    #>
+    param(
+        [hashtable]$TierConfig,
+        [hashtable]$GpuInfo,
+        [int]$SystemRamGB,
+        [string]$SourceRoot,
+        [int]$ContextLength
+    )
+
+    if ($env:ODS_DISABLE_CATALOG_MODEL_SELECTOR -eq "true") { return $null }
+    $catalogPath = Join-Path $SourceRoot "config\model-library.json"
+    if (-not (Test-Path $catalogPath)) { return $null }
+    try {
+        $catalog = Get-Content $catalogPath -Raw | ConvertFrom-Json
+    } catch {
+        return $null
+    }
+    $model = $null
+    foreach ($entry in $catalog.models) {
+        if (($TierConfig.GgufFile -and "$($entry.gguf_file)" -eq "$($TierConfig.GgufFile)") -or
+            (-not $TierConfig.GgufFile -and $TierConfig.LlmModel -and "$($entry.llm_model_name)" -eq "$($TierConfig.LlmModel)")) {
+            $model = $entry
+            break
+        }
+    }
+    if (-not $model) { return $null }
+    $runtimeProfile = $null
+    if ($TierConfig.RuntimeProfile) {
+        $runtimeProfile = @($model.runtime_profiles | Where-Object { $_.id -eq $TierConfig.RuntimeProfile }) | Select-Object -First 1
+    }
+    $memory = Get-CatalogModelSelectorMemory -GpuInfo $GpuInfo -SystemRamGB $SystemRamGB
+    $estimate = Get-CatalogRuntimeEstimate -Model $model -RuntimeProfile $runtimeProfile -ContextLength $ContextLength
+    # A profile's measured budget applies only at the profile's own context.
+    $authored = 0.0
+    if ($runtimeProfile -and $runtimeProfile.context_length -and [int]$runtimeProfile.context_length -eq $ContextLength -and
+        $null -ne $runtimeProfile.estimated_required_gb) {
+        $authored = Get-CatalogPositiveNumber $runtimeProfile.estimated_required_gb
+    }
+    $required = if ($authored -gt 0) { [Math]::Round($authored, 2) } elseif ($memory.MemoryClass -eq "cpu") { $estimate.TotalGiB } else { $estimate.DeviceGiB }
+    $architecture = ($authored -le 0 -and $estimate.Method -eq "architecture")
+    return [bool](Test-CatalogMemoryFits -RequiredGB $required -CapacityGB $memory.CapacityGB -MemoryClass $memory.MemoryClass -ArchitectureEstimate $architecture)
+}
+
 function Get-CatalogRuntimeProfile {
     param(
         [object]$Model,
@@ -1108,47 +1160,6 @@ function Resolve-CatalogModelRecommendation {
 
 # Hermes needs 64K. Check whether the resolved model still fits at a larger
 # context before raising it (installers/windows/phases/03-features.ps1).
-function Test-CatalogModelContextFit {
-    param(
-        [hashtable]$TierConfig,
-        [hashtable]$GpuInfo,
-        [int]$SystemRamGB,
-        [string]$SourceRoot,
-        [int]$ContextLength
-    )
-
-    $catalogPath = Join-Path $SourceRoot "config\model-library.json"
-    if (-not (Test-Path $catalogPath)) { return $null }
-    try { $catalog = Get-Content $catalogPath -Raw | ConvertFrom-Json } catch { return $null }
-    $model = $null
-    foreach ($candidate in $catalog.models) {
-        if (-not (Test-CatalogModelSourceAllowed -Model $candidate)) { continue }
-        if ("$($candidate.llm_model_name)" -eq "$($TierConfig.LlmModel)" -or "$($candidate.gguf_file)" -eq "$($TierConfig.GgufFile)") {
-            $model = $candidate
-            break
-        }
-    }
-    if (-not $model) { return $null }
-    $runtimeProfile = $null
-    if ($TierConfig.RuntimeProfile -and $model.runtime_profiles) {
-        $runtimeProfile = @($model.runtime_profiles | Where-Object { $_.id -eq $TierConfig.RuntimeProfile }) | Select-Object -First 1
-    }
-    $memory = Get-CatalogModelSelectorMemory -GpuInfo $GpuInfo -SystemRamGB $SystemRamGB
-    $estimate = Get-CatalogRuntimeEstimate -Model $model -RuntimeProfile $runtimeProfile -ContextLength $ContextLength
-    $authored = 0.0
-    if ($runtimeProfile -and $null -ne $runtimeProfile.estimated_required_gb -and [int]$runtimeProfile.context_length -eq $ContextLength) {
-        $authored = Get-CatalogPositiveNumber $runtimeProfile.estimated_required_gb
-    }
-    $required = if ($authored -gt 0) { $authored } elseif ($memory.MemoryClass -eq "cpu") { $estimate.TotalGiB } else { $estimate.DeviceGiB }
-    $architecture = ($authored -le 0 -and $estimate.Method -eq "architecture")
-    return [pscustomobject]@{
-        Fits = (Test-CatalogMemoryFits -RequiredGB $required -CapacityGB $memory.CapacityGB -MemoryClass $memory.MemoryClass -ArchitectureEstimate $architecture)
-        RequiredGB = [double]$required
-        CapacityGB = [double]$memory.CapacityGB
-        MemoryClass = $memory.MemoryClass
-    }
-}
-
 function ConvertTo-TierFromGpu {
     param(
         [hashtable]$GpuInfo,
