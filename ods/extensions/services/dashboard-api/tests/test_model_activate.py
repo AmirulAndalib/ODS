@@ -1493,6 +1493,164 @@ class TestLemonadeCompletionReady:
         assert proof == {}
         assert completion_calls == []
 
+    @staticmethod
+    def _capped_runtime(n_ctx_train, n_ctx, probes):
+        """llama.cpp b9014 caps a slot at the GGUF training context."""
+
+        def fake_run(cmd, **_kwargs):
+            url = next((str(part) for part in cmd if str(part).startswith("http")), "")
+            if url.endswith("/v1/models"):
+                probes.append(url)
+                body = json.dumps({
+                    "object": "list",
+                    "data": [{
+                        "id": "Qwen3-30B-A3B-Q4_K_M.gguf",
+                        "object": "model",
+                        "meta": {"n_ctx_train": n_ctx_train},
+                    }],
+                })
+            elif url.endswith("/props"):
+                body = json.dumps({"default_generation_settings": {"n_ctx": n_ctx}})
+            else:
+                body = ""
+            return subprocess.CompletedProcess(cmd, 0, stdout=body, stderr="")
+
+        return fake_run
+
+    @pytest.mark.parametrize("fast_poll_seconds", [0.0, 30.0])
+    def test_readiness_fails_fast_when_request_exceeds_training_context(
+        self, monkeypatch, fast_poll_seconds
+    ):
+        # Live tower2 2026-09-25: catalog asked for 131072 on a 40960-token
+        # GGUF; the model loaded in 4 s but the host agent reported
+        # identity=False for ~5.5 minutes, then rolled back.
+        probes = []
+        monkeypatch.setattr(_mod.subprocess, "run", self._capped_runtime(40960, 40960, probes))
+        monkeypatch.setattr(_mod.time, "sleep", lambda _s: None)
+        monkeypatch.setattr(_mod, "_chat_completion_ready", lambda *_a, **_k: True)
+        diagnosis = {}
+        proof = _mod._wait_for_model_readiness(
+            {"GPU_BACKEND": "nvidia", "OLLAMA_PORT": "11434", "CTX_SIZE": "131072"},
+            model_id="qwen3-30b-a3b-q4",
+            gguf_file="Qwen3-30B-A3B-Q4_K_M.gguf",
+            llm_model_name="qwen3-30b-a3b",
+            attempts=55,
+            initial_delay=0,
+            interval=0,
+            return_proof=True,
+            fast_poll_seconds=fast_poll_seconds,
+            fast_poll_interval=0.05,
+            diagnosis=diagnosis,
+        )
+        assert proof == {}
+        assert len(probes) == 1
+        assert diagnosis["final"] is True
+        assert diagnosis["reason"] == (
+            "Qwen3-30B-A3B-Q4_K_M.gguf is loaded but serves a 40960-token context; "
+            "131072 was requested, above the model's 40960-token training context "
+            "(llama.cpp caps the slot there)"
+        )
+
+    def test_readiness_keeps_polling_a_short_context_below_training_context(
+        self, monkeypatch
+    ):
+        # A runtime short of the request for another reason (for example a
+        # memory fit) is not proven final by the training context.
+        probes = []
+        monkeypatch.setattr(_mod.subprocess, "run", self._capped_runtime(262144, 32768, probes))
+        monkeypatch.setattr(_mod, "_chat_completion_ready", lambda *_a, **_k: True)
+        diagnosis = {}
+        proof = _mod._wait_for_model_readiness(
+            {"GPU_BACKEND": "nvidia", "OLLAMA_PORT": "11434", "CTX_SIZE": "65536"},
+            model_id="qwen3-30b-a3b-q4",
+            gguf_file="Qwen3-30B-A3B-Q4_K_M.gguf",
+            llm_model_name="qwen3-30b-a3b",
+            attempts=3,
+            initial_delay=0,
+            interval=0,
+            return_identity=True,
+            diagnosis=diagnosis,
+        )
+        assert proof == ""
+        assert len(probes) == 3
+        assert "final" not in diagnosis
+        assert diagnosis["reason"] == (
+            "Qwen3-30B-A3B-Q4_K_M.gguf is loaded but serves a 32768-token context; "
+            "65536 was requested"
+        )
+
+    def test_readiness_succeeds_at_the_native_training_context(self, monkeypatch):
+        probes = []
+        monkeypatch.setattr(_mod.subprocess, "run", self._capped_runtime(40960, 40960, probes))
+        monkeypatch.setattr(_mod, "_chat_completion_ready", lambda *_a, **_k: True)
+        diagnosis = {}
+        proof = _mod._wait_for_model_readiness(
+            {"GPU_BACKEND": "nvidia", "OLLAMA_PORT": "11434", "CTX_SIZE": "40960"},
+            model_id="qwen3-30b-a3b-q4",
+            gguf_file="Qwen3-30B-A3B-Q4_K_M.gguf",
+            llm_model_name="qwen3-30b-a3b",
+            attempts=3,
+            initial_delay=0,
+            interval=0,
+            return_proof=True,
+            require_exact_context=True,
+            diagnosis=diagnosis,
+        )
+        assert proof["identity"] == "Qwen3-30B-A3B-Q4_K_M.gguf"
+        assert proof["contextLength"] == 40960
+        assert diagnosis == {}
+
+
+class TestRuntimeLogExcerpt:
+    def test_excerpt_keeps_bounded_redacted_signal_lines(self):
+        noise = [f"print_info: tensor {index} loaded" for index in range(400)]
+        log = "\n".join(
+            noise
+            + [
+                "\x1b[33mllama_context: n_ctx_seq (131072) > n_ctx_train (40960) -- possible training context overflow\x1b[0m",
+                "srv    load_model: the slot context (131072) exceeds the training context of the model (40960) - capping",
+                "main: invalid argument --api-key sk-live-secret-value",
+                "error: Authorization: Bearer abc.def.ghi",
+                "x" * 600 + " error",
+                "main: server is listening on http://0.0.0.0:8080",
+            ]
+        )
+        excerpt = _mod._runtime_log_excerpt(log)
+        lines = excerpt.splitlines()
+        assert len(lines) <= _mod._RUNTIME_LOG_EXCERPT_MAX_LINES
+        assert len(excerpt) <= _mod._RUNTIME_LOG_EXCERPT_MAX_CHARS
+        assert all(len(line) <= 240 for line in lines)
+        assert "exceeds the training context of the model (40960) - capping" in excerpt
+        assert "\x1b[" not in excerpt
+        assert "sk-live-secret-value" not in excerpt
+        assert "abc.def.ghi" not in excerpt
+        assert excerpt.count("[redacted]") == 2
+        assert "tensor 12 loaded" not in excerpt
+
+    def test_excerpt_falls_back_to_the_log_tail_without_signal_lines(self):
+        log = "\n".join(f"line {index}" for index in range(30))
+        assert _mod._runtime_log_excerpt(log).splitlines() == [
+            f"line {index}" for index in range(18, 30)
+        ]
+        assert _mod._runtime_log_excerpt(None) == ""
+
+    def test_failed_container_log_read_never_raises(self, monkeypatch):
+        def broken_run(*_args, **_kwargs):
+            raise RuntimeError("docker unavailable")
+
+        monkeypatch.setattr(_mod.subprocess, "run", broken_run)
+        assert _mod._failed_llama_server_log_excerpt() == ""
+
+        seen = []
+
+        def logs_run(cmd, **kwargs):
+            seen.append((cmd, kwargs.get("stderr")))
+            return subprocess.CompletedProcess(cmd, 0, stdout="main: error loading model\n")
+
+        monkeypatch.setattr(_mod.subprocess, "run", logs_run)
+        assert _mod._failed_llama_server_log_excerpt() == "main: error loading model"
+        assert seen == [(["docker", "logs", "--tail", "400", "ods-llama-server"], subprocess.STDOUT)]
+
 
 # --- _write_lemonade_config ---
 
