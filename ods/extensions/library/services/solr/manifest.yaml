@@ -28,6 +28,8 @@ service:
     secret: true
     description: Random 64-hex initial ods administrator password; retain or rotate
       using the native security API.
+    format: hex64
+    generate: hex64
   ui_path: /
 tags:
 - search

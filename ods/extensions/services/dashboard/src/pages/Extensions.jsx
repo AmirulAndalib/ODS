@@ -12,7 +12,7 @@ import { createRecoveryTracker } from '../utils/recoveryTracker'
 import MetalMetricIcon from '../components/MetalMetricIcon'
 import FittedLibraryPage from '../components/FittedLibraryPage'
 import {
-  ExtensionSettingsFields, installPlanSettings, missingSettingsRefusal, saveExtensionSettings,
+  ExtensionSettingsFields, installPlanSettings, missingSettingsRefusal, saveExtensionSettings, settingProblem,
 } from '../components/ExtensionInstallSettings'
 import './extensions-refined.css'
 
@@ -420,8 +420,10 @@ export default function Extensions({ compact = false }) {
     const values = Object.fromEntries(fields.map(field => [field.key, settingValues[field.key] || '']))
     const showError = error => setConfirm(open => (open?.id === current.id
       ? { ...open, settings: { ...open.settings, error } } : open))
-    if (Object.values(values).some(value => !value.trim())) {
-      showError('Enter every required setting.')
+    // The button stays disabled until every value passes its declared
+    // format; the API checks the same format again before writing.
+    if (fields.some(field => settingProblem(field, values[field.key], values))) {
+      showError('Enter every required setting in its expected format.')
       return
     }
     const controller = new AbortController()
@@ -664,7 +666,8 @@ export default function Extensions({ compact = false }) {
               <button onClick={() => setConfirm(null)} autoFocus className="px-4 py-2 text-[10px] font-mono uppercase tracking-[0.16em] text-theme-text-muted/65 hover:text-theme-text transition-colors">Cancel</button>
               <button
                 onClick={confirmAction}
-                disabled={settingsBusy || confirm.settings?.loading === true}
+                disabled={settingsBusy || confirm.settings?.loading === true
+                  || (confirm.settings?.fields || []).some(field => settingProblem(field, settingValues[field.key], settingValues))}
                 className={`px-4 py-2 text-[10px] font-semibold uppercase tracking-[0.08em] rounded-lg transition-colors disabled:opacity-50 ${
                   confirm.action === 'uninstall' || confirm.action === 'purge' ? 'bg-red-500/15 text-red-400 hover:bg-red-500/25' :
                   'bg-theme-accent/15 text-theme-accent-light hover:bg-theme-accent/25'

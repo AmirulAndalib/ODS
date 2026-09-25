@@ -1402,7 +1402,8 @@ def _compose_required_variables(extension_dir: Path) -> set[str]:
     return names
 
 
-def _missing_owner_configuration(service_id: str, *, installed: bool, setup_hook_runs: bool) -> tuple[str, list[dict]]:
+def _missing_owner_configuration(service_id: str, *, installed: bool,
+                                 setup_hook_runs: bool) -> tuple[str, list[dict], list[dict]]:
     """Required settings the owner must supply before ODS starts this extension.
 
     Uses the same definition lookup, declaration rules and presence check as
@@ -1412,46 +1413,71 @@ def _missing_owner_configuration(service_id: str, *, installed: bool, setup_hook
     default, so only the settings its Compose file cannot resolve without are
     requested there. A setup hook that runs first writes its own settings.
 
+    Before a fresh installation, saved values are also checked against their
+    declared format (the third item). Only the result of that check is used:
+    a value never leaves this function. An installed definition is not
+    checked, because its data may already depend on the saved value.
+
     Unreadable declarations are left to the operation itself: they must not
     turn into a new refusal here, and the host agent disables a definition
     that Compose cannot resolve instead of leaving it in the merged project.
     """
     from config import _read_env_value
     from extension_install_plan import configuration_fields, declares_setup_hook
+    from extension_setting_formats import setting_problems
 
     try:
         service = _installation_plan_service(service_id)
         if not isinstance(service, dict) or (setup_hook_runs and declares_setup_hook(service)):
-            return service_id, []
+            return service_id, [], []
         fields = configuration_fields(service_id, service, lambda key: bool(_read_env_value(key)))
         missing = [field for field in fields if field["required"] and not field["configured"]]
         if installed and missing:
             enforced = _compose_required_variables(USER_EXTENSIONS_DIR / service_id)
             missing = [field for field in missing if field["key"] in enforced]
+        invalid = [] if installed else setting_problems(
+            fields, _read_env_value, {field["key"] for field in fields if field["configured"]})
     except (ValueError, OSError, UnicodeError, yaml.YAMLError):
-        return service_id, []
+        return service_id, [], []
     name = service.get("name")
     name = name.strip()[:80] if isinstance(name, str) and name.strip() else service_id
-    return name, [{"key": field["key"], "secret": field["secret"], "description": field["description"]}
-                  for field in missing]
+    return name, [{"key": field["key"], "secret": field["secret"], "description": field["description"],
+                   "format": field["format"]} for field in missing], invalid
 
 
 def _refuse_missing_owner_configuration(service_id: str, *, installed: bool, setup_hook_runs: bool,
                                         outcome: str) -> None:
-    """Fail before any file or container change when required settings are absent."""
-    name, missing = _missing_owner_configuration(
+    """Fail before any file or container change when required settings are absent.
+
+    Also fails when a saved value cannot pass the extension's own format
+    check: installing would only start a container that restarts until the
+    install times out. ODS never replaces a saved setting, so the owner is
+    told which one to correct; the value itself is never included.
+    """
+    name, missing, invalid = _missing_owner_configuration(
         service_id, installed=installed, setup_hook_runs=setup_hook_runs)
-    if not missing:
-        return
-    keys = [field["key"] for field in missing]
-    raise HTTPException(status_code=400, detail={
-        "code": "missing_configuration",
-        "service_id": service_id,
-        "message": (f"{name} needs required settings before it can be {outcome}: "
-                    f"{', '.join(keys)}. Nothing was changed."),
-        "missing_configuration": keys,
-        "configuration": missing,
-    })
+    if missing:
+        keys = [field["key"] for field in missing]
+        raise HTTPException(status_code=400, detail={
+            "code": "missing_configuration",
+            "service_id": service_id,
+            "message": (f"{name} needs required settings before it can be {outcome}: "
+                        f"{', '.join(keys)}. Nothing was changed."),
+            "missing_configuration": keys,
+            "configuration": missing,
+        })
+    if invalid:
+        keys = ", ".join(dict.fromkeys(problem["key"] for problem in invalid))
+        raise HTTPException(status_code=422, detail={
+            "code": "invalid_configuration",
+            "service_id": service_id,
+            "message": (f"{name} cannot be {outcome}: a saved setting does not have the format it requires. "
+                        f"{' '.join(problem['message'] for problem in invalid)} ODS does not replace saved "
+                        f"settings; correct or remove {keys} in Settings (environment editor), then try again. "
+                        "Nothing was changed."),
+            "invalid_configuration": [{"key": problem["key"], "expected": problem["expected"]}
+                                      for problem in invalid],
+        })
 
 
 @router.get("/api/extensions/{service_id}/install-plan")
@@ -1459,6 +1485,12 @@ async def extension_install_plan(service_id: str, api_key: str = Depends(verify_
     """Inspect dependency order and missing settings without starting installation."""
     from config import _read_env_value
     from extension_install_plan import build_install_plan
+    from extension_setting_formats import setting_problems
+
+    def saved_problems(fields):
+        # Setting names only: saved values are compared here and never returned.
+        saved = {field["key"] for field in fields if field["configured"]}
+        return list(dict.fromkeys(problem["key"] for problem in setting_problems(fields, _read_env_value, saved)))
 
     _validate_service_id(service_id)
     snapshot = await extensions_catalog(api_key=api_key)
@@ -1471,6 +1503,7 @@ async def extension_install_plan(service_id: str, api_key: str = Depends(verify_
         return await asyncio.to_thread(
             build_install_plan, service_id, entries,
             _installation_plan_service, lambda key: bool(_read_env_value(key)), ALWAYS_ON_SERVICES,
+            saved_problems,
         )
     except (ValueError, OSError, yaml.YAMLError) as exc:
         # Never include upstream file contents or environment values in errors.
@@ -2505,6 +2538,41 @@ async def extension_associate_project(service_id: str, request: Request, api_key
     return {"extensionId": service_id, "projects": projects, "scope": "project-association"}
 
 
+def _refuse_nonconforming_settings(service_id: str, values: dict[str, str]) -> None:
+    """Check submitted values against their declared format before any write.
+
+    Uses the install plan's definition lookup and declaration rules. A value
+    the extension's own start-up check rejects would otherwise be saved and
+    the install would end in a restart loop without a reason. The 422 names
+    each setting and the expected format; submitted values are never echoed.
+    Keys the definition does not declare are left to the host agent, which
+    refuses them.
+    """
+    from config import _read_env_value
+    from extension_install_plan import configuration_fields
+    from extension_setting_formats import setting_problems
+
+    try:
+        service = _installation_plan_service(service_id)
+        if not isinstance(service, dict):
+            raise ValueError("Extension definition is not a mapping")
+        fields = configuration_fields(service_id, service, lambda key: False)
+    except (ValueError, OSError, UnicodeError, yaml.YAMLError):
+        raise HTTPException(status_code=400, detail="Extension settings declarations could not be read") from None
+    # A setting that must differ from another is compared with the other's
+    # submitted or saved value; only whether they are equal is used.
+    invalid = setting_problems(fields, lambda key: values[key] if key in values else _read_env_value(key),
+                               set(values))
+    if not invalid:
+        return
+    raise HTTPException(status_code=422, detail={
+        "code": "invalid_configuration",
+        "service_id": service_id,
+        "message": " ".join(problem["message"] for problem in invalid) + " Nothing was saved.",
+        "invalid_configuration": [{"key": problem["key"], "expected": problem["expected"]} for problem in invalid],
+    })
+
+
 @router.post("/api/extensions/{service_id}/configure")
 async def extension_configure(service_id: str, request: Request, api_key: str = Depends(verify_api_key)):
     """Write-only owner input; values never enter a model tool receipt."""
@@ -2524,6 +2592,7 @@ async def extension_configure(service_id: str, request: Request, api_key: str = 
             raise ValueError()
     except (ValueError, UnicodeError):
         raise HTTPException(status_code=400, detail="Invalid extension configuration") from None
+    await asyncio.to_thread(_refuse_nonconforming_settings, service_id, values)
     try:
         result = await asyncio.to_thread(request_agent_json, "POST", "/v1/extensions/configure",
                                          payload={"service_id": service_id, "values": values}, timeout=30)

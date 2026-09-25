@@ -1,6 +1,8 @@
 """Read-only installation prerequisites for the Portal's catalog command."""
 import re
 
+from extension_setting_formats import SettingFormatError, parse_setting_format
+
 ID = re.compile(r'[a-z0-9][a-z0-9_-]{0,63}')
 KEY = re.compile(r'[A-Z][A-Z0-9_]{0,127}')
 
@@ -43,12 +45,25 @@ def configuration_fields(key, svc, configured):
         description = item.get('description', '')
         if not isinstance(description, str):
             raise InstallPlanError(f'Invalid configuration description: {key}')
+        try:
+            value_format = parse_setting_format(item)
+        except SettingFormatError:
+            raise InstallPlanError(f'Invalid configuration format: {key}') from None
+        # The expected format, never a value: the dialog shows and checks it.
         fields.append({'key': name, 'required': required, 'secret': secret, 'configured': present,
-                       'description': description[:500]})
+                       'description': description[:500], 'format': value_format})
+    if any(other not in seen for field in fields for other in (field['format'] or {}).get('distinctFrom', [])):
+        raise InstallPlanError(f'Undeclared distinct_from setting: {key}')
     return fields
 
 
-def build_install_plan(target, entries, load_service, configured, protected=()):
+def build_install_plan(target, entries, load_service, configured, protected=(), saved_problems=None):
+    """Dependency-ordered steps with each step's settings (presence and format only).
+
+    ``saved_problems(fields)`` names saved settings whose value fails its
+    declared format. A fresh install of such a step is blocked: its container
+    would only restart, and ODS never replaces a saved setting.
+    """
     if not isinstance(target, str) or not ID.fullmatch(target):
         raise InstallPlanError('Invalid extension ID')
     catalog = {}
@@ -102,6 +117,11 @@ def build_install_plan(target, entries, load_service, configured, protected=()):
         if action == 'install' and row.get('installable') is not True:
             action, reason = 'blocked', 'No installable recipe for this host'
         fields = configuration_fields(key, svc, configured)
+        if action == 'install' and saved_problems is not None and not declares_setup_hook(svc):
+            invalid = saved_problems(fields)
+            if invalid:
+                action, reason = 'blocked', ('Correct saved settings that do not have their required format: '
+                                             + ', '.join(invalid))
         missing = [field['key'] for field in fields if field['required'] and not field['configured']]
         steps.append({'extensionId': key, 'status': status, 'action': action,
                       'dependsOn': deps, 'configuration': fields,
