@@ -27,7 +27,7 @@ import { routePlaygroundTool, requestsNewPlaygroundProject } from "./playground-
 import { workspaceMutationFiles } from "./workspace-projects.mjs";
 import {WORKSPACE_BUNDLE_TOOL, normalizeWorkspaceBundle} from './workspace-bundle.mjs';
 import { PREVIEW_INSPECTION_TOOL, requestsVisibilityInteraction, requestsBehaviorPreservation, boundVisibilityInspection, boundStaticPreviewInspection,
-  visibilityInspectionMatches, visibilityInspectionInstruction } from './preview-interaction-assurance.mjs';
+  boundInspectionPageErrors, pageErrorRepairInstruction, visibilityInspectionMatches, visibilityInspectionInstruction } from './preview-interaction-assurance.mjs';
 import { workspaceRevalidationCandidate, completedPreviewInspection, boundedPreviewVerification } from "./preview-revalidation.mjs";
 import { boundedPreviewDelivery } from './preview-delivery-recovery.mjs';
 
@@ -9306,6 +9306,9 @@ export function createToolLoopGuard({
           : retainInteraction ? priorProof : undefined;
         state.workspaceVisibilityInspectionUnavailable =
           inspected.result?.details?.errorCode === 'unavailable';
+        // Selects the repair instruction only; bound to this exact snapshot.
+        state.workspaceInspectionPageErrors = !event?.error
+          ? boundInspectionPageErrors(inspected.params, inspected.result, state.workspacePreview) : undefined;
       }
     }
     state.previewVerificationGeneration = (state.previewVerificationGeneration ?? 0) + 1;
@@ -10446,7 +10449,7 @@ export function createToolLoopGuard({
             !workspaceVisibilityInspectionPassed(state) &&
             !state.workspaceVisibilityInspectionUnavailable) return {
           stage: 'workspace-preview-interaction',
-          instruction: visibilityInspectionInstruction(state.workspacePreview),
+          instruction: visibilityInspectionInstruction(state.workspacePreview, state.workspaceInspectionPageErrors),
         };
         return undefined;
       }
@@ -10704,9 +10707,12 @@ export function createToolLoopGuard({
             !workspaceVisibilityInspectionPassed(state)) {
           return '[ODS Pixel next step] ' + (state.workspaceVisibilityInspectionUnavailable
             ? 'Keep the published preview, but report the requested interaction as unverified because inspection is unavailable. Do not claim the interaction works.'
-            : visibilityInspectionInstruction(state.workspacePreview));
+            : visibilityInspectionInstruction(state.workspacePreview, state.workspaceInspectionPageErrors));
         }
-        return `[ODS Pixel next step] ${WORKSPACE_PREVIEW_COMPLETE_REASON}`;
+        // Page errors never block delivery, but must not be followed by
+        // "give the final result" coaching as a second, conflicting step.
+        return `[ODS Pixel next step] ${pageErrorRepairInstruction(state.workspacePreview,
+          state.workspaceInspectionPageErrors) ?? WORKSPACE_PREVIEW_COMPLETE_REASON}`;
       }
       const nextPath = workspacePreviewNextKnownReadPath(state);
       return nextPath
