@@ -61,7 +61,7 @@ for(const deferred of [false,true]) for(const wrapped of [false,true]) {
   });
 }
 
-test('identical execution advice is not repeated on every completed exec',()=>{
+test('execution receipt facts stay on every completed exec while stage coaching is deduplicated',()=>{
   const guard=createToolLoopGuard();
   const context={agentId:'pixel',runId:'run',sessionId:'owner-session',sessionKey:'owner-key'};
   guard.observeRun(context,'pixel',{prompt:'Run the existing Python unit tests and report the result.'});
@@ -75,7 +75,8 @@ test('identical execution advice is not repeated on every completed exec',()=>{
     return projected.content.filter(x=>x.type==='text').map(x=>x.text).join('\n');
   };
   assert.match(run('exec-1',0),/Exec returned completed with exit code 0\./);
-  assert.doesNotMatch(run('exec-2',0),/\[ODS Pixel execution\]/);
+  // Each receipt states whether that result has a background session; never drop it.
+  assert.match(run('exec-2',0),/Exec returned completed with exit code 0\./);
   // Different facts are new advice and are always delivered.
   assert.match(run('exec-3',1),/Exec returned completed with exit code 1\./);
 });

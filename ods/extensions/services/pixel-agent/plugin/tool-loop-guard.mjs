@@ -10635,10 +10635,11 @@ export function createToolLoopGuard({
       }]
       : Array.isArray(compactMessage.content) ? [...compactMessage.content] : [];
     // Persisted results reach the live model request. Repeating the same
-    // coaching on every result makes the context self-similar, and local
-    // models then loop on one tool call. Deliver an instruction whenever it
-    // differs from the last one delivered in its slot, and repeat unchanged
-    // text only after a bounded number of results.
+    // stage coaching on every result makes the context self-similar, and
+    // local models then loop on one tool call. Deliver an instruction whenever
+    // it differs from the last one delivered in its slot, and repeat unchanged
+    // text only after a bounded number of results. Execution receipt facts
+    // describe each individual result and are always kept.
     if (state) state.persistedResultCount = (state.persistedResultCount ?? 0) + 1;
     const coachingDue = (slot, text) => {
       if (!state || typeof text !== 'string') return true;
@@ -10649,8 +10650,7 @@ export function createToolLoopGuard({
       return true;
     };
     if (executionGuidance && !pending.pythonSyntaxGuidance && !content.some(block =>
-        block?.type === 'text' && /\[ODS Pixel execution\]/.test(block.text)) &&
-        coachingDue('execution', executionGuidance))
+        block?.type === 'text' && /\[ODS Pixel execution\]/.test(block.text)))
       content.push({type:'text',text:executionGuidance});
     if (workspaceStageInstruction && coachingDue('workspace', workspaceStageInstruction)) {
       content.push({ type: "text", text: workspaceStageInstruction });
