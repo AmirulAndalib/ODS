@@ -9412,7 +9412,7 @@ export function createToolLoopGuard({
           ...(visibilityObligation.transition ? {transition:visibilityObligation.transition} : {}),
         });
         const inheritedVisibility = state.workspaceInheritedVisibilityObligation;
-        const inheritsVisibility = inheritedVisibility?.sessionId === sessionId &&
+        const inheritsVisibility = Boolean(inheritedVisibility) && inheritedVisibility.sessionId === sessionId &&
           inheritedVisibility.sessionKey === state.currentSessionKey && inheritedVisibility.ownerIntent === ownerIntent;
         state.workspaceVisibilityInteractionRequired = workspacePreviewInspectionAvailable &&
           state.workspacePreviewRequired && (requestsVisibilityInteraction(ownerLaneText(ownerIntent)) || inheritsVisibility);
