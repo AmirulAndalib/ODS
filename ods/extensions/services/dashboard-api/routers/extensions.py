@@ -555,16 +555,50 @@ def _split_port_host(port_str: str) -> tuple[Optional[str], str]:
     return host, rest
 
 
+# Accelerator access a curated library recipe may request, only from its own
+# backend overlay (compose.nvidia.yaml / compose.amd.yaml) and only in the
+# shapes ODS core uses for GPU workloads: docker-compose.amd.yml passes /dev/kfd
+# and /dev/dri through unchanged, and docker-compose.nvidia.yml plus the
+# comfyui/whisper overlays reserve driver nvidia with capabilities [gpu] by
+# count or device_ids. scripts/resolve-compose-stack.sh mirrors this policy.
+_TRUSTED_LIBRARY_AMD_DEVICES = frozenset({"/dev/kfd:/dev/kfd", "/dev/dri:/dev/dri"})
+_NVIDIA_DEVICE_ID_RE = re.compile(r"[A-Za-z0-9_.:${}-]+")
+
+
+def _is_ods_nvidia_gpu_reservation(entry) -> bool:
+    """True for one reservations.devices entry in the shape ODS core writes."""
+    if not isinstance(entry, dict) or set(entry) - {"driver", "capabilities", "count", "device_ids"}:
+        return False
+    if entry.get("driver") != "nvidia" or entry.get("capabilities") != ["gpu"]:
+        return False
+    if "count" in entry and "device_ids" in entry:
+        return False
+    count = entry.get("count", "all")
+    if count != "all" and not (type(count) is int and count >= 1):
+        return False
+    device_ids = entry.get("device_ids", ["all"])
+    return isinstance(device_ids, list) and bool(device_ids) and all(
+        isinstance(item, str) and _NVIDIA_DEVICE_ID_RE.fullmatch(item) for item in device_ids)
+
+
 def _scan_compose_content(
     compose_path: Path,
     *,
     trusted: bool = False,
+    accelerator: str | None = None,
     skip_name_collision: bool = False,
     skip_gpu_passthrough_check: bool = False,
     skip_root_user_check: bool = False,
 ) -> None:
-    """Reject compose files containing dangerous directives."""
+    """Reject compose files containing dangerous directives.
+
+    ``accelerator`` names the backend of the overlay being scanned. Only with
+    ``trusted`` does it permit that backend's GPU ("nvidia" or "amd"), in
+    exactly the ODS core shape; any other device request is rejected.
+    """
     allowed_trusted_extra_hosts = {"host.docker.internal:host-gateway"}
+    if not trusted:
+        accelerator = None
 
     try:
         data = yaml.safe_load(compose_path.read_text(encoding="utf-8"))
@@ -730,15 +764,25 @@ def _scan_compose_content(
                         status_code=400,
                         detail=f"Extension rejected: dangerous security_opt '{opt}' in {svc_name}",
                     )
-        if svc_def.get("devices"):
+        devices = svc_def.get("devices")
+        if devices and accelerator != "amd":
             raise HTTPException(
                 status_code=400,
                 detail=f"Extension rejected: devices in {svc_name}",
             )
+        if devices and (not isinstance(devices, list) or any(
+                not isinstance(entry, str) or entry not in _TRUSTED_LIBRARY_AMD_DEVICES
+                for entry in devices)):
+            raise HTTPException(
+                status_code=400,
+                detail=f"Extension rejected: unsupported devices in {svc_name}",
+            )
         # Block Docker Compose v2 GPU passthrough for user extensions.
         # Built-ins (e.g. docker-compose.nvidia.yml) legitimately request
         # NVIDIA devices via deploy.resources.reservations.devices, so the
-        # caller passes skip_gpu_passthrough_check=True for those.
+        # caller passes skip_gpu_passthrough_check=True for those. A curated
+        # library recipe's compose.nvidia.yaml (accelerator="nvidia") may
+        # request only the ODS core shape.
         #
         # Each level checked with isinstance: a malformed compose like
         # `deploy: { resources: null }` or `resources: { reservations: null }`
@@ -750,7 +794,8 @@ def _scan_compose_content(
                 resources = deploy.get("resources")
                 if isinstance(resources, dict):
                     reservations = resources.get("reservations")
-                    if isinstance(reservations, dict) and reservations.get("devices"):
+                    requests = reservations.get("devices") if isinstance(reservations, dict) else None
+                    if requests and accelerator != "nvidia":
                         raise HTTPException(
                             status_code=400,
                             detail=(
@@ -758,6 +803,12 @@ def _scan_compose_content(
                                 f"deploy.resources.reservations.devices is not "
                                 f"permitted in user extensions ({svc_name})"
                             ),
+                        )
+                    if requests and (not isinstance(requests, list) or not all(
+                            _is_ods_nvidia_gpu_reservation(entry) for entry in requests)):
+                        raise HTTPException(
+                            status_code=400,
+                            detail=f"Extension rejected: unsupported GPU reservation in {svc_name}",
                         )
         ports = svc_def.get("ports", [])
         for port in ports:
@@ -2762,6 +2813,13 @@ def _staged_library_extension(service_id: str, dest: Path):
             upstream = json.loads(upstream_path.read_text(encoding='utf-8')) if upstream_path.is_file() else {}
             trusted_library = not (isinstance(upstream, dict) and upstream.get('origin') == 'github-proposal')
             _scan_compose_content(staged_compose, trusted=trusted_library)
+            # The compose resolver also loads compose.<backend>.yaml,
+            # compose.local.yaml and compose.multigpu.yaml, with this policy.
+            # Scan them here too, so an overlay it would drop fails the
+            # install. Only compose.<backend>.yaml may request that GPU.
+            for overlay in sorted(staged.glob('compose.*.yaml')):
+                backend = overlay.name.removeprefix('compose.').removesuffix('.yaml')
+                _scan_compose_content(overlay, trusted=trusted_library, accelerator=backend)
             if not trusted_library:
                 from extension_recipe_package import verify_package
                 from extension_recipe_validation import validate_recipe
