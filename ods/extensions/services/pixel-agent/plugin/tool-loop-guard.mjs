@@ -10636,22 +10636,23 @@ export function createToolLoopGuard({
       : Array.isArray(compactMessage.content) ? [...compactMessage.content] : [];
     // Persisted results reach the live model request. Repeating the same
     // coaching on every result makes the context self-similar, and local
-    // models then loop on one tool call. Deliver each distinct instruction
-    // once, and again only after it changes or a bounded number of results.
+    // models then loop on one tool call. Deliver an instruction whenever it
+    // differs from the last one delivered in its slot, and repeat unchanged
+    // text only after a bounded number of results.
     if (state) state.persistedResultCount = (state.persistedResultCount ?? 0) + 1;
-    const coachingDue = text => {
+    const coachingDue = (slot, text) => {
       if (!state || typeof text !== 'string') return true;
-      state.coachingDeliveredAt ??= new Map();
-      const last = state.coachingDeliveredAt.get(text);
-      if (last !== undefined && state.persistedResultCount - last < COACHING_REPEAT_INTERVAL) return false;
-      state.coachingDeliveredAt.set(text, state.persistedResultCount);
+      state.coachingDelivered ??= new Map();
+      const last = state.coachingDelivered.get(slot);
+      if (last?.text === text && state.persistedResultCount - last.at < COACHING_REPEAT_INTERVAL) return false;
+      state.coachingDelivered.set(slot, {text, at: state.persistedResultCount});
       return true;
     };
     if (executionGuidance && !pending.pythonSyntaxGuidance && !content.some(block =>
         block?.type === 'text' && /\[ODS Pixel execution\]/.test(block.text)) &&
-        coachingDue(executionGuidance))
+        coachingDue('execution', executionGuidance))
       content.push({type:'text',text:executionGuidance});
-    if (workspaceStageInstruction && coachingDue(workspaceStageInstruction)) {
+    if (workspaceStageInstruction && coachingDue('workspace', workspaceStageInstruction)) {
       content.push({ type: "text", text: workspaceStageInstruction });
     }
     if (sandboxPathCorrection) content.push({type:'text',text:sandboxPathCorrection});
@@ -10659,7 +10660,7 @@ export function createToolLoopGuard({
     if (pending?.pythonSyntaxGuidance && executionGuidance && !content.some(block => block?.type === 'text' &&
         /\[ODS Pixel (?:repair|Python syntax|execution)\]/.test(block.text)))
       content.push({type:'text',text:executionGuidance});
-    if (previewStageInstruction && coachingDue(previewStageInstruction)) {
+    if (previewStageInstruction && coachingDue('preview', previewStageInstruction)) {
       content.push({ type: "text", text: previewStageInstruction });
     }
     if (hostEvidence && state.operationsHostResultCompactionsRemaining > 0) {

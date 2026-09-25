@@ -41,7 +41,7 @@ test('a shell-generated entry receives read guidance until an exact read succeed
   // The prerequisite itself still holds, and the guidance returns after a bounded number of results.
   assert.equal(invoke('pixel_ods_workspace_preview',{relativeDirectory:'expense-coding/public'},success('unused')).prepared?.block,true);
   let redelivered=false;
-  for(let i=0;i<8&&!redelivered;i++) redelivered=guidance.test(invoke('exec',{command:'pwd'},success('/workspace')).text);
+  for(let i=0;i<8&&!redelivered;i++) redelivered=guidance.test(invoke('exec',{command:`echo step-${i}`},success(`step-${i}`)).text);
   assert.ok(redelivered);
   const read=invoke('read',{path:'expense-coding/public/index.html'},success('<!doctype html><h1>Report</h1>'));
   assert.doesNotMatch(read.text,/with the workspace read tool before requesting/);
