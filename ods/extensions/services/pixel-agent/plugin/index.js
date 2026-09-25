@@ -711,9 +711,11 @@ export default definePluginEntry({
     );
 
     // Offered only while the owner's Perplexica answers /api/config with chat
-    // and embedding defaults. The tool is deferred behind Tool Search, so its
-    // presence changes the server-side catalog, not the prompt bytes. Schema
-    // discovery always sees it and never probes the host.
+    // and embedding defaults (OpenClaw keeps listing it from its descriptor
+    // cache once every manifest tool was offered; COMPLETION-RELIABILITY.md).
+    // The tool is deferred behind Tool Search, so its presence changes the
+    // server-side catalog, not the prompt bytes. Schema discovery always sees
+    // it and never probes the host.
     const discovery = api.registrationMode === 'discovery';
     if (!discovery) {
       perplexicaAvailability ??= createPerplexicaAvailability({ port: api.pluginConfig?.perplexicaPort });

@@ -206,3 +206,16 @@ test('native inspection cannot expose absent, denied or ambiguous capabilities',
   assert.deepEqual(run([inspector,tool(inspector.name)]).tools,controls);
   assert.deepEqual(run([inspector],{agentId:'another-agent'}).tools,controls);
 });
+
+// pixel_ods_research is offered only while the owner's Perplexica is
+// configured. It is deferred, so toggling it changes only the server-side
+// catalog: the visible tools, and so the prompt, stay byte-identical.
+test('offering or hiding the optional Perplexica tool leaves the visible surface unchanged', () => {
+  const names = ['read', 'web_fetch', 'web_search', 'pixel_ods_web_extract'];
+  const without = run(names.map(tool));
+  const offered = run([...names, 'pixel_ods_research'].map(tool));
+  assert.equal(JSON.stringify(offered.tools), JSON.stringify(without.tools));
+  assert.equal(offered.catalogToolCount, without.catalogToolCount + 1);
+  assert.equal(resolveExact({agentId:'pixel',catalogRef:offered.catalogRef},'pixel_ods_research')?.name,'pixel_ods_research');
+  assert.equal(resolveExact({agentId:'pixel',catalogRef:without.catalogRef},'pixel_ods_research'),undefined);
+});

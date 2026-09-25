@@ -83,14 +83,22 @@ of the 25 links in its answers came from its own returned sources, and 18 of
 the 25 were dead (`findings/perplexica-fast-search.md`). The tool is therefore
 orientation only:
 
-- It is offered only while Perplexica answers `GET /api/config` with a chat
-  model and an embedding model selected. The check is cached for 60 seconds,
-  refreshed in the background when a run builds its tools, and never delays a
-  run. A refused connection during a call hides the tool from the next run.
-  The configuration body also holds provider API keys, so only the four model
-  identities are kept from it. The tool is deferred behind Tool Search: offering
-  or hiding it changes the Tool Search catalog, not the system prompt or the
-  directly visible tools.
+- Its factory offers it only while Perplexica answers `GET /api/config` with a
+  chat model and an embedding model selected. The check is cached for 60
+  seconds, refreshed in the background when the factory runs, and never delays
+  a run. A refused connection during a call marks Perplexica absent. The
+  configuration body also holds provider API keys, so only the four model
+  identities are kept from it. The tool is deferred behind Tool Search:
+  offering or hiding it changes the Tool Search catalog, not the system prompt
+  or the directly visible tools.
+- OpenClaw 2026.6.33 caches a plugin's tool descriptors per agent configuration
+  once its factories have returned every tool in the manifest, and then builds
+  later tool lists from that cache without calling the factories. So a host
+  without Perplexica never lists the tool, but once Perplexica has been
+  available, the tool stays listed until the gateway restarts or its
+  configuration changes. A call to a Perplexica that has since stopped returns
+  an unavailable result; after that, calls fail as a missing tool runtime until
+  a later check finds Perplexica configured again.
 - The model sees Perplexica's answer, and each returned source with its title
   and a capped search snippet (300 characters for cited sources, 160 for the
   first eight uncited ones, 3,500 in total, at most 20 sources, cited sources
