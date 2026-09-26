@@ -164,8 +164,12 @@ test('replay: strixy todo-app sequence now writes Playground/todo-app/index.html
   // Recorded 2026-09-26 on strixy (Qwen3.6-35B-A3B), open prompt 02-todo-app:
   // write /playground/todo-app/index.html (8897 chars) -> correction,
   // write playground/todo-app/index.html (same) -> correction,
-  // preview playground/todo-app -> refused, then the progress fuse stopped the
+  // preview playground/todo-app -> refused, then exec `ls playground/todo-app/`
+  // (no workdir, then workdir /workspace) until the progress fuse stopped the
   // run with nothing saved. Each full-page write cost about 70 s of generation.
+  // This replays the first write and the later recorded calls with their
+  // recorded arguments. The recorded retry write was a reaction to the first
+  // correction, so it is not part of the replay.
   const html = `<!DOCTYPE html><html lang="en"><head><title>Todo</title></head><body><h1>Todo</h1>${'<!-- pad -->'.repeat(800)}</body></html>`.slice(0, 8897 - 7) + '</html>';
   assert.equal(html.length, 8897);
   for (const executionHost of ['sandbox', 'gateway']) {
@@ -185,18 +189,195 @@ test('replay: strixy todo-app sequence now writes Playground/todo-app/index.html
     assert.equal(first.content, html);
     fs.writeFileSync(path.join(root, first.path), first.content);
     guard.afterToolCall({toolName:'write', toolCallId:'NE5VNUkOws87AONddLQEYxRoyFC0iR3c', params:first, result:written}, context);
-    // The recorded retry used the lowercase spelling. It now names the same
-    // canonical file, so the unchanged content is recognized as a repeat.
-    const second = guard.beforeToolCall({toolName:'write', toolCallId:'Y1Np60UHLrczn53j6RpbmMomAsmzXNpK',
-      params:{path:'playground/todo-app/index.html', content:html}}, context);
-    assert.equal(second?.block, true);
-    assert.match(second.blockReason, /repeats content already recorded for this path/);
-    const revised = run('write', {path:'playground/todo-app/index.html', content:html.replace('<h1>Todo</h1>', '<h1>Todos</h1>')}, 'revised-write');
-    assert.equal(revised.path, 'Playground/todo-app/index.html');
     const preview = run('pixel_ods_workspace_preview', {relativeDirectory:'playground/todo-app'}, 'So7BuyO8Q9viw4SQtSYJtQKzYl4J7dD3');
     assert.equal(preview.relativeDirectory, 'Playground/todo-app');
+    // The recorded listings name the project with the lowercase spelling. No
+    // inferred cwd resolves that operand on a case-sensitive workspace, so
+    // the model is told the exact folder instead of being shown a missing one.
+    for (const [params, id] of [[{command:'ls playground/todo-app/'}, 'exec-1'], [{command:'ls playground/todo-app/', workdir:'/workspace'}, 'exec-2']]) {
+      const listing = guard.beforeToolCall({toolName:'exec', toolCallId:id, params}, context);
+      assert.equal(listing?.block, true, JSON.stringify(params));
+      assert.match(listing.blockReason, /^This project is in Playground\/todo-app\. Use that exact spelling: playground\/todo-app is a different path on a case-sensitive workspace\. .*Set exec workdir to \/workspace\/Playground\/todo-app /);
+    }
     assert.deepEqual(fs.readdirSync(path.join(root, 'Playground')), ['todo-app']);
     assert.equal(fs.readFileSync(path.join(root, 'Playground/todo-app/index.html'), 'utf8'), html);
     if (!caseInsensitive(root)) assert.equal(fs.existsSync(path.join(root, 'playground')), false);
+  }
+});
+
+test('a lowercase spelling of the bound file shares the canonical file record for repeated writes', t => {
+  // A consistency property of the rewrite, not replay evidence: the guard's
+  // per-path records see one file under either spelling.
+  const html = '<!DOCTYPE html><html><head><title>Todo</title></head><body><h1>Todo</h1></body></html>';
+  const root = fs.mkdtempSync(path.join(tmpdir(), 'ods-playground-repeat-'));
+  t.after(() => fs.rmSync(root, {recursive:true, force:true}));
+  const context = {agentId:'pixel', runId:'playground-repeat', sessionId:'playground-repeat-session'};
+  const guard = createToolLoopGuard();
+  guard.observeRun(context, 'pixel', {prompt:'build me a todo app i can use in the browser'}, {workspaceRoot:root, executionHost:'sandbox'});
+  const first = guard.beforeToolCall({toolName:'write', toolCallId:'w1', params:{path:'/playground/todo-app/index.html', content:html}}, context).params;
+  fs.writeFileSync(path.join(root, first.path), first.content);
+  guard.afterToolCall({toolName:'write', toolCallId:'w1', params:first, result:{content:[{type:'text', text:'Successfully wrote'}]}}, context);
+  const repeat = guard.beforeToolCall({toolName:'write', toolCallId:'w2', params:{path:'playground/todo-app/index.html', content:html}}, context);
+  assert.equal(repeat?.block, true);
+  assert.match(repeat.blockReason, /repeats content already recorded for this path/);
+  const revised = guard.beforeToolCall({toolName:'write', toolCallId:'w3', params:{path:'playground/todo-app/index.html', content:html.replace('<h1>Todo</h1>', '<h1>Todos</h1>')}}, context);
+  assert.notEqual(revised?.block, true, revised?.blockReason);
+  assert.equal(revised.params.path, 'Playground/todo-app/index.html');
+});
+
+function existingProject(root) {
+  fs.mkdirSync(path.join(root, 'Playground/todo-app'), {recursive:true});
+  fs.writeFileSync(path.join(root, 'Playground/todo-app/index.html'), 'old');
+  fs.writeFileSync(path.join(root, 'Playground/todo-app/style.css'), 'css');
+}
+
+test('a Playground misspelling the model already read is kept as read, never relocated to a new project', t => {
+  // On APFS and NTFS a lowercase read of Playground/todo-app succeeds and is
+  // recorded with the model's spelling. Writing that same spelling updates
+  // the file that was read, exactly as before this spelling rule existed.
+  for (const [read, write] of [
+    ['playground/todo-app/index.html', 'playground/todo-app/index.html'],
+    ['playground/todo-app/index.html', './playground/todo-app/index.html'],
+    ['playground/todo-app/index.html', '/workspace/playground/todo-app/index.html'],
+    ['PLAYGROUND/todo-app/index.html', 'PLAYGROUND/todo-app/index.html'],
+  ]) {
+    const {root, state, call} = fixture(t);
+    existingProject(root);
+    const existingPaths = [read];
+    assert.equal(call('write', {path:write, content:'new'}, {existingPaths}), undefined, write);
+    assert.equal(state.preserved, true, write);
+    assert.equal(state.binding, null, write);
+    assert.equal(state.spellingAlias, undefined, write);
+    assert.deepEqual(fs.readdirSync(path.join(root, 'Playground')), ['todo-app'], write);
+    // Routing stays off for the rest of the run, as for any preserved path.
+    assert.equal(call('read', {path:'playground/todo-app/style.css'}, {existingPaths}), undefined);
+    assert.equal(call('pixel_ods_workspace_preview', {relativeDirectory:'playground/todo-app'}, {existingPaths}), undefined);
+  }
+  {
+    // A rooted spelling that was read may be a real host folder: it keeps
+    // the unspelled correction instead of being moved into the workspace.
+    const {root, state, call} = fixture(t);
+    const decision = call('write', {path:'/playground/todo-app/index.html', content:'x'}, {existingPaths:['/playground/todo-app/index.html']});
+    assert.equal(decision?.block, true);
+    assert.match(decision.blockReason, CORRECTION);
+    assert.equal(state.binding ?? null, null);
+    assert.equal(fs.existsSync(path.join(root, 'Playground')), false);
+  }
+  {
+    // Through the full guard: the recorded read path feeds existingPaths.
+    const root = fs.mkdtempSync(path.join(tmpdir(), 'ods-playground-read-'));
+    t.after(() => fs.rmSync(root, {recursive:true, force:true}));
+    existingProject(root);
+    const context = {agentId:'pixel', runId:'playground-read-spelling', sessionId:'playground-read-spelling-session'};
+    const guard = createToolLoopGuard();
+    guard.observeRun(context, 'pixel', {prompt:'build me a todo app i can use in the browser'}, {workspaceRoot:root, executionHost:'sandbox'});
+    const readParams = guard.beforeToolCall({toolName:'read', toolCallId:'r1', params:{path:'playground/todo-app/index.html'}}, context)?.params
+      ?? {path:'playground/todo-app/index.html'};
+    assert.equal(readParams.path, 'playground/todo-app/index.html');
+    // The read result is simulated; it succeeds like this on APFS and NTFS.
+    guard.afterToolCall({toolName:'read', toolCallId:'r1', params:readParams, result:{content:[{type:'text', text:'old'}]}}, context);
+    const writeParams = {path:'playground/todo-app/index.html', content:'<!doctype html><h1>Todos</h1>'};
+    const decision = guard.beforeToolCall({toolName:'write', toolCallId:'w1', params:writeParams}, context);
+    assert.notEqual(decision?.block, true, decision?.blockReason);
+    assert.equal((decision?.params ?? writeParams).path, 'playground/todo-app/index.html');
+    assert.deepEqual(fs.readdirSync(path.join(root, 'Playground')), ['todo-app']);
+  }
+});
+
+test('a misspelled write onto a project read as Playground keeps that folder spelling for the rest of the run', t => {
+  const {root, state, call} = fixture(t);
+  existingProject(root);
+  const existingPaths = ['Playground/todo-app/index.html'];
+  const first = call('write', {path:'playground/todo-app/index.html', content:'new'}, {existingPaths});
+  assert.equal(first.params.path, 'Playground/todo-app/index.html');
+  assert.equal(state.preserved, true);
+  assert.equal(state.binding, null);
+  assert.equal(state.spellingAlias, 'Playground/todo-app');
+  const cases = [
+    ['write', {path:'playground/todo-app/app.js', content:'y'}, 'path', 'Playground/todo-app/app.js'],
+    ['write', {path:'/playground/todo-app/css/style.css', content:'z'}, 'path', 'Playground/todo-app/css/style.css'],
+    ['edit', {path:'PLAYGROUND/todo-app/index.html', oldText:'a', newText:'b'}, 'path', 'Playground/todo-app/index.html'],
+    ['read', {path:'playground\\todo-app\\style.css'}, 'path', 'Playground/todo-app/style.css'],
+    ['pixel_ods_workspace_preview', {relativeDirectory:'playground/todo-app'}, 'relativeDirectory', 'Playground/todo-app'],
+    ['pixel_ods_workspace_preview', {relativeDirectory:'/playground/todo-app'}, 'relativeDirectory', 'Playground/todo-app'],
+    ['exec', {command:'ls', workdir:'playground/todo-app'}, 'workdir', '/workspace/Playground/todo-app'],
+    ['exec', {command:'ls', workdir:'/workspace/playground/todo-app'}, 'workdir', '/workspace/Playground/todo-app'],
+  ];
+  for (const [tool, params, key, expected] of cases) {
+    const decision = call(tool, params, {existingPaths});
+    assert.notEqual(decision?.block, true, `${tool} ${params[key]}: ${decision?.blockReason}`);
+    assert.equal(decision.params[key], expected, `${tool} ${params[key]}`);
+    const wrapped = call('tool_call', {id:tool === 'pixel_ods_workspace_preview' ? tool : `openclaw:core:${tool}`, args:params}, {existingPaths});
+    assert.equal(wrapped.params.args[key], expected, `wrapped ${tool} ${params[key]}`);
+  }
+  const input = '*** Begin Patch\n*** Add File: playground/todo-app/extra.js\n+x\n*** Update File: notes/readme.md\n@@\n-y\n+z\n*** End Patch';
+  assert.equal(call('apply_patch', {input}).params.input, input.replace('Add File: playground/', 'Add File: Playground/'));
+  // Everything else stays unrouted, as in any preserved run.
+  for (const [tool, params] of [
+    ['write', {path:'Playground/todo-app/other.js', content:'x'}],
+    ['write', {path:'app.js', content:'x'}],
+    ['write', {path:'todo-app/app.js', content:'x'}],
+    ['read', {path:'playground/other-app/index.html'}],
+    ['pixel_ods_workspace_preview', {relativeDirectory:'playground/other-app'}],
+    ['exec', {command:'ls', workdir:'/workspace/Playground/todo-app'}],
+    ['exec', {command:'ls Playground/todo-app/'}],
+    ['exec', {command:'ls'}],
+    ['apply_patch', {input:'*** Begin Patch\n*** Add File: notes/a.md\n+x\n*** End Patch'}],
+  ]) assert.equal(call(tool, params, {existingPaths}), undefined, `${tool} ${JSON.stringify(params)}`);
+  const listing = call('exec', {command:'ls playground/todo-app/'}, {existingPaths});
+  assert.equal(listing?.block, true);
+  assert.match(listing.blockReason, /^This project is in Playground\/todo-app\. .*Set exec workdir to \/workspace\/Playground\/todo-app /);
+  assert.deepEqual(fs.readdirSync(path.join(root, 'Playground')), ['todo-app']);
+  {
+    // A canonical write onto the read project is unchanged: preserved with no
+    // spelling alias, exactly as before this rule.
+    const {root: other, state: otherState, call: otherCall} = fixture(t);
+    existingProject(other);
+    assert.equal(otherCall('write', {path:'Playground/todo-app/index.html', content:'new'}, {existingPaths}), undefined);
+    assert.equal(otherState.preserved, true);
+    assert.equal(otherState.spellingAlias, undefined);
+    assert.equal(otherCall('write', {path:'playground/todo-app/app.js', content:'y'}, {existingPaths}), undefined);
+  }
+});
+
+test('a shell operand that misspells the bound project gets its exact folder instead of an inferred cwd', t => {
+  for (const collision of [false, true]) {
+    const {root, call} = fixture(t);
+    if (collision) fs.mkdirSync(path.join(root, 'Playground/todo-app'), {recursive:true});
+    const directory = collision ? 'Playground/todo-app-2' : 'Playground/todo-app';
+    const name = directory.slice('Playground/'.length);
+    assert.equal(call('write', {path:'/playground/todo-app/index.html', content:'x'}).params.path, `${directory}/index.html`);
+    for (const [params, spelling] of [
+      [{command:`ls playground/${name}/`}, 'playground'],
+      [{command:`ls playground/${name}/`, workdir:'/workspace'}, 'playground'],
+      [{command:`ls playground/${name}`, workdir:'.'}, 'playground'],
+      [{command:`ls -la playground/${name}/ 2>&1 || echo "DIR_NOT_FOUND"`}, 'playground'],
+      [{command:`ls /workspace/playground/${name}/`}, 'playground'],
+      [{command:`cat "./PLAYGROUND/${name}/index.html"`}, 'PLAYGROUND'],
+      [{command:`cd /playground/${name} && python3 -m http.server`}, 'playground'],
+      [{command:`dir playground\\${name}`}, 'playground'],
+    ]) {
+      const decision = call('exec', params);
+      assert.equal(decision?.block, true, JSON.stringify(params));
+      assert.equal(decision.blockReason, `This project is in ${directory}. Use that exact spelling: ${spelling}/${name} is a different path on a case-sensitive workspace. Files already written for this project are saved in ${directory}. Set exec workdir to /workspace/${directory} and use filenames relative to that directory.`);
+    }
+    // The spelling the correction names runs unchanged.
+    assert.equal(call('exec', {command:'ls', workdir:`/workspace/${directory}`}), undefined);
+    assert.equal(call('exec', {command:`ls ${directory}/`}), undefined);
+    // Operands that do not misspell this project keep the existing cwd rules.
+    assert.equal(call('exec', {command:'ls'}).params.workdir, `/workspace/${directory}`);
+    assert.equal(call('exec', {command:`ls playground/${name}-old/`}).params.workdir, `/workspace/${directory}`);
+    if (collision) assert.match(call('exec', {command:'ls playground/todo-app/'}).blockReason, /the old todo-app\/ prefix names a different project/);
+  }
+  {
+    // A separate lowercase folder on a case-sensitive workspace is the
+    // owner's: the command keeps its literal operand and the workspace cwd.
+    const {root, call} = fixture(t);
+    if (!caseInsensitive(root)) {
+      fs.mkdirSync(path.join(root, 'playground/todo-app'), {recursive:true});
+      assert.equal(call('write', {path:'Playground/todo-app/index.html', content:'x'}), undefined);
+      assert.equal(call('exec', {command:'ls playground/todo-app/'}), undefined);
+      assert.equal(call('exec', {command:'ls playground/todo-app/', workdir:'/workspace'}), undefined);
+    }
   }
 });

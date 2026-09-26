@@ -87,15 +87,35 @@ function playgroundSpelling(value, root, minimum) {
   if (!segments || !/^playground$/i.test(segments[0]) || segments.length < minimum || GENERIC.test(segments[1])) return null;
   const canonical = ['Playground',...segments.slice(1)].join('/');
   if (canonical === direct) return null;
-  if (segments[0] !== 'Playground') {
-    const base = safeRoot(root);
-    const entry = name => { try { return fs.lstatSync(path.join(base,name)); } catch (error) { if (error.code === 'ENOENT') return null; throw error; } };
-    const spelled = entry(segments[0]);
-    const folder = spelled && entry('Playground');
-    if (spelled && (!folder || folder.dev !== spelled.dev || folder.ino !== spelled.ino)) return null;
-  }
+  if (segments[0] !== 'Playground' && distinctSpelling(root,segments[0])) return null;
   return canonical;
 }
+// True when the workspace holds an entry with this spelling that is not the
+// Playground folder itself (a directory or link on a case-sensitive
+// workspace). A missing entry or the same folder entry is not distinct.
+function distinctSpelling(root, name) {
+  const base = safeRoot(root);
+  const entry = value => { try { return fs.lstatSync(path.join(base,value)); } catch (error) { if (error.code === 'ENOENT') return null; throw error; } };
+  const spelled = entry(name);
+  const folder = spelled && entry('Playground');
+  return Boolean(spelled && (!folder || folder.dev !== spelled.dev || folder.ino !== spelled.ino));
+}
+// Shell text is never rewritten. A relative or /workspace operand that spells
+// this project's Playground folder another way names nothing on a
+// case-sensitive workspace, and no inferred cwd can make it resolve. Returns
+// that spelling, marked distinct when a separate folder has that exact name.
+function misspelledOperand(command, directory, root) {
+  const name = directory.slice('Playground/'.length);
+  const pattern = new RegExp(`(?:^|[\\s'"=(])(?:\\./|/workspace/|/)?(playground)[\\\\/](${name.replaceAll('.','\\.')})(?=$|[^A-Za-z0-9._-])`, 'gi');
+  for (const match of command.matchAll(pattern)) {
+    if (match[1] !== 'Playground' && match[2] === name) return {text:`${match[1]}/${name}`, distinct:distinctSpelling(root,match[1])};
+  }
+  return null;
+}
+function spellingReason(directory, text) {
+  return `This project is in ${directory}. Use that exact spelling: ${text} is a different path on a case-sensitive workspace. Files already written for this project are saved in ${directory}. Set exec workdir to /workspace/${directory} and use filenames relative to that directory.`;
+}
+const PATCH_HEADER = /^(\*\*\* (?:(?:Add|Update|Delete) File|Move to): )([^\r\n]+)$/gm;
 function safeDirectory(directory, create = false) {
   if (create) { try { fs.mkdirSync(directory, {mode:0o700}); } catch (error) { if (error.code !== 'EEXIST') throw error; } }
   const stat = fs.lstatSync(directory);
@@ -183,6 +203,34 @@ function simpleInspection(selected) {
     && /^(?:pwd|ls|dir|Get-ChildItem|Get-Location)(?:\s|$)/i.test(command);
 }
 
+// Routing is off for a preserved run. When its first write was a Playground
+// misspelling of an existing project the model had read, later misspellings
+// of that one project keep its canonical spelling, so a case-sensitive
+// workspace never gains a second lowercase copy. Nothing else is routed.
+function routeSpellingAlias(selected, alias, root) {
+  const args = selected.args;
+  const canonical = value => {
+    const spelled = playgroundSpelling(value,root,2);
+    return spelled && (spelled === alias || spelled.startsWith(`${alias}/`)) ? spelled : null;
+  };
+  if (selected.tool === 'apply_patch') {
+    if (typeof args.input !== 'string') return undefined;
+    const input = args.input.replace(PATCH_HEADER,(line,prefix,value)=>{ const mapped = canonical(value); return mapped ? prefix+mapped : line; });
+    return input === args.input ? undefined : {params:selected.wrap({...args,input})};
+  }
+  if (selected.tool === 'exec') {
+    if (args.workdir === undefined || args.workdir === '.' || args.workdir === '/workspace') {
+      const operand = misspelledOperand(typeof args.command === 'string' ? args.command : '',alias,root);
+      return operand && !operand.distinct ? {block:true,blockReason:spellingReason(alias,operand.text)} : undefined;
+    }
+    const mapped = canonical(args.workdir);
+    return mapped ? {params:selected.wrap({...args,workdir:`/workspace/${mapped}`})} : undefined;
+  }
+  const key = selected.tool === 'pixel_ods_workspace_preview' ? 'relativeDirectory' : 'path';
+  const mapped = canonical(args[key]);
+  return mapped ? {params:selected.wrap({...args,[key]:mapped})} : undefined;
+}
+
 // State is per run. Persistent records contain only hashed session identities
 // and safe relative paths, never prompts, credentials, or creative bytes.
 export function routePlaygroundTool({state,tool,params,root,session,intent,existingPaths=[],preserveExisting=false,continueProject=false}) {
@@ -203,7 +251,7 @@ export function routePlaygroundTool({state,tool,params,root,session,intent,exist
       if (preserveExisting || ['write','edit','apply_patch','pixel_ods_workspace_preview'].includes(selected.tool)) preserve();
       return undefined;
     }
-    if (state.preserved) return undefined;
+    if (state.preserved) return state.spellingAlias ? routeSpellingAlias(selected,state.spellingAlias,root) : undefined;
     if (!state.initialized) {
       state.fresh = !continueProject && requestsNewPlaygroundProject(intent);
       state.binding = state.fresh ? null : readBinding(root,identity);
@@ -221,10 +269,21 @@ export function routePlaygroundTool({state,tool,params,root,session,intent,exist
       if (!inspection) return {block:true,blockReason:`Create the first project file with write in a descriptive Playground folder before running commands or patches. ${CORRECTION}`};
     }
     if (!state.binding && state.fresh && selected.tool === 'write') {
-      spelled = playgroundSpelling(args[key],root,minimum);
+      // A path the model already read with its own spelling keeps the
+      // unspelled handling below: it names that file exactly as it was read.
+      const readAsSpelled = existingPaths.includes(args[key]) || (target !== null && existingPaths.includes(target));
+      spelled = readAsSpelled ? null : playgroundSpelling(args[key],root,minimum);
       if (spelled) target = spelled;
       if (!target) return {block:true,blockReason:CORRECTION};
-      if (existingPaths.includes(target)) { preserve(); return spelled ? {params:selected.wrap({...args,[key]:spelled})} : undefined; }
+      if (existingPaths.includes(target)
+        || (spelled && existingPaths.some(value => relative(value,root) === spelled || playgroundSpelling(value,root,minimum) === spelled))) {
+        preserve();
+        if (!spelled) return undefined;
+        // The model read this existing project with another spelling. Keep
+        // the project's own spelling for this write and the rest of the run.
+        state.spellingAlias = spelled.split('/').slice(0,2).join('/');
+        return {params:selected.wrap({...args,[key]:spelled})};
+      }
       const segments = parts(target);
       const candidate = segments[0] === 'Playground' ? segments[1] : segments[0];
       if (segments.length < (segments[0] === 'Playground' ? 3 : 2) || !candidate || GENERIC.test(candidate)) return {block:true,blockReason:CORRECTION};
@@ -251,7 +310,7 @@ export function routePlaygroundTool({state,tool,params,root,session,intent,exist
     if (selected.tool === 'apply_patch') {
       if (typeof args.input !== 'string') return {block:true,blockReason:`Use apply_patch input with file paths inside ${directory}.`};
       let count = 0, invalid = false;
-      const input = args.input.replace(/^(\*\*\* (?:(?:Add|Update|Delete) File|Move to): )([^\r\n]+)$/gm,(_line,prefix,value)=>{
+      const input = args.input.replace(PATCH_HEADER,(_line,prefix,value)=>{
         count++;
         const spelledValue = playgroundSpelling(value,root,3);
         const mapped = projectPath(spelledValue && projectPath(spelledValue) ? spelledValue : relative(value,root),true);
@@ -271,7 +330,12 @@ export function routePlaygroundTool({state,tool,params,root,session,intent,exist
     // name its workspace-root prefix; never rewrite shell program text.
     if (selected.tool === 'exec' && (args.workdir === undefined || args.workdir === '.' || args.workdir === '/workspace')) {
       const command = typeof args.command === 'string' ? args.command : '';
-      if (command.includes(`${directory}/`) || command.includes('/workspace/')) mapped = null;
+      // A misspelled project operand cannot resolve from the workspace or
+      // from Playground; name the folder instead of choosing a cwd for it. A
+      // separate folder with that spelling is the owner's: leave it literal.
+      const operand = misspelledOperand(command,directory,root);
+      if (operand && !operand.distinct) return {block:true,blockReason:spellingReason(directory,operand.text)};
+      if (operand || command.includes(`${directory}/`) || command.includes('/workspace/')) mapped = null;
       else if (command.includes(`${source}/`)) {
         if (directory !== `Playground/${source}`) return {block:true,blockReason:`This project is in ${directory}. Set exec workdir to ${directory} and use filenames relative to that directory; the old ${source}/ prefix names a different project.`};
         if (!simpleInspection(selected)) return {block:true,blockReason:`This project is in ${directory}. Set exec workdir to /workspace/${directory} and use filenames relative to that directory. An automatic parent directory would make this command ambiguous and could move or modify the project folder itself.`};
