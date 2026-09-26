@@ -111,7 +111,8 @@ test('mac-mini d4a61f33 replay: refusals name the exact next path and the unchan
   for (const recorded of [mkdirTouch, touch]) {
     const refused = h.exec(recorded.args, '.', recorded.id);
     assert.equal(refused.decision?.block, true, recorded.args.command);
-    assert.ok(refused.text.startsWith(`${NOT_RUN} Call write now with path Playground/photo-renamer-test/<file name> and its content. ${FIRST_FILE} ${CORRECTION_START}`), refused.text);
+    // The earlier suggestion is repeated; the model's test-data folder is not a project.
+    assert.ok(refused.text.startsWith(`${NOT_RUN} Call write now with path Playground/photo-renamer/PhotoRenamer.py and its content. ${FIRST_FILE} ${CORRECTION_START}`), refused.text);
     assert.equal(stopped(refused.text), false);
     assert.ok(refused.text.includes(recorded.recorded.resultHead));
   }
@@ -242,6 +243,10 @@ test('single file names yield a derived descriptive folder; every suggestion is 
 
 test('role, generic and multi-segment names keep only the generic correction', () => {
   for (const target of ['main.py', 'index.html', 'app.py', 'test_x.py', 'TestRenamer.py', 'README.md', 'utils.py', 'setup.py',
+    // Manifests, configuration, tests, samples, data, documents and too-short names.
+    'package.json', 'requirements.txt', 'Makefile', 'Dockerfile', 'pyproject.toml', 'conftest.py', 'config.py', 'settings.py',
+    'photo_renamer_test.py', 'PhotoRenamerTest.py', 'renamer.test.js', 'renamer_spec.rb', 'tests.py', 'demo.py', 'sample.py',
+    'IMG_2024.jpg', 'photo.png', 'story.md', 'notes.txt', 'data.csv', 'x.py', 'ab.py', 'x1.py',
     'game.py', 'website.html', 'src/main.py', 'Playground/photo_renamer.py', '/home/other/photo_renamer.py', '/tmp/photo_renamer.py',
     '../photo_renamer.py', 'CON.py']) {
     const {root, call} = fresh();
@@ -266,7 +271,10 @@ test('exec and patches before the first write say mkdir is unnecessary and name 
     assert.ok(decision.blockReason.startsWith(`${NOT_RUN} Call write now with path Playground/${name}/<file name> and its content. ${FIRST_FILE} ${CORRECTION_START}`), `${command}: ${decision.blockReason}`);
     assert.ok(decision.blockReason.endsWith(CORRECTION_END));
   }
-  for (const command of ['mkdir Playground/src', 'mkdir -p Playground/CON', 'mkdir -p myPlayground/tool-x', 'ls -la /workspace/.openclaw/tmp/ 2>/dev/null || mkdir -p x', 'mkdir snake-game && echo hi > snake-game/index.html']) {
+  for (const command of ['mkdir Playground/src', 'mkdir -p Playground/CON', 'mkdir -p myPlayground/tool-x', 'ls -la /workspace/.openclaw/tmp/ 2>/dev/null || mkdir -p x', 'mkdir snake-game && echo hi > snake-game/index.html',
+    // Test data, samples and too-short names are not project folders.
+    'mkdir -p /workspace/Playground/photo-renamer-test && touch /workspace/Playground/photo-renamer-test/a.jpg',
+    'mkdir -p Playground/test_photos', 'mkdir -p Playground/sample', 'mkdir -p Playground/x1', 'mkdir -p Playground/New_Project']) {
     const decision = fresh().call('exec', {command});
     assert.equal(decision.block, true, command);
     assert.ok(decision.blockReason.startsWith(`${NOT_RUN} ${FIRST_FILE} ${CORRECTION_START}`), `${command}: ${decision.blockReason}`);
@@ -282,11 +290,17 @@ test('only a leading cd into the bound directory keeps an unspecified cwd; other
   call('write', {path:'Playground/photo-renamer/photo_renamer.py', content:'x'});
   for (const command of ['cd Playground/photo-renamer', 'cd Playground/photo-renamer/', 'cd ./Playground/photo-renamer && ls',
     'cd ./Playground/photo-renamer/ && ls', '  cd Playground/photo-renamer&&ls', 'cd Playground/photo-renamer;ls',
-    'cd Playground/photo-renamer||true', 'cd Playground/photo-renamer\tls']) {
+    'cd Playground/photo-renamer||true', 'cd Playground/photo-renamer \t&& ls', 'cd Playground/photo-renamer ; ls',
+    'cd Playground/photo-renamer || exit 1', 'cd Playground/photo-renamer\nls', 'cd Playground/photo-renamer/ \nls', 'cd Playground/photo-renamer  ']) {
     for (const workdir of [undefined, '.', '/workspace']) assert.equal(call('exec', {command, ...(workdir === undefined ? {} : {workdir})}), undefined, `${command} ${workdir}`);
   }
   for (const command of ['cd Playground/other-tool && ls', 'cd Playground/photo-renamer-2 && ls', 'cd Playground/photo-renamerx && ls',
-    'cd Playground/photo-renamer|ls', 'echo x && cd Playground/photo-renamer && ls', 'python3 photo_renamer.py', 'cd test_photos && ls']) {
+    'cd Playground/photo-renamer|ls', 'echo x && cd Playground/photo-renamer && ls', 'python3 photo_renamer.py', 'cd test_photos && ls',
+    // A single & or | runs the cd in a subshell: the rest must still start in the project.
+    'cd Playground/photo-renamer & python3 photo_renamer.py .', 'cd Playground/photo-renamer | python3 photo_renamer.py .',
+    'cd Playground/photo-renamer &ls', 'cd Playground/photo-renamer &',
+    // Anything else after the directory is an operand or redirection of cd itself.
+    'cd Playground/photo-renamer\tls', 'cd Playground/photo-renamer 2>/dev/null && ls', 'cd Playground/photo-renamer # x']) {
     const decision = call('exec', {command});
     assert.deepEqual(decision?.params, {command, workdir:'/workspace/Playground/photo-renamer'}, command);
   }
@@ -301,4 +315,91 @@ test('only a leading cd into the bound directory keeps an unspecified cwd; other
     {command:'cd Playground/photo-renamer && ls', workdir:'/workspace/Playground/photo-renamer-2'});
   assert.equal(collided.call('exec', {command:'cd Playground/photo-renamer-2 && ls'}), undefined);
   assert.equal(collided.call('exec', {command:'python3 photo-renamer/photo_renamer.py'}).block, true, 'the old prefix refusal is unchanged');
+});
+
+test('a suggestion never names an existing folder: an owner project named by a command is not offered, and a taken derived name gets the collision suffix', () => {
+  // An owner project the model only inspected is never suggested as the place to write.
+  const owner = fresh();
+  fs.mkdirSync(path.join(owner.root, 'Playground', 'photo-tools'), {recursive: true});
+  fs.writeFileSync(path.join(owner.root, 'Playground', 'photo-tools', 'rename.py'), 'OWNER');
+  assert.equal(owner.call('read', {path:'Playground/photo-tools/rename.py'}), undefined);
+  for (const command of ['cat Playground/photo-tools/rename.py && python3 --version', 'mkdir -p Playground/photo-tools && touch Playground/photo-tools/x.py']) {
+    const refused = owner.call('exec', {command, workdir:'/workspace'});
+    assert.ok(refused.blockReason.startsWith(`${NOT_RUN} ${FIRST_FILE}`), `${command}: ${refused.blockReason}`);
+    assert.doesNotMatch(refused.blockReason, /photo-tools/);
+  }
+  // A later unused name in the same command is still offered.
+  assert.ok(owner.call('exec', {command:'cp Playground/photo-tools/rename.py Playground/photo-sorter/'}).blockReason
+    .includes('Call write now with path Playground/photo-sorter/<file name> and its content.'));
+  assert.equal(fs.readFileSync(path.join(owner.root, 'Playground', 'photo-tools', 'rename.py'), 'utf8'), 'OWNER');
+
+  // The same prompt again: the derived folder exists, so the suggestion is the
+  // folder reserveProject will really use, and the model's cd then matches it.
+  for (const native of [false, true]) {
+    const root = workspace();
+    fs.mkdirSync(path.join(root, 'Playground', 'photo-renamer'), {recursive: true});
+    fs.writeFileSync(path.join(root, 'Playground', 'photo-renamer', 'PhotoRenamer.py'), 'EARLIER');
+    const h = harness({root, native, runId:`repeat-${native}`});
+    const first = h.write({path:'/workspace/PhotoRenamer.py', content:'NEW'});
+    const suggested = /with path (\S+) and the same content/.exec(first.text)?.[1];
+    assert.equal(suggested, 'Playground/photo-renamer-2/PhotoRenamer.py');
+    assert.equal(fs.existsSync(path.join(root, 'Playground', 'photo-renamer-2')), false, 'a suggestion reserves nothing');
+    const accepted = h.write({path:suggested, content:'NEW'});
+    assert.equal(accepted.executed.path, suggested, 'accepted exactly as suggested');
+    assert.equal(fs.readFileSync(path.join(root, 'Playground', 'photo-renamer', 'PhotoRenamer.py'), 'utf8'), 'EARLIER');
+    assert.equal(fs.readFileSync(path.join(root, 'Playground', 'photo-renamer-2', 'PhotoRenamer.py'), 'utf8'), 'NEW');
+    const cd = h.exec({command:'cd Playground/photo-renamer-2 && python3 PhotoRenamer.py .', workdir:'/workspace'}, 'Playground/photo-renamer-2');
+    assert.equal(cd.executed.workdir, native ? root : '/workspace');
+    assert.equal(ran(cd.text), true);
+  }
+  const both = fresh();
+  for (const name of ['photo-renamer', 'photo-renamer-2']) fs.mkdirSync(path.join(both.root, 'Playground', name), {recursive: true});
+  fs.writeFileSync(path.join(both.root, 'Playground', 'photo-renamer-3'), 'a file also takes the name');
+  assert.ok(both.call('write', {path:'PhotoRenamer.py'}).blockReason.includes('with path Playground/photo-renamer-4/PhotoRenamer.py and'));
+});
+
+test('one run gets one suggested folder: later refusals repeat it, including for test and role files', () => {
+  const {root, state, call} = fresh();
+  const first = call('write', {path:'/workspace/PhotoRenamer.py', content:'x'});
+  assert.ok(first.blockReason.includes('with path Playground/photo-renamer/PhotoRenamer.py and the same content'));
+  for (const command of ['mkdir -p /workspace/Playground/photo-renamer-test && cd /workspace/Playground/photo-renamer-test && touch a.jpg',
+    'mkdir -p Playground/other-tool', 'python3 PhotoRenamer.py']) {
+    assert.ok(call('exec', {command, workdir:'/workspace'}).blockReason.startsWith(
+      `${NOT_RUN} Call write now with path Playground/photo-renamer/PhotoRenamer.py and its content. ${FIRST_FILE}`), command);
+  }
+  assert.ok(call('write', {path:'test_photo_renamer.py', content:'x'}).blockReason
+    .includes('with path Playground/photo-renamer/test_photo_renamer.py and the same content'));
+  assert.ok(call('apply_patch', {input:'*** Begin Patch\n*** Add File: x.py\n+x\n*** End Patch'}).blockReason
+    .startsWith(`${NOT_RUN} Call write now with path Playground/photo-renamer/test_photo_renamer.py and its content.`));
+  // Multi-segment paths still get only the correction.
+  assert.ok(call('write', {path:'src/main.py', content:'x'}).blockReason.startsWith(CORRECTION_START));
+  assert.equal(fs.existsSync(path.join(root, 'Playground')), false);
+  assert.equal(state.binding ?? null, null);
+  // If the folder is taken meanwhile, the next suggestion derives an unused one.
+  fs.mkdirSync(path.join(root, 'Playground', 'photo-renamer'), {recursive: true});
+  assert.ok(call('write', {path:'PhotoRenamer.py', content:'x'}).blockReason.includes('with path Playground/photo-renamer-2/PhotoRenamer.py and'));
+
+  // A folder first named by a command is reused for a role file name.
+  const named = fresh();
+  assert.ok(named.call('exec', {command:'mkdir -p Playground/snake-game'}).blockReason.includes('with path Playground/snake-game/<file name> and its content.'));
+  assert.ok(named.call('exec', {command:'mkdir -p Playground/pong-game'}).blockReason.includes('with path Playground/snake-game/<file name> and its content.'));
+  assert.ok(named.call('write', {path:'index.html', content:'x'}).blockReason.includes('with path Playground/snake-game/index.html and the same content'));
+  assert.equal(named.call('write', {path:'Playground/snake-game/index.html', content:'x'}), undefined);
+  assert.equal(named.state.binding.directory, 'Playground/snake-game');
+});
+
+test('advice needs a checkable workspace and never changes routing state', () => {
+  const missing = path.join(workspace(), 'missing');
+  const state = {};
+  const call = (tool, params) => routePlaygroundTool({state, tool, params, root:missing, session:'guidance-session', intent:PROMPT});
+  assert.ok(call('write', {path:'/workspace/PhotoRenamer.py', content:'x'}).blockReason.startsWith(CORRECTION_START));
+  assert.ok(call('exec', {command:'mkdir -p Playground/snake-game'}).blockReason.startsWith(`${NOT_RUN} ${FIRST_FILE}`));
+  assert.equal(state.failed, undefined);
+  assert.equal(state.suggestedFolder, undefined);
+  // A Playground that is not a real directory gets no suggestion either.
+  const file = fresh();
+  fs.writeFileSync(path.join(file.root, 'Playground'), 'not a folder');
+  assert.ok(file.call('write', {path:'PhotoRenamer.py', content:'x'}).blockReason.startsWith(CORRECTION_START));
+  assert.ok(file.call('exec', {command:'mkdir -p Playground/snake-game'}).blockReason.startsWith(`${NOT_RUN} ${FIRST_FILE}`));
+  assert.equal(file.state.failed, undefined);
 });
