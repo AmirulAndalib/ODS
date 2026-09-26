@@ -573,3 +573,17 @@ test('an owner folder listed as playground never gets the case-sensitive correct
   assert.equal(rooted?.block, true);
   assert.equal(rooted.blockReason, 'This project is in Playground/todo-app. /playground/todo-app is an absolute path outside the workspace, not this project folder. Files already written for this project are saved in Playground/todo-app. Set exec workdir to /workspace/Playground/todo-app and use filenames relative to that directory.');
 });
+
+test('long slash runs in exec workdirs and cd targets stay linear-time', t => {
+  // A trailing-slash regex backtracked quadratically on model-supplied slash
+  // runs (100k slashes took seconds in the before-tool-call hook).
+  const {call} = fixture(t);
+  call('write', {path:'/playground/todo-app/index.html', content:'x'});
+  const slashes = '/'.repeat(100000);
+  for (const params of [{command:'ls', workdir:`a${slashes}x`}, {command:`cd a${slashes}x && ls`}, {command:'ls', workdir:`\${'\'.repeat(100000)}x`}]) {
+    const started = process.hrtime.bigint();
+    call('exec', params);
+    const elapsedMs = Number(process.hrtime.bigint() - started) / 1e6;
+    assert.ok(elapsedMs < 250, `took ${elapsedMs.toFixed(1)} ms`);
+  }
+});

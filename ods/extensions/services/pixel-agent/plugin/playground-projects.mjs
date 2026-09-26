@@ -104,12 +104,19 @@ function workspaceEntry(root, name) {
 function distinctSpelling(root, name) {
   return workspaceEntry(root,name) === 'distinct';
 }
+// Drops trailing slashes but keeps a lone root slash. A loop, not a
+// trailing-slash regex, which backtracks quadratically on a long slash run.
+function trimSlashes(text) {
+  let end = text.length;
+  while (end > 1 && text[end - 1] === '/') end--;
+  return text.slice(0, end);
+}
 // True when an exec workdir names the workspace root itself.
 function workspaceCwd(workdir, root) {
   if (workdir === undefined) return true;
   if (typeof workdir !== 'string') return false;
-  const text = workdir.replaceAll('\\','/').replace(/(?<=.)\/+$/,'');
-  return text === '' || text === '.' || text === '/workspace' || text === root.replaceAll('\\','/').replace(/(?<=.)\/+$/,'');
+  const text = trimSlashes(workdir.replaceAll('\\','/'));
+  return text === '' || text === '.' || text === '/workspace' || text === trimSlashes(root.replaceAll('\\','/'));
 }
 
 // A small POSIX-style reader of exec text, used only to find the words a
@@ -232,7 +239,8 @@ function shellPathWords(command, root, rooted = true, depth = 0) {
   let current = start(), redirect = null;
   const finish = () => {
     if (current.program && CHANGE_DIRECTORY.test(current.program)) {
-      const target = current.arguments.find(value => !value.startsWith('-'))?.replaceAll('\\','/').replace(/(?<=.)\/+$/,'');
+      const raw = current.arguments.find(value => !value.startsWith('-'));
+      const target = raw === undefined ? undefined : trimSlashes(raw.replaceAll('\\','/'));
       if (!['.','$PWD','${PWD}','$(pwd)'].includes(target)) rooted = Boolean(target) && workspaceCwd(target,root);
     }
     current = start();
