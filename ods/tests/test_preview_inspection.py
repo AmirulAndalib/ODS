@@ -1617,7 +1617,7 @@ class BrowserTests(unittest.TestCase):
             '<button class=contents aria-label="Empty contents"></button>'
             '<div style="content-visibility:hidden"><button>Skipped content</button></div>'
             '<details><summary>More</summary><button>Inside closed details</button></details>'
-            '<h3 class="up arrow">Late show</h3><button class=up>Duplicate</button><button>Duplicate</button>'
+            '<h3 class="up arrow">Late show</h3><button class=up>Duplicate</button><button>Duplicate</button><button></button>'
             '<div id=host><button>Slotted</button></div><div id=bare><button>Unslotted</button></div>'
             '<script>const root=document.getElementById("host").attachShadow({mode:"open"});'
             'root.append(Object.assign(document.createElement("button"),{textContent:"Shadow button"}),'
@@ -1636,6 +1636,9 @@ class BrowserTests(unittest.TestCase):
             ("button", "Inside closed details"), ("heading", "↓ Late show"), ("heading", "Late show"),
             ("button", "Duplicate"), ("button", "Slotted"), ("button", "Unslotted"), ("button", "Shadow button"),
             ("button", "show sold out"), ("button", "Show  sold   out"),
+            # Only the rendered empty button: a hidden element is never matched,
+            # even though its rendered-only name is empty.
+            ("button", " "),
         ]
         with sync_playwright() as p:
             browser = p.chromium.launch(headless=True, args=["--no-sandbox", "--disable-dev-shm-usage"])
