@@ -67,8 +67,15 @@ SELECTOR_COUNT = r"""function(selector) {
 # isolated world, so page script cannot replace the DOM or style APIs it reads.
 # Chromium's own rendered matches are passed in and kept, so a rendered element
 # is matched exactly as before; the union is de-duplicated by identity.
-ROLE_NAME_INCLUDING_HIDDEN = r"""function(role, name, ...rendered) {
-  const VALID = new Set(('alert alertdialog application article banner blockquote button caption cell checkbox code ' +
+#
+# Chromium's accessibility names also apply CSS text-transform: a button whose
+# source text is "Show sold out", styled uppercase, is named "SHOW SOLD OUT"
+# there, while Playwright's getByRole names (the capsule's own click and the
+# owner's check) use the source text. So assert-visible and click use the same
+# rules in their rendered-only form, ROLE_NAME_RENDERED: Playwright's default
+# getByRole(role, {name, exact: true}), which keeps only elements not hidden
+# for ARIA and leaves hidden descendants out of a name.
+ROLE_NAME_RULES = r"""  const VALID = new Set(('alert alertdialog application article banner blockquote button caption cell checkbox code ' +
     'columnheader combobox complementary contentinfo definition deletion dialog directory document emphasis feed figure ' +
     'form generic grid gridcell group heading img insertion link list listbox listitem log main mark marquee math meter ' +
     'menu menubar menuitem menuitemcheckbox menuitemradio navigation none note option paragraph presentation progressbar ' +
@@ -162,9 +169,48 @@ ROLE_NAME_INCLUDING_HIDDEN = r"""function(role, name, ...rendered) {
     const text = parts.map(t => t.text).join('');
     return pseudo && (s.display || 'inline') !== 'inline' ? ' ' + text + ' ' : text;
   };
+  // Playwright's isElementHiddenForAria, as getByRole applies it without
+  // includeHidden: script, style, template and noscript; display:none or
+  // aria-hidden="true" on the element or an ancestor across shadow hosts; an
+  // unslotted shadow-host child; the element's own visibility or
+  // content-visibility. Opacity does not matter, as in the accessibility tree.
+  const parentOf = e => e.parentElement || (e.parentNode && e.parentNode.nodeType === 11 && e.parentNode.host) || null;
+  const excludedCache = new Map();
+  const excluded = e => {
+    if (!excludedCache.has(e)) {
+      const s = style(e), parent = parentOf(e);
+      excludedCache.set(e, Boolean(e.parentElement && e.parentElement.shadowRoot && !e.assignedSlot) || !s ||
+        s.display === 'none' || (e.getAttribute('aria-hidden') || '').toLowerCase() === 'true' || Boolean(parent && excluded(parent)));
+    }
+    return excludedCache.get(e);
+  };
+  const textShown = node => {
+    const range = node.ownerDocument.createRange();
+    range.selectNode(node);
+    const box = range.getBoundingClientRect();
+    return box.width > 0 && box.height > 0;
+  };
+  const hiddenForAria = e => {
+    const t = tag(e), s = style(e);
+    if (IGNORED.has(t)) return true;
+    if (s && s.display === 'contents' && t !== 'slot') {
+      for (let child = e.firstChild; child; child = child.nextSibling) {
+        if (child.nodeType === 1 && !hiddenForAria(child)) return false;
+        if (child.nodeType === 3 && textShown(child)) return false;
+      }
+      return true;
+    }
+    if (!(t === 'option' && e.closest('select')) && t !== 'slot' && s && (!e.checkVisibility() || s.visibility !== 'visible'))
+      return true;
+    return excluded(e);
+  };
+  // In the rendered-only name (`o.rendered`), a hidden descendant contributes
+  // nothing unless it is reached through an aria-labelledby or <label>
+  // reference that is itself hidden (`o.hiddenReference`).
+  const reference = (o, e) => o.rendered ? {rendered: true, hiddenReference: hiddenForAria(e)} : {};
   const labels = e => { try { return [...(e.labels || [])]; } catch { return []; } };
-  const fromLabels = (list, o) =>
-    list.map(label => alternative(label, {visited: o.visited, label: true})).filter(Boolean).join(' ');
+  const fromLabels = (list, o) => list.map(label =>
+    alternative(label, {visited: o.visited, label: true, ...reference(o, label)})).filter(Boolean).join(' ');
   const inner = (e, o) => {
     const out = [cssContent(e, '::before') || ''], own = cssContent(e);
     const visit = node => {
@@ -188,10 +234,11 @@ ROLE_NAME_INCLUDING_HIDDEN = r"""function(role, name, ...rendered) {
     const visited = o.visited, t = tag(e);
     if (visited.has(e)) return '';
     if (IGNORED.has(t)) { visited.add(e); return ''; }
+    if (o.rendered && !o.hiddenReference && hiddenForAria(e)) { visited.add(e); return ''; }
     const child = {...o, target: o.target === 'self' ? 'descendant' : o.target};
     const labelledBy = e.hasAttribute('aria-labelledby') ? idRefs(e, 'aria-labelledby') : [];
     if (!o.labelledBy) {
-      const text = labelledBy.map(ref => alternative(ref, {visited, labelledBy: true})).join(' ');
+      const text = labelledBy.map(ref => alternative(ref, {visited, labelledBy: true, ...reference(o, ref)})).join(' ');
       if (text) return text;
     }
     const r = roleOf(e) || '';
@@ -260,16 +307,22 @@ ROLE_NAME_INCLUDING_HIDDEN = r"""function(role, name, ...rendered) {
   const want = normal(name), out = [...new Set(rendered)];
   const walk = root => {
     for (const e of root.querySelectorAll('*')) {
-      if (roleOf(e) === role && !out.includes(e) &&
-          normal(flat(alternative(e, {visited: new Set(), target: 'self'}))) === want) out.push(e);
+      if (roleOf(e) === role && !out.includes(e) && !(renderedOnly && hiddenForAria(e)) &&
+          normal(flat(alternative(e, {visited: new Set(), target: 'self', rendered: renderedOnly}))) === want) out.push(e);
       if (e.shadowRoot) walk(e.shadowRoot);
     }
   };
   walk(document);
   return out;
 }"""
-# Bounds Chromium matches carried into the hidden-inclusive union; more than
-# one match already fails uniqueness.
+ROLE_NAME_INCLUDING_HIDDEN = (
+    "function(role, name, ...rendered) {\n  const renderedOnly = false;\n" + ROLE_NAME_RULES
+)
+ROLE_NAME_RENDERED = (
+    "function(role, name, ...rendered) {\n  const renderedOnly = true;\n" + ROLE_NAME_RULES
+)
+# Bounds Chromium matches carried into either union; more than one match
+# already fails uniqueness.
 MAX_RENDERED_MATCHES = 32
 
 
@@ -761,9 +814,10 @@ def run_browser(bundle, playwright_factory=None):
                 "Runtime.evaluate", {"expression": "document", "contextId": world}
             )["result"]["objectId"]
 
-            def including_hidden(locator, nodes, owned):
+            def including_hidden(locator, nodes, owned, rendered_only=False):
                 # Carry Chromium's rendered matches into the isolated world and
-                # add hidden-inclusive exact role/name matches by identity.
+                # add Playwright-rule exact role/name matches by identity:
+                # hidden-inclusive, or rendered-only (source-text names).
                 unresolved = max(0, len(nodes) - MAX_RENDERED_MATCHES)
                 rendered = []
                 for n in nodes[:MAX_RENDERED_MATCHES]:
@@ -781,7 +835,9 @@ def run_browser(bundle, playwright_factory=None):
                     "Runtime.callFunctionOn",
                     {
                         "executionContextId": world,
-                        "functionDeclaration": ROLE_NAME_INCLUDING_HIDDEN,
+                        "functionDeclaration": ROLE_NAME_RENDERED
+                        if rendered_only
+                        else ROLE_NAME_INCLUDING_HIDDEN,
                         "arguments": [{"value": locator["role"]}, {"value": locator["name"]},
                                       *({"objectId": h} for h in rendered)],
                         "returnByValue": False,
@@ -857,20 +913,12 @@ def run_browser(bundle, playwright_factory=None):
                         and n.get("name", {}).get("value") == locator["name"]
                         and n.get("backendDOMNodeId")
                     ]
-                    if include_hidden:
-                        count, node = including_hidden(locator, nodes, owned)
-                        if count != 1:
-                            return {"count": count}
-                    elif len(nodes) != 1:
-                        return {"count": len(nodes)}
-                    else:
-                        node = cdp.send(
-                            "DOM.resolveNode",
-                            {
-                                "backendNodeId": nodes[0]["backendDOMNodeId"],
-                                "executionContextId": world,
-                            },
-                        )["object"]["objectId"]
+                    # Chromium's names apply text-transform; the matcher's
+                    # Playwright names use the source text. A rendered step
+                    # therefore unions both, rendered-only on either side.
+                    count, node = including_hidden(locator, nodes, owned, rendered_only=not include_hidden)
+                    if count != 1:
+                        return {"count": count}
                 owned.append(node)
                 result = cdp.send(
                     "Runtime.callFunctionOn",
@@ -895,7 +943,8 @@ def run_browser(bundle, playwright_factory=None):
             for index, step in enumerate(request["steps"]):
                 try:
                     # Only a hidden assertion may address a hidden element by
-                    # role/name; assert-visible and click stay rendered-only.
+                    # role/name; assert-visible and click stay rendered-only,
+                    # and they match Playwright's source-text names too.
                     before, stable = observe(
                         step["locator"], step["action"] == "assert-hidden"
                     )

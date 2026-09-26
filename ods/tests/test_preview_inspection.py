@@ -58,7 +58,7 @@ FLEET_PLAN = [
 ]
 
 
-def bundle(html, steps=None, files=None):
+def bundle(html, steps=None, files=None, viewport=None):
     # files: {path: bytes} for a multi-file site; html alone is index.html.
     files = sorted((files or {"index.html": html.encode()}).items())
     digest = hashlib.sha256()
@@ -73,7 +73,7 @@ def bundle(html, steps=None, files=None):
             "action": "inspect",
             "siteId": "site-" + digest[:24],
             "sha256": digest,
-            "viewport": {"width": 375, "height": 812},
+            "viewport": viewport or {"width": 375, "height": 812},
             "steps": steps or [step("assert-visible", "#item")],
         },
         "files": [{"path": name, "base64": base64.b64encode(data).decode()}
@@ -644,17 +644,23 @@ class PageErrorTests(unittest.TestCase):
 
 class SemanticBrowser(ScriptedBrowser):
     """The fleet page through the capsule's CDP calls. Chromium's accessibility
-    tree (queryAXTree) exposes only rendered, named elements; the isolated-world
-    hidden-inclusive matcher is modelled by the element table below."""
+    tree (queryAXTree) exposes only rendered elements, by Chromium's name. The
+    isolated-world matchers use Playwright's name, the source text (`source`,
+    by default Chromium's name): hidden-inclusive for assert-hidden, rendered
+    only otherwise. Both are modelled by the element table below."""
 
-    def __init__(self, elements):
+    def __init__(self, elements, source=None):
         super().__init__()
-        # element id -> (role, name, visible before click, visible after click)
+        # element id -> (role, Chromium name, visible before click, visible after click)
         self.elements = elements
-        self.matcher_calls, self.live = [], {}
+        self.source = source or {}
+        self.matcher_calls, self.rendered_calls, self.observed, self.live = [], [], [], {}
 
     def visible(self, element):
         return self.elements[element][3 if self.revealed else 2]
+
+    def source_name(self, element):
+        return self.source.get(element, self.elements[element][1])
 
     def remote(self, value):
         object_id = "obj-%d" % (len(self.live) + len(self.released))
@@ -680,17 +686,21 @@ class SemanticBrowser(ScriptedBrowser):
             self.released.append(params["objectId"])
             self.live.pop(params["objectId"])
             return {}
-        if function == capsule.ROLE_NAME_INCLUDING_HIDDEN:
+        if function in (capsule.ROLE_NAME_INCLUDING_HIDDEN, capsule.ROLE_NAME_RENDERED):
             role, name, *rendered = [a.get("value", a.get("objectId")) for a in params["arguments"]]
-            self.matcher_calls.append((role, name))
+            rendered_only = function == capsule.ROLE_NAME_RENDERED
+            (self.rendered_calls if rendered_only else self.matcher_calls).append((role, name))
             union = [self.live[r] for r in rendered]
-            union += [e for e, (r, n, *_) in self.elements.items() if (r, n) == (role, name) and e not in union]
+            union += [e for e, (r, *_) in self.elements.items()
+                      if (r, self.source_name(e)) == (role, name) and e not in union
+                      and (self.visible(e) or not rendered_only)]
             return {"result": {"objectId": self.remote(union)}}
         if function == "function(){return this.length}":
             return {"result": {"value": len(self.live[params["objectId"]])}}
         if function == "function(){return this[0]}":
             return {"result": {"objectId": self.remote(self.live[params["objectId"]][0])}}
         if function == capsule.OBSERVE_ELEMENT:
+            self.observed.append(self.live[params["objectId"]])
             visible = self.visible(self.live[params["objectId"]])
             return {"result": {"value": {
                 "count": 1, "visible": visible, "display": "block" if visible else "none",
@@ -725,8 +735,10 @@ class HiddenRoleLocatorTests(unittest.TestCase):
         self.assertFalse(hidden["before"]["visible"])
         self.assertTrue(result["steps"][4]["before"]["visible"])
         # Only the hidden assertion used hidden-inclusive matching; the click
-        # and assert-visible steps kept Chromium's rendered-only resolution.
+        # and assert-visible steps stayed rendered-only.
         self.assertEqual(set(browser.matcher_calls), {MIDNIGHT})
+        self.assertEqual(set(browser.rendered_calls), {("heading", "Dawn Jazz"), ("heading", "River Lantern Walk"),
+                                                       ("button", "Show sold out"), MIDNIGHT})
         self.assertEqual(browser.live, {}, "every remote object is released")
 
     def test_rendered_only_resolution_is_unchanged_for_assert_visible(self):
@@ -772,10 +784,129 @@ class HiddenRoleLocatorTests(unittest.TestCase):
                 self.assertEqual(result["status"], "failed")
 
     def test_matcher_source_is_bounded_and_read_only(self):
-        source = capsule.ROLE_NAME_INCLUDING_HIDDEN
-        for forbidden in ("setAttribute", "removeAttribute", "innerHTML", "textContent =",
-                          ".style.", "click(", "dispatchEvent", "focus(", "fetch(", "eval(", "Function("):
-            self.assertNotIn(forbidden, source)
+        for source in (capsule.ROLE_NAME_INCLUDING_HIDDEN, capsule.ROLE_NAME_RENDERED):
+            for forbidden in ("setAttribute", "removeAttribute", "innerHTML", "textContent =",
+                              ".style.", "click(", "dispatchEvent", "focus(", "fetch(", "eval(", "Function("):
+                self.assertNotIn(forbidden, source)
+        # One set of role and name rules; the two matchers differ only in mode.
+        self.assertEqual(capsule.ROLE_NAME_INCLUDING_HIDDEN.replace("renderedOnly = false", "renderedOnly = true"),
+                         capsule.ROLE_NAME_RENDERED)
+
+
+# Fleet laptop (Qwen3.5-9B) website-create pages, recorded byte for byte: each
+# digest is the published snapshot the recorded inspection plan named. Their
+# "Show sold out" buttons are styled text-transform: uppercase, so Chromium's
+# accessibility tree names them "SHOW SOLD OUT"; Playwright's getByRole (the
+# capsule's click and the owner's check) names them by the source text.
+FIXTURES = Path(__file__).resolve().parent / "fixtures"
+LAPTOP_R101 = {  # session 119e5fd5, transcript #9-#10 (main b060c6ae)
+    "path": FIXTURES / "preview-inspection-laptop-round101.html",
+    "siteId": "site-458e778598a29b65c9e8d07a",
+    "sha256": "458e778598a29b65c9e8d07ae576c6e9945e061e93680dc09f3bc10ff953405b",
+    "viewport": {"width": 375, "height": 667},
+    "steps": [step("assert-visible", "h1"), step("assert-visible", ".event-card:nth-child(1)"),
+              step("assert-visible", ".event-card:nth-child(2)"),
+              step("assert-hidden", ".event-card:nth-child(3)"),
+              role_step("click", "button", "Show sold out"),
+              step("assert-visible", ".event-card:nth-child(3)")],
+}
+LAPTOP_R107 = {  # session fabc87a8, transcript #51-#52 (main d4a61f33)
+    "path": FIXTURES / "preview-inspection-laptop-round107-site-1f5f2cf8.html",
+    "siteId": "site-1f5f2cf8da3b36f920507469",
+    "sha256": "1f5f2cf8da3b36f920507469d941da24c00b8866f924e72b6cc7332812722018",
+    "viewport": {"width": 375, "height": 667},
+    "steps": [step("assert-visible", "h1"), step("assert-visible", ".show-sold-out-btn"),
+              role_step("click", "button", "Show sold out"), step("assert-visible", ".sold-out-card")],
+}
+
+
+def recorded_bundle(record):
+    return bundle(None, record["steps"], {"index.html": record["path"].read_bytes()}, record["viewport"])
+
+
+class SourceTextRoleNameTests(unittest.TestCase):
+    """assert-visible and click by exact role/name match Playwright's
+    source-text names as well as Chromium's text-transformed names."""
+
+    TRANSFORMED = {
+        "toggle": ("button", "SHOW SOLD OUT", True, True),
+        "card": ("heading", "Midnight Sold-Out Concert", False, True),
+    }
+    SOURCE = {"toggle": "Show sold out"}
+
+    def run_plan(self, elements, steps, source=None):
+        browser = SemanticBrowser(elements, source)
+        data = bundle(FLEET_EVENTS_HTML, steps)
+        browser.site = data["request"]["siteId"]
+        return browser, capsule.run_browser(data, playwright_factory=browser)
+
+    def test_source_text_name_is_matched_when_chromium_finds_none(self):
+        plan = [role_step("assert-visible", "button", "Show sold out"),
+                role_step("assert-hidden", "heading", "Midnight Sold-Out Concert"),
+                role_step("click", "button", "Show sold out"),
+                role_step("assert-visible", "heading", "Midnight Sold-Out Concert")]
+        browser, result = self.run_plan(self.TRANSFORMED, plan, self.SOURCE)
+        self.assertEqual(result["status"], "passed", result)
+        self.assertEqual([s["before"]["count"] for s in result["steps"]], [1, 1, 1, 1])
+        self.assertTrue(browser.revealed, "the click was dispatched")
+        # The matched button itself was observed (before and after the click).
+        self.assertEqual(set(browser.observed), {"toggle", "card"})
+        self.assertEqual(result["steps"][2]["after"]["count"], 1)
+        self.assertIn(("button", "Show sold out"), browser.rendered_calls)
+        self.assertEqual(browser.live, {}, "every remote object is released")
+
+    def test_chromium_and_matcher_agreeing_on_one_element_count_once(self):
+        browser, result = self.run_plan(self.TRANSFORMED, [role_step("click", "button", "SHOW SOLD OUT")],
+                                        {"toggle": "SHOW SOLD OUT"})
+        self.assertEqual(result["status"], "passed", result)
+        self.assertEqual(result["steps"][0]["before"]["count"], 1)
+        self.assertEqual(browser.observed[0], "toggle")
+
+    def test_every_chromium_match_is_kept(self):
+        # Chromium's own match stays a match even where the source-text name
+        # differs (here the transformed name), so no earlier match is lost.
+        browser, result = self.run_plan(self.TRANSFORMED, [role_step("assert-visible", "button", "SHOW SOLD OUT")],
+                                        self.SOURCE)
+        self.assertEqual(result["status"], "passed", result)
+        self.assertEqual(result["steps"][0]["before"]["count"], 1)
+        self.assertEqual(browser.observed, ["toggle"] * len(browser.observed))
+
+    def test_hidden_source_text_match_is_excluded_outside_assert_hidden(self):
+        elements = {"toggle": ("button", "SHOW SOLD OUT", False, False)}
+        for action in ("assert-visible", "click"):
+            with self.subTest(action=action):
+                browser, result = self.run_plan(elements, [role_step(action, "button", "Show sold out")], self.SOURCE)
+                self.assertEqual(result["steps"][0]["before"], {"count": 0})
+                self.assertEqual(result["steps"][0]["errorCode"], "no_match")
+                self.assertFalse(browser.revealed)
+                self.assertEqual(browser.matcher_calls, [], "never hidden-inclusive")
+        _, result = self.run_plan(elements, [role_step("assert-hidden", "button", "Show sold out")], self.SOURCE)
+        self.assertEqual(result["status"], "passed", result)
+
+    def test_distinct_chromium_and_source_text_matches_are_not_unique(self):
+        elements = {**self.TRANSFORMED, "plain": ("button", "Show sold out", True, True)}
+        for action in ("assert-visible", "click"):
+            with self.subTest(action=action):
+                browser, result = self.run_plan(elements, [role_step(action, "button", "Show sold out")], self.SOURCE)
+                self.assertEqual(result["steps"][0]["before"], {"count": 2})
+                self.assertEqual(result["steps"][0]["errorCode"], "selector_not_unique")
+                self.assertFalse(browser.revealed)
+                self.assertEqual(browser.live, {})
+
+    def test_names_stay_exact(self):
+        for name in ("show sold out", "Show Sold Out", "Show sold out!", "Show sold"):
+            with self.subTest(name=name):
+                _, result = self.run_plan(self.TRANSFORMED, [role_step("click", "button", name)], self.SOURCE)
+                self.assertEqual(result["steps"][0]["errorCode"], "no_match")
+
+    def test_recorded_fixtures_are_the_published_snapshots(self):
+        for record in (LAPTOP_R101, LAPTOP_R107):
+            with self.subTest(site=record["siteId"]):
+                request = recorded_bundle(record)["request"]
+                self.assertEqual((request["siteId"], request["sha256"]), (record["siteId"], record["sha256"]))
+                source = record["path"].read_text(encoding="utf-8")
+                self.assertIn(">Show sold out</button>", source)
+                self.assertIn("text-transform: uppercase;", source)
 
 
 PNG_SIGNATURE = b"\x89PNG\r\n\x1a\n"
@@ -1049,7 +1180,7 @@ TOWER1_PLAN = [step("assert-hidden", "#midnight-concert-card"), role_step("click
     os.environ.get("ODS_PREVIEW_BROWSER_TESTS") == "1", "real Chromium opt in"
 )
 class BrowserTests(unittest.TestCase):
-    def check(self, html, steps, files=None):
+    def check(self, html, steps, files=None, viewport=None):
         # Fixture browsers get a separate process group and deadline too. The
         # production caller uses the stricter Docker capsule, never this path.
         import subprocess
@@ -1065,7 +1196,7 @@ class BrowserTests(unittest.TestCase):
         )
         try:
             output, error = child.communicate(
-                protocol.canonical(bundle(html, steps, files)), timeout=20
+                protocol.canonical(bundle(html, steps, files, viewport)), timeout=20
             )
             self.assertEqual(child.returncode, 0, error.decode(errors="replace"))
             return protocol.strict_json(output)
@@ -1376,6 +1507,188 @@ class BrowserTests(unittest.TestCase):
                 self.assertGreaterEqual(matched, 20, "fixture must exercise real matches")
             finally:
                 browser.close()
+
+    TRANSFORMED_PAGE = (
+        "<style>.up{text-transform:uppercase}.cap{text-transform:capitalize}</style>"
+        "<h2 class=cap>river lantern walk</h2><article id=card hidden><h2>Midnight Sold-Out Concert</h2></article>"
+        "<button class=up onclick=\"document.getElementById('card').hidden=false\">Show sold out</button>"
+        "<button class=cap onclick=\"document.getElementById('card').hidden=false\">show all events</button>"
+    )
+
+    def test_role_names_are_the_source_text_despite_text_transform(self):
+        # Chromium names the uppercase button "SHOW SOLD OUT"; the source, the
+        # owner's request and Playwright's getByRole name it "Show sold out".
+        reveal = [role_step("assert-hidden", *MIDNIGHT), role_step("click", "button", "Show sold out"),
+                  role_step("assert-visible", *MIDNIGHT)]
+        result = self.check(self.TRANSFORMED_PAGE, reveal)
+        self.assertEqual(result["status"], "passed", result)
+        self.assertEqual(result["steps"][1]["before"]["count"], 1)
+        for plan in ([role_step("click", "button", "show all events"), role_step("assert-visible", *MIDNIGHT)],
+                     [role_step("assert-visible", "heading", "river lantern walk")],
+                     # Chromium's transformed names still match, as before.
+                     [role_step("assert-visible", "button", "SHOW SOLD OUT")],
+                     [role_step("assert-visible", "button", "Show All Events")],
+                     [role_step("assert-visible", "heading", "River Lantern Walk")]):
+            with self.subTest(plan=plan):
+                result = self.check(self.TRANSFORMED_PAGE, plan)
+                self.assertEqual(result["status"], "passed", result)
+                self.assertEqual(result["steps"][0]["before"]["count"], 1)
+        # Names stay exact: neither side folds case or drops punctuation.
+        for name in ("show sold out", "Show Sold Out", "Show sold out!"):
+            with self.subTest(name=name):
+                result = self.check(self.TRANSFORMED_PAGE, [role_step("click", "button", name)])
+                self.assertEqual(result["steps"][0]["before"], {"count": 0})
+                self.assertEqual(result["steps"][0]["errorCode"], "no_match")
+
+    def test_source_text_matching_stays_rendered_only(self):
+        style = "<style>button{text-transform:uppercase}</style><p>x</p>"
+        cases = {'<button hidden>Reveal</button>': ("assert-visible", "click"),
+                 '<div style="display:none"><button>Reveal</button></div>': ("assert-visible", "click"),
+                 '<div aria-hidden="true"><button>Reveal</button></div>': ("assert-visible", "click"),
+                 '<button style="visibility:hidden">Reveal</button>': ("click",),
+                 '<div style="content-visibility:hidden"><button>Reveal</button></div>': ("click",)}
+        for hidden, actions in cases.items():
+            for action in actions:
+                with self.subTest(hidden=hidden, action=action):
+                    result = self.check(style + hidden, [role_step(action, "button", "Reveal")])
+                    self.assertEqual(result["steps"][0]["before"], {"count": 0}, result)
+                    self.assertEqual(result["steps"][0]["errorCode"], "no_match")
+        # Opacity does not hide an element for ARIA, as in the accessibility
+        # tree: it is matched, and its visibility is measured as before.
+        result = self.check(style + '<button style="opacity:0">Reveal</button>',
+                            [role_step("assert-visible", "button", "Reveal")])
+        self.assertEqual(result["steps"][0]["before"]["count"], 1, result)
+        self.assertEqual(result["steps"][0]["errorCode"], "visibility_mismatch")
+        # A hidden descendant is not part of the rendered name.
+        html = style + '<button onclick="this.dataset.done=1">Show <span hidden>all</span> sold out</button>'
+        result = self.check(html, [role_step("click", "button", "Show sold out")])
+        self.assertEqual(result["status"], "passed", result)
+        result = self.check(html, [role_step("click", "button", "Show all sold out")])
+        self.assertEqual(result["steps"][0]["errorCode"], "no_match", result)
+
+    def test_source_text_matching_keeps_uniqueness(self):
+        style = "<style>.up{text-transform:uppercase}</style>"
+        for html in ('<button class=up>Show sold out</button><button class=up>Show sold out</button>',
+                     '<button class=up>Show sold out</button><button>Show sold out</button>'):
+            for action in ("assert-visible", "click"):
+                with self.subTest(html=html, action=action):
+                    result = self.check(style + html, [role_step(action, "button", "Show sold out")])
+                    self.assertEqual(result["steps"][0]["before"], {"count": 2}, result)
+                    self.assertEqual(result["steps"][0]["errorCode"], "selector_not_unique")
+        result = self.check(style + '<button class=up>Show sold out</button><button hidden>Show sold out</button>',
+                            [role_step("click", "button", "Show sold out")])
+        self.assertEqual(result["status"], "passed", result)
+
+    def test_author_script_cannot_spoof_rendered_role_matching(self):
+        html = ("<style>.up{text-transform:uppercase}</style><button class=up>Show sold out</button>"
+                "<button hidden>Fake</button><script>Element.prototype.checkVisibility=()=>true;"
+                "window.getComputedStyle=()=>({display:'block',visibility:'visible',textTransform:'none'});"
+                "Element.prototype.getAttribute=()=>null;Element.prototype.hasAttribute=()=>false;"
+                "Document.prototype.querySelectorAll=()=>[];Element.prototype.querySelectorAll=()=>[];"
+                "Object.defineProperty(Node.prototype,'textContent',{get(){return 'Fake'}});</script>")
+        result = self.check(html, [role_step("assert-visible", "button", "Show sold out")])
+        self.assertEqual(result["status"], "passed", result)
+        result = self.check(html, [role_step("assert-visible", "button", "Fake")])
+        self.assertEqual(result["steps"][0]["before"], {"count": 0}, result)
+
+    def test_rendered_role_matcher_agrees_with_playwright_get_by_role(self):
+        # ROLE_NAME_RENDERED is the rendered-only form of the same port; the
+        # pinned engine's default getByRole(role, {name, exact: true}) is the
+        # reference. The capsule also keeps Chromium's own matches (not here).
+        from playwright.sync_api import sync_playwright
+
+        html = (
+            '<style>.up{text-transform:uppercase}.cap{text-transform:capitalize}.off{display:none}'
+            '.ghost{visibility:hidden}.contents{display:contents}.arrow::before{content:"\\2193  "}</style>'
+            '<button class=up>Show sold out</button><h2 class=cap>river lantern walk</h2>'
+            '<a href="#t" class=up>buy tickets</a><input type=submit value="Book now" class=up>'
+            '<button hidden>Reveal</button><div class=off><button>Parent hidden</button></div>'
+            '<div aria-hidden="true"><button aria-hidden="false">Close banner</button></div>'
+            '<div aria-hidden="TRUE"><button>Upper aria</button></div>'
+            '<button class=ghost>Ghost</button><div class=ghost><button style="visibility:visible">Shown in ghost</button></div>'
+            '<button style="opacity:0">Faded</button>'
+            '<button>Show <span hidden>all</span> items</button><button>Buy <span class=off>now</span></button>'
+            '<button><img alt="Star" hidden> Favourite</button>'
+            '<span id=lbl hidden>Filter events</span><button aria-labelledby="lbl">x</button>'
+            '<span id=lbl2>Sort <span hidden>by</span> date</span><button aria-labelledby="lbl2">y</button>'
+            '<label for=q hidden>Search dates</label><input id=q type=text>'
+            '<label for=q2>City <span hidden>name</span></label><input id=q2 type=text>'
+            '<div class=contents><button>Contents child</button></div><button class=contents>Contents button</button>'
+            '<button class=contents aria-label="Empty contents"></button>'
+            '<div style="content-visibility:hidden"><button>Skipped content</button></div>'
+            '<details><summary>More</summary><button>Inside closed details</button></details>'
+            '<h3 class="up arrow">Late show</h3><button class=up>Duplicate</button><button>Duplicate</button>'
+            '<div id=host><button>Slotted</button></div><div id=bare><button>Unslotted</button></div>'
+            '<script>const root=document.getElementById("host").attachShadow({mode:"open"});'
+            'root.append(Object.assign(document.createElement("button"),{textContent:"Shadow button"}),'
+            'document.createElement("slot"));document.getElementById("bare").attachShadow({mode:"open"})'
+            '.append(document.createElement("p"));</script>'
+        )
+        queries = [
+            ("button", "Show sold out"), ("button", "SHOW SOLD OUT"), ("heading", "river lantern walk"),
+            ("heading", "River Lantern Walk"), ("link", "buy tickets"), ("button", "Book now"), ("button", "Reveal"),
+            ("button", "Parent hidden"), ("button", "Close banner"), ("button", "Upper aria"), ("button", "Ghost"),
+            ("button", "Shown in ghost"), ("button", "Faded"), ("button", "Show items"), ("button", "Show all items"),
+            ("button", "Buy"), ("button", "Buy now"), ("button", "Favourite"), ("button", "Star Favourite"),
+            ("button", "Filter events"), ("button", "Sort date"), ("button", "Sort by date"),
+            ("textbox", "Search dates"), ("textbox", "City"), ("textbox", "City name"), ("button", "Contents child"),
+            ("button", "Contents button"), ("button", "Empty contents"), ("button", "Skipped content"),
+            ("button", "Inside closed details"), ("heading", "↓ Late show"), ("heading", "Late show"),
+            ("button", "Duplicate"), ("button", "Slotted"), ("button", "Unslotted"), ("button", "Shadow button"),
+            ("button", "show sold out"), ("button", "Show  sold   out"),
+        ]
+        with sync_playwright() as p:
+            browser = p.chromium.launch(headless=True, args=["--no-sandbox", "--disable-dev-shm-usage"])
+            try:
+                page = browser.new_page()
+                page.set_content("<!doctype html>" + html)
+                cdp = page.context.new_cdp_session(page)
+                frame = cdp.send("Page.getFrameTree")["frameTree"]["frame"]["id"]
+                world = cdp.send("Page.createIsolatedWorld", {"frameId": frame, "worldName": "parity"})
+                disagreements, matched = [], 0
+                for role, name in queries:
+                    expected = page.get_by_role(role, name=name, exact=True).count()
+                    result = cdp.send("Runtime.callFunctionOn", {
+                        "executionContextId": world["executionContextId"],
+                        "functionDeclaration": capsule.ROLE_NAME_RENDERED,
+                        "arguments": [{"value": role}, {"value": name}], "returnByValue": False})
+                    self.assertNotIn("exceptionDetails", result, result)
+                    actual = cdp.send("Runtime.callFunctionOn", {
+                        "objectId": result["result"]["objectId"],
+                        "functionDeclaration": "function(){return this.length}", "returnByValue": True,
+                    })["result"]["value"]
+                    matched += bool(expected)
+                    if actual != expected:
+                        disagreements.append((role, name, expected, actual))
+                self.assertEqual(disagreements, [])
+                self.assertGreaterEqual(matched, 18, "fixture must exercise real matches")
+            finally:
+                browser.close()
+
+    def check_recorded(self, record):
+        data = recorded_bundle(record)["request"]
+        self.assertEqual((data["siteId"], data["sha256"]), (record["siteId"], record["sha256"]))
+        result = self.check(None, record["steps"], {"index.html": record["path"].read_bytes()}, record["viewport"])
+        self.assertEqual((result["siteId"], result["sha256"]), (record["siteId"], record["sha256"]))
+        return result
+
+    def test_replay_laptop_round101_click_by_source_name(self):
+        # Recorded: step 5 (click button "Show sold out") returned no_match.
+        # The model then clicked '#revealBtn' and the same page passed.
+        result = self.check_recorded(LAPTOP_R101)
+        self.assertEqual(result["status"], "passed", result)
+        self.assertEqual(result["steps"][4]["before"]["count"], 1)
+        self.assertTrue(result["steps"][5]["before"]["visible"])
+
+    def test_replay_laptop_round107_still_reports_the_real_defect(self):
+        # Recorded: step 3 (click button "Show sold out") returned no_match.
+        # The click now runs; the page's own defect is still reported.
+        result = self.check_recorded(LAPTOP_R107)
+        self.assertEqual(result["status"], "failed", result)
+        self.assertEqual([s["status"] for s in result["steps"]], ["passed", "passed", "passed", "failed"])
+        self.assertEqual(result["steps"][2]["before"]["count"], 1)
+        self.assertEqual(result["steps"][3]["errorCode"], "visibility_mismatch")
+        self.assertFalse(result["steps"][3]["before"]["visible"])
 
     def test_unguarded_storage_errors_are_reported_without_changing_steps(self):
         # Fleet round 054: every functional check passed while startup and a
