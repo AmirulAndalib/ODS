@@ -72,6 +72,30 @@ function relative(value, root) {
   if (text.startsWith('./')) text = text.slice(2);
   return parts(text) ? text : null;
 }
+// Models misspell the Playground convention as playground/<name>/... or a
+// rooted /playground/<name>/.... Read that first segment as the workspace
+// Playground folder only when <name> is a descriptive project folder and no
+// distinct entry with the model's spelling exists (a case-sensitive workspace
+// can hold both). The result is still workspace-relative and every routing
+// check applies to it as if the model had written it; it grants no location.
+function playgroundSpelling(value, root, minimum) {
+  if (typeof value !== 'string') return null;
+  const text = value.replaceAll('\\', '/');
+  const direct = relative(text,root);
+  const target = direct ?? (/^\/playground\//i.test(text) ? relative(text.slice(1),root) : null);
+  const segments = parts(target);
+  if (!segments || !/^playground$/i.test(segments[0]) || segments.length < minimum || GENERIC.test(segments[1])) return null;
+  const canonical = ['Playground',...segments.slice(1)].join('/');
+  if (canonical === direct) return null;
+  if (segments[0] !== 'Playground') {
+    const base = safeRoot(root);
+    const entry = name => { try { return fs.lstatSync(path.join(base,name)); } catch (error) { if (error.code === 'ENOENT') return null; throw error; } };
+    const spelled = entry(segments[0]);
+    const folder = spelled && entry('Playground');
+    if (spelled && (!folder || folder.dev !== spelled.dev || folder.ino !== spelled.ino)) return null;
+  }
+  return canonical;
+}
 function safeDirectory(directory, create = false) {
   if (create) { try { fs.mkdirSync(directory, {mode:0o700}); } catch (error) { if (error.code !== 'EEXIST') throw error; } }
   const stat = fs.lstatSync(directory);
@@ -187,7 +211,9 @@ export function routePlaygroundTool({state,tool,params,root,session,intent,exist
     }
     const args = selected.args;
     const key = selected.tool === 'exec' ? 'workdir' : selected.tool === 'pixel_ods_workspace_preview' ? 'relativeDirectory' : 'path';
-    const target = relative(args[key],root);
+    let target = relative(args[key],root);
+    const minimum = key === 'path' ? 3 : 2;
+    let spelled;
     if (!state.binding && state.fresh && ['exec','apply_patch'].includes(selected.tool)) {
       const command = typeof args.command === 'string' ? args.command.trim() : '';
       const inspection = selected.tool === 'exec' && !/[;&|><`\r\n]|\$\(/.test(command)
@@ -195,8 +221,10 @@ export function routePlaygroundTool({state,tool,params,root,session,intent,exist
       if (!inspection) return {block:true,blockReason:`Create the first project file with write in a descriptive Playground folder before running commands or patches. ${CORRECTION}`};
     }
     if (!state.binding && state.fresh && selected.tool === 'write') {
+      spelled = playgroundSpelling(args[key],root,minimum);
+      if (spelled) target = spelled;
       if (!target) return {block:true,blockReason:CORRECTION};
-      if (existingPaths.includes(target)) { preserve(); return undefined; }
+      if (existingPaths.includes(target)) { preserve(); return spelled ? {params:selected.wrap({...args,[key]:spelled})} : undefined; }
       const segments = parts(target);
       const candidate = segments[0] === 'Playground' ? segments[1] : segments[0];
       if (segments.length < (segments[0] === 'Playground' ? 3 : 2) || !candidate || GENERIC.test(candidate)) return {block:true,blockReason:CORRECTION};
@@ -225,13 +253,18 @@ export function routePlaygroundTool({state,tool,params,root,session,intent,exist
       let count = 0, invalid = false;
       const input = args.input.replace(/^(\*\*\* (?:(?:Add|Update|Delete) File|Move to): )([^\r\n]+)$/gm,(_line,prefix,value)=>{
         count++;
-        const mapped = projectPath(relative(value,root),true);
+        const spelledValue = playgroundSpelling(value,root,3);
+        const mapped = projectPath(spelledValue && projectPath(spelledValue) ? spelledValue : relative(value,root),true);
         if (!mapped) {invalid=true;return _line;}
         return prefix+mapped;
       });
       if (!count || invalid) return {block:true,blockReason:`Use exact safe file paths inside ${directory} for this project patch.`};
       return input === args.input ? undefined : {params:selected.wrap({...args,input})};
     }
+    // A Playground misspelling of this bound project routes like its canonical
+    // path. Any other spelled name keeps the ordinary routing below.
+    spelled ??= playgroundSpelling(args[key],root,minimum);
+    if (spelled && projectPath(spelled)) target = spelled;
     let mapped = projectPath(target,['write','edit'].includes(selected.tool));
     // Keep unrelated reads/edits and explicitly located execs untouched. For
     // an unspecified exec cwd, use the project only when the command does not
