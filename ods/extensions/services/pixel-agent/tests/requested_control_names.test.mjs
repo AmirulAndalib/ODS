@@ -225,13 +225,22 @@ test('the inspection tool explains an exact-name miss with the load-time names',
   assert.doesNotMatch(text, /a hidden element is not matched|Do not change the site only to satisfy a locator/);
   assert.equal(JSON.parse(text.slice(text.indexOf(' Evidence: ') + 11)).controls, undefined, 'the evidence copy omits the list');
   assert.deepEqual(result.details.controls, TOWER2.controls.tower2);
-  // An older capsule (no names), or a page whose button is named right,
-  // keeps the recorded locator feedback.
-  for (const controls of [undefined, TOWER2.controls.correct]) {
-    const older = inspection(ROLE_CALL, controls);
-    const recorded = (await createWorkspacePreviewInspectTool({request: async () => older.receipt}).execute('old', older.params)).content[0].text;
-    assert.match(recorded, /For click, role\/name locators match only rendered elements, so a hidden element is not matched\./);
-  }
+  // An older capsule (no names) keeps the recorded locator feedback.
+  const older = inspection(ROLE_CALL);
+  const recorded = (await createWorkspacePreviewInspectTool({request: async () => older.receipt}).execute('old', older.params)).content[0].text;
+  assert.match(recorded, /For click, role\/name locators match only rendered elements, so a hidden element is not matched\./);
+  // A page whose rendered button is named right at load (the aria-hidden icon
+  // variant: Chromium's own name keeps the icon's space): the name is not
+  // missing, and the step needs a CSS locator, never a site change.
+  const named = inspection(ROLE_CALL, TOWER2.controls['aria-hidden-icon']);
+  const present = (await createWorkspacePreviewInspectTool({request: async () => named.receipt}).execute('named', named.params)).content[0].text;
+  assert.ok(present.startsWith('Preview inspection failed. Step 2 (click) matched no element, so nothing was measured and later ' +
+    'steps did not run. At load, after the page scripts ran, a rendered button was named exactly "Show sold out", so that name ' +
+    'is on the page; this inspector\'s role/name matching compares the browser\'s own name verbatim, which can keep extra ' +
+    'spacing (for example beside an aria-hidden icon). Address that button with a CSS selector such as its id in this step, ' +
+    'keep the other steps unchanged, and retry the inspection on the same published snapshot. Do not change the site only ' +
+    'to satisfy a locator.'), present);
+  assert.doesNotMatch(present, /hidden element is not matched|the page does not meet it/);
   // Letter case only.
   const cased = inspection(ROLE_CALL, {count: 1, items: [{role: 'button', name: 'Show Sold Out', visible: true, source: 'content'}]});
   assert.match((await createWorkspacePreviewInspectTool({request: async () => cased.receipt}).execute('case', cased.params)).content[0].text,

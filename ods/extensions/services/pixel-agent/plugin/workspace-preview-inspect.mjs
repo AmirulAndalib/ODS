@@ -55,13 +55,27 @@ function nameDiagnosis(locator, controls) {
   const cased = same.find(item => item.name !== want && item.name.toLowerCase() === want.toLowerCase());
   return cased ? ` At load, a ${locator.role} is named ${JSON.stringify(cased.name)}; accessible names match case-sensitively.` : '';
 }
+// A rendered control whose load-time name is exactly this locator's name,
+// while no rendered element matched it before any click could change the page.
+// Load-time names follow getByRole; role/name steps match Chromium's own name
+// verbatim, which keeps the space beside an aria-hidden icon (" Show sold out",
+// test_preview_inspection.py). Such a page is correct: an untested show/hide
+// change prescribes the owner's exact name as the click, and that step cannot
+// match here.
+function presentName(step, controls, clickedBefore) {
+  if (!controls || clickedBefore || step.action === 'assert-hidden' || !CONTROL_ROLES.includes(step.locator.role)) return undefined;
+  const want = collapse(step.locator.name);
+  return controls.items.some(item => item.role === step.locator.role && item.visible && item.name === want) ? want : undefined;
+}
 // A locator that matched no element, or several, produced no measurement. Say
 // which, and how to fix the locator; never suggest changing the site for it,
 // unless the page's own control names show the requested name is not there.
-function locatorFeedback(step, controls) {
+function locatorFeedback(step, controls, clickedBefore = false) {
   const at = `Step ${step.index + 1} (${step.action})`, count = step.before.count;
   const retry = 'retry the inspection on the same published snapshot. Do not change the site only to satisfy a locator. Requested behavior remains unverified.';
   if (count !== 0) return `${at} matched ${count} elements; a locator must match exactly one, so nothing was measured and later steps did not run. Use a more specific CSS selector such as an id, or a unique exact name, and ${retry}`;
+  const present = presentName(step, controls, clickedBefore);
+  if (present !== undefined) return `${at} matched no element, so nothing was measured and later steps did not run. At load, after the page scripts ran, a rendered ${step.locator.role} was named exactly ${JSON.stringify(present)}, so that name is on the page; this inspector's role/name matching compares the browser's own name verbatim, which can keep extra spacing (for example beside an aria-hidden icon). Address that ${step.locator.role} with a CSS selector such as its id in this step, keep the other steps unchanged, and ${retry}`;
   const diagnosis = step.locator.role !== undefined && step.action !== 'assert-hidden' ? nameDiagnosis(step.locator, controls) : '';
   if (diagnosis) return `${at} matched no element, so nothing was measured and later steps did not run.${diagnosis} If the owner required that exact name, the page does not meet it: correct the markup or script so the control's accessible name is exactly ${JSON.stringify(step.locator.name)}, republish, and inspect the new snapshot. Otherwise use the actual accessible name or a CSS selector such as an id, and retry the inspection on the same published snapshot. Requested behavior remains unverified.`;
   const semantic = step.locator.role !== undefined;
@@ -73,7 +87,8 @@ function locatorFeedback(step, controls) {
 }
 function transitionCoverageFeedback(request, result) {
   const unmatched = result.steps?.find(step => step.errorCode === 'no_match' || step.errorCode === 'selector_not_unique');
-  if (unmatched) return locatorFeedback(unmatched, inspectionControls(result));
+  if (unmatched) return locatorFeedback(unmatched, inspectionControls(result),
+    result.steps.some(step => step.index < unmatched.index && step.action === 'click'));
   const syntaxFailure = result.steps?.find(step => step.errorCode === 'invalid_selector');
   if (syntaxFailure) return `Step ${syntaxFailure.index + 1} has invalid CSS selector syntax; that step produced no visibility measurement and later steps were not executed. Use a standard CSS selector from the actual source, or a supported role with the exact accessible name and exact:true. Text-matching extensions such as :contains() are not CSS selectors. Correct the locator and retry the inspection on the same published snapshot; do not remove the requested behavior checks. For show/hide behavior, keep assertions of opposite visibility for the same affected element around the control click. Requested behavior remains unverified.`;
   if (result.status !== 'passed') return 'Requested behavior remains unverified; a failed inspection does not establish a visibility transition.';
@@ -232,6 +247,17 @@ export function validateWorkspacePreviewInspectionReceipt(value, request) {
   const passed=value.steps.length===request.steps.length&&value.steps.every(s=>s.status==='passed')&&value.blockedRequests.length===0;
   if((value.status==='passed')!==passed) throw Error('invalid inspection outcome');
   return value;
+}
+// The capsule receipt inside an incomplete result (TRANSITION_UNTESTED): the
+// passed receipt this tool validated before withholding "passed", bound to
+// the same snapshot and plan as the wrapper. Callers read only its load-time
+// observations (control names); it never binds interaction proof.
+export function validateIncompleteInspectionReceipt(value, request) {
+  if(!exact(value,['schemaVersion','kind','status','errorCode','siteId','sha256','planSha256','scope','receipt'])||value.schemaVersion!==1||
+    value.kind!==INSPECTION_KIND||value.status!=='incomplete'||value.errorCode!==TRANSITION_UNTESTED||value.scope!==INSPECTION_SCOPE) throw Error('invalid incomplete inspection');
+  const receipt=validateWorkspacePreviewInspectionReceipt(value.receipt,request);
+  if(receipt.status!=='passed'||receipt.siteId!==value.siteId||receipt.sha256!==value.sha256||receipt.planSha256!==value.planSha256) throw Error('invalid incomplete inspection');
+  return receipt;
 }
 function unixRequest(payload,{signal}={}) {
   return new Promise((resolve,reject)=>{

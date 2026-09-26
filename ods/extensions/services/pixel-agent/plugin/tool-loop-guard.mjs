@@ -9844,10 +9844,14 @@ export function createToolLoopGuard({
         // Selects the repair instruction only; bound to this exact snapshot.
         state.workspaceInspectionPageErrors = !event?.error
           ? boundInspectionPageErrors(inspected.params, inspected.result, state.workspacePreview) : undefined;
-        // Load-time names precede every step, so a failed step keeps them. A
-        // receipt without them (older capsule, transport failure) changes no
-        // verdict, but this snapshot is not sent back for another inspection.
-        const controls = !event?.error && state.requestedControlNames?.length
+        // Load-time names precede every step, so a failed step or an untested
+        // show/hide change (incomplete) keeps them. A receipt without them
+        // (older capsule, transport failure) changes no verdict, but this
+        // snapshot is not sent back for another inspection. Not gated on
+        // event.error: OpenClaw 2026.6.33 sets it for every error result of a
+        // direct call (tower2's transport), which failed and incomplete
+        // inspections are; a thrown call has no receipt to bind.
+        const controls = state.requestedControlNames?.length
           ? boundInspectionControls(inspected.params, inspected.result, state.workspacePreview) : undefined;
         if (controls) {
           state.workspaceControlNamesInspected = controls.sha256;

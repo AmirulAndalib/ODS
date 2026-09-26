@@ -244,7 +244,11 @@ fleet's default `getByRole(role, {name, exact: true})` names it, so hidden
 descendants (an `aria-hidden` icon or chevron, a hidden alternate label, a
 `display: none` badge) never turn a correct name into a missing one; a hidden
 control keeps its hidden-inclusive name. The latest receipt bound to the current
-snapshot decides, whether its steps passed or failed; "named exactly" compares
+snapshot decides, whether its steps passed or failed or it came back incomplete
+for an untested show/hide change (its `details.receipt`, below). That holds
+whatever `error` the harness attaches to the `after_tool_call` event: OpenClaw
+2026.6.33 sets one on every error result of a direct call (tower2's transport),
+and a thrown call has no receipt to bind. "Named exactly" compares
 case-sensitively after whitespace and typographic normalization, "named"
 without "exactly" ignores case. A name counts as missing only when the receipt
 lists every button and link of the page. A snapshot without such a receipt
@@ -267,7 +271,14 @@ page loads (["script.js"]), which replaces its text as the accessible name.
 Remove that override or make it exactly "Show sold out", republish, then
 inspect the new snapshot." The inspection tool's own locator feedback for an
 exact-name miss says the same from the receipt, instead of blaming hidden
-elements. When no inspection covered the snapshot and no show/hide check
+elements. When a rendered control of that role was named exactly the locator's
+name at load and no click ran before the step, the feedback says the name is
+on the page and asks for a CSS locator for that step: role/name steps match
+Chromium's own name verbatim, which keeps the space beside an `aria-hidden`
+icon (`" Show sold out"`), while load-time names follow `getByRole`. An
+untested show/hide change prescribes the owner's exact name as the click when
+the plan had none, so a correct icon page would otherwise be sent back to the
+same unmatchable name. When no inspection covered the snapshot and no show/hide check
 already asks for one, the next step asks for an inspection by that exact role
 and name. Finalization requests one bounded revision
 (`pixel-ods-workspace-preview-control-name`), and delivery stays `failed` with
@@ -337,6 +348,16 @@ run, failed receipts (returned byte for byte), page errors, and requests
 without show/hide behavior. Incomplete is never interaction evidence. A Tool
 Search child inspection also keeps its parent's earlier proof, so a later
 read-only check still preserves it.
+
+The fleet prompt asks for a show/hide change and an exactly named button at
+once. The load-time control names of an incomplete result's receipt still
+count (see "Owner-requested control names"), so on the round 100 snapshot the
+same result carries the corrected steps and then the name repair, and delivery
+stays `failed` for the name. `tests/control_names_transition.test.mjs` replays
+that combination with the round 100 bytes, the repaired page and its four
+hidden-decoration variants, on direct calls (harness `error` set) and through
+Tool Search: correct pages are never sent a name repair and are certified by
+the corrected steps.
 
 `tests/inspection_transition_coverage.test.mjs` replays both runs' create and
 update turns, with the recorded bytes, receipts and refusals. It sends the
