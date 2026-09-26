@@ -190,7 +190,15 @@ ROLE_NAME_RULES = r"""  const VALID = new Set(('alert alertdialog application ar
     const box = range.getBoundingClientRect();
     return box.width > 0 && box.height > 0;
   };
+  // One result per element per call, like Playwright's cacheIsHidden: the name
+  // walk asks again for every descendant, and a display:contents chain would
+  // otherwise be re-walked from each of its levels (quadratic in its depth).
+  const hiddenCache = new Map();
   const hiddenForAria = e => {
+    if (!hiddenCache.has(e)) hiddenCache.set(e, hiddenUncached(e));
+    return hiddenCache.get(e);
+  };
+  const hiddenUncached = e => {
     const t = tag(e), s = style(e);
     if (IGNORED.has(t)) return true;
     if (s && s.display === 'contents' && t !== 'slot') {
@@ -208,7 +216,28 @@ ROLE_NAME_RULES = r"""  const VALID = new Set(('alert alertdialog application ar
   // nothing unless it is reached through an aria-labelledby or <label>
   // reference that is itself hidden (`o.hiddenReference`).
   const reference = (o, e) => o.rendered ? {rendered: true, hiddenReference: hiddenForAria(e)} : {};
-  const labels = e => { try { return [...(e.labels || [])]; } catch { return []; } };
+  // The labels whose control is e, in tree order: what e.labels returns. A
+  // label and its control share a tree, so each tree's labels are indexed once
+  // per call; e.labels itself scans the whole tree on each element's first
+  // read, which made a page of many buttons cost buttons x elements.
+  const labelIndex = new Map();
+  const labels = e => {
+    try {
+      const root = e.getRootNode();
+      let index = labelIndex.get(root);
+      if (!index) {
+        index = new Map();
+        for (const label of root.querySelectorAll('label')) {
+          const control = label.control;
+          if (!control) continue;
+          if (!index.has(control)) index.set(control, []);
+          index.get(control).push(label);
+        }
+        labelIndex.set(root, index);
+      }
+      return index.get(e) || [];
+    } catch { return []; }
+  };
   const fromLabels = (list, o) => list.map(label =>
     alternative(label, {visited: o.visited, label: true, ...reference(o, label)})).filter(Boolean).join(' ');
   const inner = (e, o) => {

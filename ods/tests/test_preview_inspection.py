@@ -1466,6 +1466,8 @@ class BrowserTests(unittest.TestCase):
             '<input type=radio aria-labelledby="lbl2" hidden><span id=lbl2 hidden>Seat <b>A</b></span>'
             '<div role="button" hidden><img alt="Star"> Favourite</div>'
             '<h5 hidden title="Tooltip heading"></h5><template><h2>Template</h2></template>'
+            '<label for=g2>Party</label><input id=g2 type=text hidden><label for=g2>size</label>'
+            '<label for=bt2>Hidden table</label><button id=bt2 hidden></button>'
         )
         queries = [
             ("heading", "Dawn Jazz"), ("heading", "Midnight Sold-Out Concert"), ("heading", "Late Show"),
@@ -1478,7 +1480,8 @@ class BrowserTests(unittest.TestCase):
             ("combobox", "City Bergen"), ("combobox", "City"), ("heading", "Tonight only"),
             ("heading", "Tonight"), ("radio", "Seat A"), ("button", "Star Favourite"),
             ("heading", "Tooltip heading"), ("heading", "Template"), ("heading", "midnight sold-out concert"),
-            ("heading", "Midnight  Sold-Out   Concert"),
+            ("heading", "Midnight  Sold-Out   Concert"), ("textbox", "Party size"), ("textbox", "Party"),
+            ("button", "Hidden table"),
         ]
         with sync_playwright() as p:
             browser = p.chromium.launch(headless=True, args=["--no-sandbox", "--disable-dev-shm-usage"])
@@ -1619,10 +1622,18 @@ class BrowserTests(unittest.TestCase):
             '<details><summary>More</summary><button>Inside closed details</button></details>'
             '<h3 class="up arrow">Late show</h3><button class=up>Duplicate</button><button>Duplicate</button><button></button>'
             '<div id=host><button>Slotted</button></div><div id=bare><button>Unslotted</button></div>'
+            # Labels: several for one control in tree order, wrapping, a
+            # button's label, a label whose target is not labelable, and one
+            # tree's label never naming another tree's control.
+            '<label for=g1>Guests</label><input id=g1 type=text><label for=g1>count</label>'
+            '<label>Seat <input type=checkbox></label><label for=bt>Book table</label><button id=bt></button>'
+            '<label for=nd>Not labelable</label><div id=nd role=button>Div button</div>'
+            '<label for=sf>Outside label</label><div id=lhost></div>'
             '<script>const root=document.getElementById("host").attachShadow({mode:"open"});'
             'root.append(Object.assign(document.createElement("button"),{textContent:"Shadow button"}),'
             'document.createElement("slot"));document.getElementById("bare").attachShadow({mode:"open"})'
-            '.append(document.createElement("p"));</script>'
+            '.append(document.createElement("p"));document.getElementById("lhost").attachShadow({mode:"open"})'
+            '.innerHTML="<label for=sf>Shadow field</label><input id=sf>";</script>'
         )
         queries = [
             ("button", "Show sold out"), ("button", "SHOW SOLD OUT"), ("heading", "river lantern walk"),
@@ -1639,7 +1650,12 @@ class BrowserTests(unittest.TestCase):
             # Only the rendered empty button: a hidden element is never matched,
             # even though its rendered-only name is empty.
             ("button", " "),
+            ("textbox", "Guests count"), ("textbox", "Guests"), ("checkbox", "Seat"), ("button", "Book table"),
+            ("button", "Not labelable"), ("button", "Div button"), ("textbox", "Shadow field"),
+            ("textbox", "Outside label"),
         ]
+        labelled = {("textbox", "Guests count"), ("checkbox", "Seat"), ("button", "Book table"),
+                    ("button", "Div button"), ("textbox", "Shadow field")}
         with sync_playwright() as p:
             browser = p.chromium.launch(headless=True, args=["--no-sandbox", "--disable-dev-shm-usage"])
             try:
@@ -1651,6 +1667,8 @@ class BrowserTests(unittest.TestCase):
                 disagreements, matched = [], 0
                 for role, name in queries:
                     expected = page.get_by_role(role, name=name, exact=True).count()
+                    if (role, name) in labelled:
+                        self.assertEqual(expected, 1, (role, name))
                     result = cdp.send("Runtime.callFunctionOn", {
                         "executionContextId": world["executionContextId"],
                         "functionDeclaration": capsule.ROLE_NAME_RENDERED,
@@ -1665,6 +1683,69 @@ class BrowserTests(unittest.TestCase):
                         disagreements.append((role, name, expected, actual))
                 self.assertEqual(disagreements, [])
                 self.assertGreaterEqual(matched, 18, "fixture must exercise real matches")
+            finally:
+                browser.close()
+
+    def test_role_name_matchers_do_linear_work(self):
+        # Every role/name assert-visible and click runs a matcher per stability
+        # sample. Two paths were superlinear: the name walk re-decided a
+        # display:contents chain from each of its levels (depth squared style
+        # reads), and each button's element.labels made Chromium scan the whole
+        # tree (buttons x elements). Count the reads in the matcher's world.
+        from playwright.sync_api import sync_playwright
+
+        depth, buttons = 200, 300
+        html = ("<style>.c{display:contents}</style><button>" + "<span class=c>" * depth + "Deep" +
+                "</span>" * depth + "</button>" + "".join("<button>Book %d</button>" % i for i in range(buttons)) +
+                "<label for=a>Guests</label><input id=a><label>Seat <input type=checkbox></label>"
+                "<label for=b>Book table</label><button id=b></button>")
+        count_reads = """(() => {
+          const counts = window.__reads = {styles: 0, labels: 0};
+          const style = window.getComputedStyle;
+          window.getComputedStyle = function(...args) { counts.styles++; return style.apply(this, args); };
+          const wrap = (proto, key) => {
+            const get = Object.getOwnPropertyDescriptor(proto, key).get;
+            Object.defineProperty(proto, key, {configurable: true, get() { counts.labels++; return get.call(this); }});
+          };
+          for (const proto of [HTMLButtonElement.prototype, HTMLInputElement.prototype,
+                               HTMLSelectElement.prototype, HTMLTextAreaElement.prototype]) wrap(proto, 'labels');
+          wrap(HTMLLabelElement.prototype, 'control');
+        })()"""
+        with sync_playwright() as p:
+            browser = p.chromium.launch(headless=True, args=["--no-sandbox", "--disable-dev-shm-usage"])
+            try:
+                page = browser.new_page()
+                page.set_content("<!doctype html>" + html)
+                cdp = page.context.new_cdp_session(page)
+                frame = cdp.send("Page.getFrameTree")["frameTree"]["frame"]["id"]
+                world = cdp.send("Page.createIsolatedWorld", {"frameId": frame, "worldName": "cost"})["executionContextId"]
+
+                def evaluate(expression):
+                    result = cdp.send("Runtime.evaluate", {"expression": expression, "contextId": world, "returnByValue": True})
+                    self.assertNotIn("exceptionDetails", result, result)
+                    return result["result"].get("value")
+
+                evaluate(count_reads)
+                elements = evaluate("document.querySelectorAll('*').length")
+                for matcher in (capsule.ROLE_NAME_RENDERED, capsule.ROLE_NAME_INCLUDING_HIDDEN):
+                    for role, name in (("button", "Deep"), ("button", "Book 7"), ("textbox", "Guests"),
+                                       ("checkbox", "Seat"), ("button", "Book table")):
+                        with self.subTest(rendered=matcher is capsule.ROLE_NAME_RENDERED, name=name):
+                            evaluate("window.__reads.styles = 0, window.__reads.labels = 0")
+                            result = cdp.send("Runtime.callFunctionOn", {
+                                "executionContextId": world, "functionDeclaration": matcher,
+                                "arguments": [{"value": role}, {"value": name}], "returnByValue": False})
+                            self.assertNotIn("exceptionDetails", result, result)
+                            found = cdp.send("Runtime.callFunctionOn", {
+                                "objectId": result["result"]["objectId"],
+                                "functionDeclaration": "function(){return this.length}", "returnByValue": True,
+                            })["result"]["value"]
+                            self.assertEqual(found, 1)
+                            reads = evaluate("window.__reads")
+                            # Each label's control is resolved at most once per call.
+                            self.assertLessEqual(reads["labels"], 3, reads)
+                            # A few style reads per element; depth squared is 40000.
+                            self.assertLessEqual(reads["styles"], 8 * elements, (elements, reads))
             finally:
                 browser.close()
 
