@@ -20,13 +20,14 @@ function capsuleScripts() {
 
 test('every capsule isolated-world script compiles', () => {
   const scripts = capsuleScripts();
-  for (const name of ['OBSERVE_ELEMENT', 'DIAGNOSTIC', 'SELECTOR_COUNT', 'ROLE_NAME_INCLUDING_HIDDEN', 'ROLE_NAME_RENDERED'])
+  for (const name of ['OBSERVE_ELEMENT', 'DIAGNOSTIC', 'SELECTOR_COUNT', 'ROLE_NAME_INCLUDING_HIDDEN', 'ROLE_NAME_RENDERED',
+    'CONTROL_NAMES'])
     assert.ok(name in scripts, name);
   for (const [name, source] of Object.entries(scripts))
     assert.doesNotThrow(() => new vm.Script(`(${source})`, {filename: name}), name);
 });
 
-test('both role/name matchers run and keep the passed Chromium matches, de-duplicated by identity', () => {
+test('the scripts sharing the name rules run; both role/name matchers keep the passed Chromium matches, de-duplicated by identity', () => {
   const scripts = capsuleScripts();
   const first = {}, second = {};
   for (const name of ['ROLE_NAME_INCLUDING_HIDDEN', 'ROLE_NAME_RENDERED']) {
@@ -36,4 +37,6 @@ test('both role/name matchers run and keep the passed Chromium matches, de-dupli
     assert.equal(matches.length, 2, name);
     assert.ok(matches[0] === first && matches[1] === second, name);
   }
+  const controls = new vm.Script(`(${scripts.CONTROL_NAMES})`).runInContext(vm.createContext({document: {querySelectorAll: () => []}}));
+  assert.deepEqual(JSON.parse(JSON.stringify(controls(48))), {count: 0, items: []});
 });
