@@ -2064,19 +2064,18 @@ class BrowserTests(unittest.TestCase):
         repaired = self.check(None, role, tower2_r100_files(repaired=True))
         self.assertEqual(repaired["status"], "passed", repaired)
         # On the variants the load-time names are the exact requested name,
-        # and the same exact-name click passes. The icon variant is the
-        # exception for the click only: Chromium's own accessibility tree keeps
-        # the space after the aria-hidden icon (" Show sold out") and role/name
-        # steps match Chromium's name verbatim, while getByRole normalizes
-        # whitespace and finds the button. Recorded so a change is noticed.
+        # and the same exact-name click passes. That includes the icon variant:
+        # Chromium's own accessibility tree keeps the space after the
+        # aria-hidden icon (" Show sold out"), but role/name steps also match
+        # Playwright's getByRole name, which normalizes whitespace, as the
+        # load-time names do. (The recorded plugin replay keeps the older
+        # capsule's no_match for that variant.)
         for variant in CONTROL_REPLAY["variants"]["markup"]:
             with self.subTest(role_plan=variant):
                 result = self.check(None, role, tower2_r100_files(variant=variant))
                 self.assertEqual(result["controls"], CONTROL_REPLAY["controls"][variant])
-                if variant == "aria-hidden-icon":
-                    self.assertEqual(result["steps"][1]["errorCode"], "no_match", result)
-                else:
-                    self.assertEqual(result["status"], "passed", result)
+                self.assertEqual(result["status"], "passed", result)
+                self.assertEqual(result["steps"][1]["before"]["count"], 1, result)
 
     def test_load_time_names_are_after_scripts_before_steps_and_include_hidden(self):
         html = ('<a href="#top">Top</a><a>Not a link</a><div role="button" aria-labelledby="l">x</div>'
